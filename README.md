@@ -1,61 +1,95 @@
 # ChatGPT Multi Account
 
-ChatGPT Multi Account builds an independent macOS copy of the ChatGPT desktop
-app that can use several ChatGPT subscriptions at once. New chats are balanced
-across subscriptions, while each existing chat remains pinned to one account
-to preserve conversation context and account-level caching.
+Use multiple ChatGPT subscriptions from one independent macOS desktop app.
 
-The official `/Applications/ChatGPT.app` is used as build input and is never
-modified. This repository contains patching source only; it does not contain or
-redistribute OpenAI application binaries.
+ChatGPT Multi Account creates a locally patched copy of the official ChatGPT
+app, balances new chats across connected subscriptions, and keeps every thread
+on one subscription so follow-up turns retain conversation context and benefit
+from account-level caching.
+
+The official ChatGPT installation is used only as build input and is never
+modified. This repository contains source code and build tooling—not OpenAI
+binaries or a prebuilt application.
 
 > [!WARNING]
 > This is an unofficial, version-sensitive project. It is not affiliated with
-> or supported by OpenAI. Review the source, build locally, and make sure your
-> use complies with the terms governing each connected subscription.
+> or supported by OpenAI. Review the source and ensure your use complies with
+> the terms governing every connected subscription.
 
-![Combined profile statistics](screenshots/combined-profile-20px.png)
+![Combined multi-account profile](screenshots/combined-profile-20px.png)
 
-## What it does
+## Highlights
 
-- Treats the existing `~/.codex` sign-in as the Primary subscription.
-- Stores each additional sign-in in an isolated, owner-only Codex home.
-- Routes new chats to the enabled subscription with the most available quota.
-- Persists a thread-to-account assignment so follow-up turns reuse one account.
-- Fails an exhausted thread over only when another subscription has capacity.
-- Merges chat history and profile statistics across connected accounts.
-- Shows pooled usage, account photos, plan names, and masked email addresses in
-  the native profile menu.
-- Provides account-aware Plugins, Apps, and MCP connection state.
-- Keeps Appshots and Computer Use working through a separately signed helper.
+- **Quota-aware routing.** New chats are assigned to an enabled subscription
+  with available capacity so weekly allowances drain at similar rates.
+- **Sticky conversations.** Once a thread is assigned, every follow-up returns
+  to the same subscription unless that subscription is depleted.
+- **Automatic failover.** A depleted thread continues through another account
+  with quota; if the whole pool is empty, the app shows one combined alert.
+- **Native account management.** The existing profile menu shows pooled usage,
+  profile photos, plan names, masked emails, and device-code sign-in.
+- **Account-aware settings.** Profile statistics can be viewed together or per
+  subscription, while the Plugins page can switch Apps and MCP connections
+  between accounts.
+- **Per-account resets.** The native rate-limit sheet shows and consumes resets
+  for the selected subscription.
+- **Working macOS integrations.** The copied Appshots and Computer Use helper is
+  independently identified and signed so it can receive its own privacy grants.
+
+## How it works
+
+The patched desktop still opens one app-server connection. A small Go
+multiplexer fans that connection out to one official Codex child per account.
+Each child has an isolated Codex home, while the multiplexer records the owner
+of every thread.
 
 ```text
 ChatGPT Multi.app
+        │
         │ one app-server connection
         ▼
-   codex-mux
-   ├── Primary  ── ~/.codex
-   ├── Account 2 ─ ~/.codex-mux/accounts/…/codex-home
-   └── Account 3 ─ ~/.codex-mux/accounts/…/codex-home
-        │
-        └── thread ID → sticky account owner
+    codex-mux
+    ├── Primary       → ~/.codex
+    ├── Subscription 2 → isolated Codex home
+    └── Subscription 3 → isolated Codex home
+             │
+             └── thread ID → persistent account owner
 ```
 
-See [Architecture](docs/ARCHITECTURE.md) and the
-[Security model](docs/SECURITY-MODEL.md) for implementation details.
+New-thread routing considers remaining quota, recent usage, pinned-thread
+count, and stable account order. Existing threads do not migrate merely for
+load balancing.
+
+Read [the architecture](docs/ARCHITECTURE.md) for the request flow and
+[the security model](docs/SECURITY-MODEL.md) for trust boundaries.
+
+## Compatibility
+
+ChatGPT Multi Account currently targets:
+
+| Component | Supported value |
+| --- | --- |
+| Platform | macOS on Apple silicon |
+| Official ChatGPT version | `26.803.61601` |
+| Official bundle build | `6396` |
+| Go | 1.26 or newer |
+| Node.js | 22.12 or newer |
+
+The patcher verifies the official version, build, ASAR hash, renderer anchors,
+and native binary constants before changing anything. An unknown upstream build
+is rejected by default rather than being partially patched. See
+[Compatibility](docs/COMPATIBILITY.md) for the recorded hash and test details.
 
 ## Requirements
 
-- macOS on Apple silicon
-- The official ChatGPT app at `/Applications/ChatGPT.app`
-- Go 1.26 or newer
-- Node.js 22.12 or newer with npm
+- The official ChatGPT app installed at `/Applications/ChatGPT.app`
 - Xcode Command Line Tools
-- A valid Apple Development or Developer ID Application signing identity
+- Go 1.26+
+- Node.js 22.12+ and npm
+- An Apple Development or Developer ID Application signing identity
 
-The last tested upstream build is recorded in
-[Compatibility](docs/COMPATIBILITY.md). The patcher deliberately stops when an
-expected upstream bundle anchor has changed.
+A team-backed signing identity is required for reliable Appshots and Computer
+Use permissions. Ad-hoc signing is intended only for diagnostics.
 
 ## Build and install
 
@@ -67,100 +101,134 @@ python3 scripts/patch_app.py
 open "$HOME/Applications/ChatGPT Multi.app"
 ```
 
-The patcher selects the first valid Developer ID Application identity, falling
-back to an Apple Development identity. To select one explicitly:
+This creates:
+
+- `~/Applications/ChatGPT Multi.app`
+- `~/Applications/ChatGPT Multi Computer Use.app`
+- an independent desktop profile under
+  `~/Library/Application Support/ChatGPT Multi`
+
+The first valid Developer ID Application identity is selected, falling back to
+an Apple Development identity. Select a certificate explicitly when needed:
 
 ```sh
 CODEX_MUX_SIGNING_IDENTITY="Developer ID Application: Example Corp (TEAMID1234)" \
   python3 scripts/patch_app.py
 ```
 
-Ad-hoc signing is available only for diagnostics:
+Reuse the same Apple team for every rebuild. Changing teams changes the app's
+designated requirement and can invalidate existing macOS privacy consent. The
+patcher refuses an unexpected team change unless you deliberately pass
+`--allow-signing-team-change`.
+
+For diagnostic builds without a certificate:
 
 ```sh
 python3 scripts/patch_app.py --allow-adhoc-signing
 ```
 
-Appshots and Computer Use may not work with an ad-hoc signature.
+Appshots and Computer Use may not function with an ad-hoc signature.
 
-Reuse the same Apple signing team for every rebuild. Changing the team changes
-the helper's designated requirement and can invalidate existing macOS privacy
-consent. The patcher refuses an unexpected team change unless
-`--allow-signing-team-change` is passed explicitly.
+## Grant macOS permissions
 
-Build separately for each macOS user. The generated desktop embeds that user's
-helper and socket paths and is not intended to be moved between home
-directories or redistributed.
+Open **System Settings → Privacy & Security** and grant:
 
-## Using multiple subscriptions
+| Permission | Application |
+| --- | --- |
+| Accessibility | ChatGPT Multi |
+| Screen & System Audio Recording | ChatGPT Multi Computer Use |
 
-Open the profile menu at the bottom of the sidebar and choose **Add another
-subscription**. Complete the displayed device-code sign-in yourself. While a
-code is visible, clicking away keeps the menu open; selecting the code copies
-it and opens the verification page.
+When macOS offers **Quit & Reopen**, use it. If the app does not relaunch,
+reopen ChatGPT Multi manually. If the Computer Use row does not appear, press
+the plus button and choose `~/Applications/ChatGPT Multi Computer Use.app`.
 
-The menu then shows:
+Do not select the official ChatGPT or Codex Computer Use helper for this build;
+the independent app has its own identity and permission rows. macOS may also
+request Automation access the first time Computer Use controls another app.
 
-1. Combined weekly usage remaining.
-2. One row per connected subscription, including its photo, plan, and usage.
-3. Masked email addresses that reveal only while hovered.
-4. A final row for adding another subscription.
+## Add subscriptions
 
-Settings → Plugins includes an account picker. Local plugin definitions are
-shared, while Apps, MCP connection state, and MCP OAuth login use the selected
-subscription.
+1. Open the profile menu at the bottom of the sidebar.
+2. Select **Add another subscription**.
+3. Complete the displayed device-code sign-in in your browser.
+4. Return to ChatGPT Multi and wait for the account row to appear.
 
-Profile totals are aggregated from the counters each subscription exposes.
-Because the profile API returns only a per-account unique-skill count, the same
-skill explored on two subscriptions can be counted twice in the combined view.
+While the code is visible, clicking away does not dismiss the menu. Clicking
+the code copies it and opens the verification page.
+
+The profile menu displays combined weekly usage followed by one row per
+subscription. Email addresses remain masked until hovered. The final row always
+starts another sign-in.
+
+## Routing behavior
+
+| Situation | Behaviour |
+| --- | --- |
+| New chat | Assigned to an enabled account with available quota |
+| Follow-up | Sent to the thread's persisted account owner |
+| Owner depleted | Continued through another account with capacity |
+| Every account depleted | Combined quota alert with the next known reset |
+| Account disabled | Excluded from routing and pooled usable quota |
+
+The subscription assigned to the current thread appears in its pinned summary.
+
+## Profiles, plugins, and resets
+
+**Profile statistics** begin in a combined view with overlapping account
+photos. Select a photo to see only that subscription's identity and statistics;
+select it again to return to the combined view.
+
+**Settings → Plugins** includes a subscription picker. Plugin definitions and
+managed MCP configuration are shared, while Apps, connection status, and OAuth
+login are scoped to the selected subscription.
+
+**Rate-limit resets** remain native to the app, with an account picker added to
+the sheet. Selecting a subscription changes the displayed balance and ensures
+the reset is consumed only for that account.
 
 ![Account-scoped plugin connections](screenshots/plugin-account-picker-secondary-final.png)
 
-## Updating
+## Update or rebuild
 
-ChatGPT Multi disables the copied app's updater so an official update cannot
-replace patched files. Update the official ChatGPT app first, check the
-compatibility notes, and rebuild:
+The copied app's updater is disabled so an official update cannot overwrite the
+patch. Update `/Applications/ChatGPT.app`, verify that the new build is listed
+as compatible, then rebuild:
 
 ```sh
 python3 scripts/patch_app.py --force
 ```
 
-The previous app and Computer Use helper are moved to timestamped backup
-directories under `~/.codex-mux/backups`. Quit ChatGPT Multi and its Computer
-Use helper before rebuilding. Account state and credentials live outside the
-app bundle and are preserved. Old backups can be deleted manually after the new
-build has passed the signed-app smoke test.
+Quit ChatGPT Multi and its Computer Use helper first. Existing destinations are
+moved to timestamped directories under `~/.codex-mux/backups`; account state and
+credentials are stored outside the app bundle and remain intact. Delete old
+backups manually after the rebuilt app passes the smoke test.
 
-## Appshots and Computer Use permissions
+Build separately for each macOS user. Generated bundles contain user-specific
+helper and socket paths and are not relocatable or intended for redistribution.
 
-Grant **Accessibility** to ChatGPT Multi and **Screen & System Audio Recording**
-to ChatGPT Multi Computer Use in System Settings → Privacy & Security. When
-macOS offers **Quit & Reopen**, use it, then reopen ChatGPT Multi yourself if it
-does not relaunch automatically.
-
-If the expected permission row does not appear, use the plus button in System
-Settings and select `~/Applications/ChatGPT Multi Computer Use.app`. Avoid
-adding the official ChatGPT or Codex Computer Use row for this independent
-build. Reusing the same signing team prevents duplicate or stale consent rows.
-
-## Local data
+## Local data and security
 
 | Path | Purpose |
 | --- | --- |
 | `~/.codex` | Primary credentials, conversations, and cache |
 | `~/.codex-mux/state.json` | Account metadata and sticky thread ownership |
-| `~/.codex-mux/accounts/<id>/codex-home` | Isolated account data |
-| `~/.codex-mux/control-token` | Token for the loopback-only control API |
-| `~/.codex-mux/backups` | Recoverable app/helper backups from forced rebuilds |
+| `~/.codex-mux/accounts/<id>/codex-home` | Isolated secondary account data |
+| `~/.codex-mux/control-token` | Token for the loopback-only control service |
+| `~/.codex-mux/backups` | Recoverable app and helper backups |
 | `~/Library/Application Support/ChatGPT Multi` | Independent desktop profile |
-| `~/Applications/ChatGPT Multi Computer Use.app` | Stable native helper |
 
-Access and refresh tokens never leave the account's Codex home through the
-project's control API. See [Security](SECURITY.md) before reporting a suspected
-credential or signing issue.
+The control service binds only to `127.0.0.1` and protects private routes with a
+random 256-bit token. OAuth tokens stay inside their account's Codex home and
+are never returned by the control API. Account directories are owner-only.
 
-## Development
+Plugin configuration is intentionally synchronized from the Primary account.
+Inline secrets inside shared MCP configuration are therefore copied to each
+isolated account home; the account homes are not separate secret boundaries.
+
+See [SECURITY.md](SECURITY.md) before reporting a credential, signing, or local
+control-service issue.
+
+## Development and verification
 
 ```sh
 npm ci --ignore-scripts
@@ -168,16 +236,31 @@ npm run check
 npm run release:check
 ```
 
-The renderer code and Go backend have no runtime third-party dependencies.
-`@electron/asar` is a build-only dependency. Diagnostic UI routes exist only
-when `CODEX_MUX_UI_TESTS=1` is present at launch and still require the local
-control token.
+The Go backend and injected renderer have no runtime third-party dependencies.
+`@electron/asar` is build-only. Deterministic UI preview routes are enabled only
+when `CODEX_MUX_UI_TESTS=1` is present at launch and remain token-authenticated.
 
-Contributions are welcome; read [CONTRIBUTING.md](CONTRIBUTING.md). Releases are
-source-only and follow [the release process](docs/RELEASING.md).
+The signed-app test procedure is in [SMOKE-TEST.md](docs/SMOKE-TEST.md). The
+latest completed run is recorded in
+[E2E-REPORT-0.1.0.md](docs/E2E-REPORT-0.1.0.md).
+
+## Known limitations
+
+- Upstream ChatGPT updates can require new, reviewed patch anchors.
+- The initial merged history fetch is limited to 500 threads per account.
+- Combined “skills explored” totals can count the same skill once per account
+  because the upstream profile response exposes counts rather than skill IDs.
+- Generated app bundles are tied to one macOS user and signing team.
+- Releases are source-only; patched OpenAI binaries are never distributed.
+
+## Contributing and releases
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting changes. Releases use
+the source-only process in [RELEASING.md](docs/RELEASING.md) and require a
+completed signed-app smoke test for the exact tagged commit.
 
 ## License
 
 Project source is available under the [MIT License](LICENSE). ChatGPT, Codex,
-and the official macOS app are products of OpenAI and are not covered by this
-license.
+and the official macOS application are OpenAI products and are not covered by
+this license.
