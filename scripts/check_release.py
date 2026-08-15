@@ -23,6 +23,7 @@ REQUIRED_FILES = (
     "VERSION",
     "docs/ARCHITECTURE.md",
     "docs/COMPATIBILITY.md",
+    "docs/E2E-REPORT-0.1.0.md",
     "docs/RELEASING.md",
     "docs/SECURITY-MODEL.md",
     "docs/SMOKE-TEST.md",
