@@ -1,0 +1,36 @@
+/build/
+/dist/
+/node_modules/
+__pycache__/
+*.pyc
+/.DS_Store
+*.app
+*.backup-*
+*.asar
+*.dmg
+*.pkg
+*.pfx
+*.zip
+.codex-mux/
+auth.json
+control-token
+state.json
+
+# Signing and local credentials must never enter source control.
+.env
+.env.*
+!.env.example
+*.cer
+*.key
+*.mobileprovision
+*.p12
+*.pem
+*.provisionprofile
+
+# Keep local diagnostic captures while publishing only curated examples.
+/screenshots/*
+!/screenshots/combined-profile-20px.png
+!/screenshots/plugin-account-picker-primary-final.png
+!/screenshots/plugin-account-picker-secondary-final.png
+!/screenshots/quota-all-depleted.png
+!/screenshots/rate-limit-reset-accounts.png

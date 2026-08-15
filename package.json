@@ -1,0 +1,28 @@
+{
+  "name": "chatgpt-multi-account-patcher",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Build tooling for the independent ChatGPT Multi macOS app patch",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/b-nnett/chatgpt-multi-account.git"
+  },
+  "homepage": "https://github.com/b-nnett/chatgpt-multi-account#readme",
+  "bugs": {
+    "url": "https://github.com/b-nnett/chatgpt-multi-account/issues"
+  },
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "check": "npm run check:go && npm run check:js && npm run check:python",
+    "check:go": "go test ./... && go vet ./...",
+    "check:js": "node --check ui/account-menu.js && node --check ui/thread-subscription.js && node --check ui/ui-test-bridge.cjs",
+    "check:python": "python3 -m py_compile scripts/patch_app.py scripts/check_release.py",
+    "release:check": "python3 scripts/check_release.py"
+  },
+  "devDependencies": {
+    "@electron/asar": "4.2.1"
+  }
+}
