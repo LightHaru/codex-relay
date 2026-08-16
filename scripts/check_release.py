@@ -21,6 +21,7 @@ REQUIRED_FILES = (
     "README.md",
     "SECURITY.md",
     "VERSION",
+    "install.sh",
     "docs/ARCHITECTURE.md",
     "docs/COMPATIBILITY.md",
     "docs/E2E-REPORT-0.1.0.md",
@@ -85,6 +86,8 @@ def main() -> int:
         fail("package-lock.json does not match the declared @electron/asar version")
     if package.get("license") != "MIT":
         fail("package.json license does not match LICENSE")
+    if not ((ROOT / "install.sh").stat().st_mode & 0o111):
+        fail("install.sh is not executable")
 
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     dated_heading = rf"^## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}$"

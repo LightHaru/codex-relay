@@ -93,7 +93,31 @@ is rejected by default rather than being partially patched. See
 A team-backed signing identity is required for reliable Appshots and Computer
 Use permissions. Ad-hoc signing is intended only for diagnostics.
 
-## Build and install
+## Install
+
+Run one command. It downloads or updates the source, installs the locked build
+dependency, creates the independently signed app, and launches it:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/b-nnett/codex-subscription-router/main/install.sh | /bin/bash
+```
+
+The installer keeps its source checkout in
+`~/.codex-subscription-router/source`. On an existing installation it uses the
+same account state, creates a recoverable backup, and requires signing-team
+continuity so macOS privacy grants remain valid. It stops with a clear message
+instead of making a partial installation when a prerequisite or upstream
+compatibility check fails.
+
+> [!TIP]
+> To inspect the installer before running it, open
+> [`install.sh`](install.sh) or download it without piping it into a shell.
+
+### Install via prompt
+
+> Install Codex Subscription Router from `https://github.com/b-nnett/codex-subscription-router` on this Mac using the repository's supported one-command installer, without modifying the official ChatGPT app or deleting any existing router state. Verify the resulting app and Computer Use helper signatures, launch the app, and ask me only if a prerequisite or macOS permission requires interaction.
+
+### Install from a clone
 
 ```sh
 git clone https://github.com/b-nnett/codex-subscription-router.git

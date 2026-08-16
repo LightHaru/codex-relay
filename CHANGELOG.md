@@ -5,6 +5,11 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- One-command installer with safe source updates, prerequisite checks, signed
+  rebuilds, recoverable upgrades, and automatic launch.
+
 ## [0.1.0] - 2026-08-15
 
 ### Added

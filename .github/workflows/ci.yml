@@ -45,5 +45,8 @@ jobs:
       - name: Check native launcher syntax
         run: xcrun clang -fsyntax-only -Wall -Wextra native/launcher.c
 
+      - name: Check installer syntax
+        run: npm run check:shell
+
       - name: Check release metadata
         run: npm run release:check
