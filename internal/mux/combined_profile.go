@@ -12,7 +12,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/b-nnett/chatgpt-multi-account/internal/state"
+	"github.com/b-nnett/codex-subscription-router/internal/state"
 )
 
 type usageBucket struct {
@@ -182,7 +182,7 @@ func fetchWhamProfile(ctx context.Context, client *http.Client, endpoint string,
 	request.Header.Set("Authorization", "Bearer "+credentials.Tokens.AccessToken)
 	request.Header.Set("ChatGPT-Account-ID", credentials.Tokens.AccountID)
 	request.Header.Set("Accept", "application/json")
-	request.Header.Set("User-Agent", "ChatGPT Multi")
+	request.Header.Set("User-Agent", "Codex Subscription Router")
 	response, err := client.Do(request)
 	if err != nil {
 		return whamProfile{}, fmt.Errorf("fetch combined profile: %w", err)

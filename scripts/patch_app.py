@@ -22,15 +22,15 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PROJECT_VERSION = (PROJECT_ROOT / "VERSION").read_text(encoding="utf-8").strip()
 DEFAULT_SOURCE = Path("/Applications/ChatGPT.app")
-DEFAULT_DESTINATION = Path.home() / "Applications" / "ChatGPT Multi.app"
+DEFAULT_DESTINATION = Path.home() / "Applications" / "Codex Subscription Router.app"
 DEFAULT_STATE_ROOT = Path.home() / ".codex-mux"
 CONTROL_PORT = 48123
-DESKTOP_PROFILE_NAME = "ChatGPT Multi"
+DESKTOP_PROFILE_NAME = "Codex Subscription Router"
 DESKTOP_BUNDLE_IDENTIFIER = "app.cdxmux.multi"
 OPENAI_DESKTOP_CODE_IDENTIFIER = "com.openai.codex"
 OPENAI_COMPUTER_USE_BUNDLE_IDENTIFIER = "com.openai.sky.CUAService"
 COMPUTER_USE_BUNDLE_IDENTIFIER = "com.cdxmux.sky.CUAService"
-COMPUTER_USE_DISPLAY_NAME = "ChatGPT Multi Computer Use"
+COMPUTER_USE_DISPLAY_NAME = "Codex Subscription Router Computer Use"
 COMPUTER_USE_APP_NAME = f"{COMPUTER_USE_DISPLAY_NAME}.app"
 LAUNCH_SERVICES_REGISTER = Path(
     "/System/Library/Frameworks/CoreServices.framework/Frameworks/"
@@ -677,7 +677,7 @@ def build_proxy(destination: Path) -> None:
 
 def install_launcher(app: Path) -> None:
     """Pass Chromium its isolated profile before Electron's main process starts."""
-    launcher = app / "Contents" / "MacOS" / "ChatGPTMultiLauncher"
+    launcher = app / "Contents" / "MacOS" / "CodexSubscriptionRouterLauncher"
     run(
         [
             "xcrun",
@@ -1101,13 +1101,13 @@ def patch_info_plist(
     plist_path = app / "Contents" / "Info.plist"
     with plist_path.open("rb") as handle:
         info = plistlib.load(handle)
-    info["CFBundleDisplayName"] = "ChatGPT Multi"
-    info["CFBundleName"] = "ChatGPT Multi"
+    info["CFBundleDisplayName"] = "Codex Subscription Router"
+    info["CFBundleName"] = "Codex Subscription Router"
     # A distinct identifier keeps Launch Services and external Computer Use from
     # confusing this independently signed copy with the official ChatGPT app.
     info["CFBundleIdentifier"] = DESKTOP_BUNDLE_IDENTIFIER
-    info["CFBundleExecutable"] = "ChatGPTMultiLauncher"
-    info["BundleSigningBaseName"] = "ChatGPTMulti"
+    info["CFBundleExecutable"] = "CodexSubscriptionRouterLauncher"
+    info["BundleSigningBaseName"] = "CodexSubscriptionRouter"
     info["CodexMuxSigningTeamIdentifier"] = team_identifier or "adhoc"
     info["CrProductDirName"] = DESKTOP_PROFILE_NAME
     for key in list(info):
@@ -1118,7 +1118,7 @@ def patch_info_plist(
     for url_type in info.get("CFBundleURLTypes", []):
         schemes = url_type.get("CFBundleURLSchemes", [])
         url_type["CFBundleURLSchemes"] = [
-            "chatgpt-multi" if value == "codex" else value for value in schemes
+            "codex-subscription-router" if value == "codex" else value for value in schemes
         ]
     digest = hashlib.sha256(asar_path.read_bytes()).hexdigest()
     info["ElectronAsarIntegrity"] = {
@@ -1193,7 +1193,7 @@ def patch_app(
     if force:
         ensure_components_are_stopped((destination, installed_computer_use_app))
 
-    with tempfile.TemporaryDirectory(prefix=".chatgpt-multi-", dir=destination.parent) as temporary:
+    with tempfile.TemporaryDirectory(prefix=".codex-subscription-router-", dir=destination.parent) as temporary:
         temporary_path = Path(temporary)
         staged_app = temporary_path / destination.name
         staged_computer_use_app = temporary_path / COMPUTER_USE_APP_NAME

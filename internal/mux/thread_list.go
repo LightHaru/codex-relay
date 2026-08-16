@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"sync"
 
-	"github.com/b-nnett/chatgpt-multi-account/internal/protocol"
+	"github.com/b-nnett/codex-subscription-router/internal/protocol"
 )
 
 func (m *Multiplexer) aggregateThreadList(request protocol.Message) {

@@ -2,10 +2,14 @@
 
 The independently built desktop uses bundle identifier `app.cdxmux.multi`; its
 Computer Use helper uses `com.cdxmux.sky.CUAService`. Neither identifier is used
-by the official ChatGPT installation.
+by the official ChatGPT installation. These identifiers and the `.codex-mux`
+state directory remain stable across the product rename so existing macOS
+privacy grants, connected accounts, and sticky thread ownership continue to
+work.
 
-ChatGPT Multi replaces the copied app's bundled `codex` executable with a small
-Go multiplexer and keeps the original binary beside it as `codex.real`.
+Codex Subscription Router replaces the copied app's bundled `codex` executable
+with a small Go multiplexer and keeps the original binary beside it as
+`codex.real`.
 
 ## Request routing
 

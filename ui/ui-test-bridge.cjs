@@ -331,7 +331,7 @@ async function runAction(window, action, delayMs) {
 
 async function capture(action, delayMs, includeDebug) {
   let window = mainWindow();
-  if (!window) throw new Error("ChatGPT Multi has no main window");
+  if (!window) throw new Error("Codex Subscription Router has no main window");
   if (action !== null) await runAction(window, action, delayMs);
   window = mainWindow() ?? window;
   const image = await window.webContents.capturePage();

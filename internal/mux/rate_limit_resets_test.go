@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/b-nnett/chatgpt-multi-account/internal/state"
+	"github.com/b-nnett/codex-subscription-router/internal/state"
 )
 
 func TestFetchRateLimitResetCreditsUsesSelectedAccountCredentials(t *testing.T) {

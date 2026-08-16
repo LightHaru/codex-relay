@@ -1,16 +1,16 @@
 {
-  "name": "chatgpt-multi-account-patcher",
+  "name": "codex-subscription-router-patcher",
   "private": true,
   "version": "0.1.0",
-  "description": "Build tooling for the independent ChatGPT Multi macOS app patch",
+  "description": "Build tooling for the independent Codex Subscription Router macOS app patch",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/b-nnett/chatgpt-multi-account.git"
+    "url": "git+https://github.com/b-nnett/codex-subscription-router.git"
   },
-  "homepage": "https://github.com/b-nnett/chatgpt-multi-account#readme",
+  "homepage": "https://github.com/b-nnett/codex-subscription-router#readme",
   "bugs": {
-    "url": "https://github.com/b-nnett/chatgpt-multi-account/issues"
+    "url": "https://github.com/b-nnett/codex-subscription-router/issues"
   },
   "engines": {
     "node": ">=22.12"

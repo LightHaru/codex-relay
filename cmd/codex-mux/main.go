@@ -18,10 +18,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/b-nnett/chatgpt-multi-account/internal/control"
-	"github.com/b-nnett/chatgpt-multi-account/internal/mux"
-	"github.com/b-nnett/chatgpt-multi-account/internal/protocol"
-	"github.com/b-nnett/chatgpt-multi-account/internal/state"
+	"github.com/b-nnett/codex-subscription-router/internal/control"
+	"github.com/b-nnett/codex-subscription-router/internal/mux"
+	"github.com/b-nnett/codex-subscription-router/internal/protocol"
+	"github.com/b-nnett/codex-subscription-router/internal/state"
 )
 
 const defaultControlPort = 48123

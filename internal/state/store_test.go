@@ -53,10 +53,10 @@ func TestAccountConfigInheritsManagedMCPAndPreservesLocalProjects(t *testing.T) 
 	primaryConfig := `model = "gpt-test"
 
 [mcp_servers.node_repl]
-command = "/Applications/ChatGPT Multi.app/node_repl"
+command = "/Applications/Codex Subscription Router.app/node_repl"
 
 [mcp_servers.node_repl.env]
-SKY_CUA_SERVICE_PATH = "/Applications/ChatGPT Multi Computer Use.app"
+SKY_CUA_SERVICE_PATH = "/Applications/Codex Subscription Router Computer Use.app"
 
 [projects."/primary-only"]
 trust_level = "trusted"
@@ -85,7 +85,7 @@ trust_level = "trusted"
 		`mcp_oauth_credentials_store = "file"`,
 		`model = "gpt-test"`,
 		`[mcp_servers.node_repl]`,
-		`SKY_CUA_SERVICE_PATH = "/Applications/ChatGPT Multi Computer Use.app"`,
+		`SKY_CUA_SERVICE_PATH = "/Applications/Codex Subscription Router Computer Use.app"`,
 	} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("account config is missing %q:\n%s", expected, text)

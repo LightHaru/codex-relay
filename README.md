@@ -1,13 +1,13 @@
-# ChatGPT Multi Account
+# Codex Subscription Router
 
 ![Multi-subscription account menu](screenshots/account-menu.png)
 
 Use multiple ChatGPT subscriptions from one independent macOS desktop app.
 
-ChatGPT Multi Account creates a locally patched copy of the official ChatGPT
-app, balances new chats across connected subscriptions, and keeps every thread
-on one subscription so follow-up turns retain conversation context and benefit
-from account-level caching.
+Codex Subscription Router creates a locally patched copy of the official
+ChatGPT app, balances new chats across connected subscriptions, and keeps every
+thread on one subscription so follow-up turns retain conversation context and
+benefit from account-level caching.
 
 The official ChatGPT installation is used only as build input and is never
 modified. This repository contains source code and build tooling—not OpenAI
@@ -46,7 +46,7 @@ Each child has an isolated Codex home, while the multiplexer records the owner
 of every thread.
 
 ```text
-ChatGPT Multi.app
+Codex Subscription Router.app
         │
         │ one app-server connection
         ▼
@@ -67,7 +67,7 @@ Read [the architecture](docs/ARCHITECTURE.md) for the request flow and
 
 ## Compatibility
 
-ChatGPT Multi Account currently targets:
+Codex Subscription Router currently targets:
 
 | Component | Supported value |
 | --- | --- |
@@ -96,19 +96,19 @@ Use permissions. Ad-hoc signing is intended only for diagnostics.
 ## Build and install
 
 ```sh
-git clone https://github.com/b-nnett/chatgpt-multi-account.git
-cd chatgpt-multi-account
+git clone https://github.com/b-nnett/codex-subscription-router.git
+cd codex-subscription-router
 npm ci --ignore-scripts
 python3 scripts/patch_app.py
-open "$HOME/Applications/ChatGPT Multi.app"
+open "$HOME/Applications/Codex Subscription Router.app"
 ```
 
 This creates:
 
-- `~/Applications/ChatGPT Multi.app`
-- `~/Applications/ChatGPT Multi Computer Use.app`
+- `~/Applications/Codex Subscription Router.app`
+- `~/Applications/Codex Subscription Router Computer Use.app`
 - an independent desktop profile under
-  `~/Library/Application Support/ChatGPT Multi`
+  `~/Library/Application Support/Codex Subscription Router`
 
 The first valid Developer ID Application identity is selected, falling back to
 an Apple Development identity. Select a certificate explicitly when needed:
@@ -137,12 +137,13 @@ Open **System Settings → Privacy & Security** and grant:
 
 | Permission | Application |
 | --- | --- |
-| Accessibility | ChatGPT Multi |
-| Screen & System Audio Recording | ChatGPT Multi Computer Use |
+| Accessibility | Codex Subscription Router |
+| Screen & System Audio Recording | Codex Subscription Router Computer Use |
 
 When macOS offers **Quit & Reopen**, use it. If the app does not relaunch,
-reopen ChatGPT Multi manually. If the Computer Use row does not appear, press
-the plus button and choose `~/Applications/ChatGPT Multi Computer Use.app`.
+reopen Codex Subscription Router manually. If the Computer Use row does not
+appear, press the plus button and choose
+`~/Applications/Codex Subscription Router Computer Use.app`.
 
 Do not select the official ChatGPT or Codex Computer Use helper for this build;
 the independent app has its own identity and permission rows. macOS may also
@@ -153,7 +154,7 @@ request Automation access the first time Computer Use controls another app.
 1. Open the profile menu at the bottom of the sidebar.
 2. Select **Add another subscription**.
 3. Complete the displayed device-code sign-in in your browser.
-4. Return to ChatGPT Multi and wait for the account row to appear.
+4. Return to Codex Subscription Router and wait for the account row to appear.
 
 While the code is visible, clicking away does not dismiss the menu. Clicking
 the code copies it and opens the verification page.
@@ -200,10 +201,10 @@ as compatible, then rebuild:
 python3 scripts/patch_app.py --force
 ```
 
-Quit ChatGPT Multi and its Computer Use helper first. Existing destinations are
-moved to timestamped directories under `~/.codex-mux/backups`; account state and
-credentials are stored outside the app bundle and remain intact. Delete old
-backups manually after the rebuilt app passes the smoke test.
+Quit Codex Subscription Router and its Computer Use helper first. Existing
+destinations are moved to timestamped directories under `~/.codex-mux/backups`;
+account state and credentials are stored outside the app bundle and remain
+intact. Delete old backups manually after the rebuilt app passes the smoke test.
 
 Build separately for each macOS user. Generated bundles contain user-specific
 helper and socket paths and are not relocatable or intended for redistribution.
@@ -217,7 +218,7 @@ helper and socket paths and are not relocatable or intended for redistribution.
 | `~/.codex-mux/accounts/<id>/codex-home` | Isolated secondary account data |
 | `~/.codex-mux/control-token` | Token for the loopback-only control service |
 | `~/.codex-mux/backups` | Recoverable app and helper backups |
-| `~/Library/Application Support/ChatGPT Multi` | Independent desktop profile |
+| `~/Library/Application Support/Codex Subscription Router` | Independent desktop profile |
 
 The control service binds only to `127.0.0.1` and protects private routes with a
 random 256-bit token. OAuth tokens stay inside their account's Codex home and

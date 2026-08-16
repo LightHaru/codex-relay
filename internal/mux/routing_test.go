@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/b-nnett/chatgpt-multi-account/internal/protocol"
+	"github.com/b-nnett/codex-subscription-router/internal/protocol"
 )
 
 func TestIsUsageLimitResponseRecognizesStructuredError(t *testing.T) {

@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/b-nnett/chatgpt-multi-account/internal/state"
+	"github.com/b-nnett/codex-subscription-router/internal/state"
 )
 
 const (
@@ -194,7 +194,7 @@ func requestRateLimitResetCredits(
 	request.Header.Set("Authorization", "Bearer "+credentials.Tokens.AccessToken)
 	request.Header.Set("ChatGPT-Account-ID", credentials.Tokens.AccountID)
 	request.Header.Set("Accept", "application/json")
-	request.Header.Set("User-Agent", "ChatGPT Multi")
+	request.Header.Set("User-Agent", "Codex Subscription Router")
 	if len(body) > 0 {
 		request.Header.Set("Content-Type", "application/json")
 	}

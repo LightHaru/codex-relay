@@ -14,9 +14,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/b-nnett/chatgpt-multi-account/internal/backend"
-	"github.com/b-nnett/chatgpt-multi-account/internal/protocol"
-	"github.com/b-nnett/chatgpt-multi-account/internal/state"
+	"github.com/b-nnett/codex-subscription-router/internal/backend"
+	"github.com/b-nnett/codex-subscription-router/internal/protocol"
+	"github.com/b-nnett/codex-subscription-router/internal/state"
 )
 
 const requestTimeout = 30 * time.Second
