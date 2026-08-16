@@ -17,11 +17,14 @@ The desktop app opens one JSON-RPC app-server connection to the multiplexer.
 The multiplexer starts one real app-server child for every enabled account,
 each with its own `CODEX_HOME` and `CODEX_SQLITE_HOME`.
 
-New threads are assigned using quota availability, short-window usage,
-existing pinned-thread count, and stable account order. Once a thread ID is
-known, `state.json` persists its owner. Requests, responses, approvals, and
-notifications are rewritten only as needed to preserve one coherent desktop
-session.
+New threads are assigned using a quota-urgency score: weekly percentage
+remaining divided by the hours until that account resets. Banked usage resets
+add a capped bonus, while short-window usage, existing pinned-thread count, and
+stable account order break close results. Reset-credit metadata is fetched in
+parallel, cached for five minutes, and treated as neutral when unavailable.
+Once a thread ID is known, `state.json` persists its owner. Requests, responses,
+approvals, and notifications are rewritten only as needed to preserve one
+coherent desktop session.
 
 If the owner is depleted, the multiplexer resumes the rollout on an account
 with capacity and updates ownership. Threads do not migrate for ordinary load

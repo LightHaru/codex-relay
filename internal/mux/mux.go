@@ -78,6 +78,11 @@ type Multiplexer struct {
 	profileMu     sync.Mutex
 	profileClient *http.Client
 	profileCache  map[string]profileCacheEntry
+	now           func() time.Time
+
+	resetCreditsMu       sync.Mutex
+	resetCreditsCache    map[string]resetCreditsCacheEntry
+	resetCreditsEndpoint string
 
 	previewMu        sync.RWMutex
 	rateLimitPreview *RateLimitPreview
@@ -91,19 +96,22 @@ func New(options Options) (*Multiplexer, error) {
 		return nil, errors.New("real executable, store, and output are required")
 	}
 	return &Multiplexer{
-		realExecutable: options.RealExecutable,
-		realArgs:       append([]string(nil), options.RealArgs...),
-		environment:    append([]string(nil), options.Environment...),
-		store:          options.Store,
-		output:         options.Output,
-		children:       make(map[string]*backend.Child),
-		inbound:        make(chan backend.Inbound, 1024),
-		externalRoutes: make(map[string]externalRoute),
-		serverRoutes:   make(map[string]serverRequestRoute),
-		events:         make(map[chan Event]struct{}),
-		profileClient:  &http.Client{Timeout: 10 * time.Second},
-		profileCache:   make(map[string]profileCacheEntry),
-		resetPreviews:  make(map[string]ResetCreditsPreview),
+		realExecutable:       options.RealExecutable,
+		realArgs:             append([]string(nil), options.RealArgs...),
+		environment:          append([]string(nil), options.Environment...),
+		store:                options.Store,
+		output:               options.Output,
+		children:             make(map[string]*backend.Child),
+		inbound:              make(chan backend.Inbound, 1024),
+		externalRoutes:       make(map[string]externalRoute),
+		serverRoutes:         make(map[string]serverRequestRoute),
+		events:               make(map[chan Event]struct{}),
+		profileClient:        &http.Client{Timeout: 10 * time.Second},
+		profileCache:         make(map[string]profileCacheEntry),
+		now:                  time.Now,
+		resetCreditsCache:    make(map[string]resetCreditsCacheEntry),
+		resetCreditsEndpoint: rateLimitResetCreditsURL,
+		resetPreviews:        make(map[string]ResetCreditsPreview),
 	}, nil
 }
 

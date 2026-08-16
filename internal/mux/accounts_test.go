@@ -1,6 +1,9 @@
 package mux
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestPlanLabel(t *testing.T) {
 	tests := map[string]string{
@@ -87,5 +90,63 @@ func TestAggregateRateLimitsReportsAllDepleted(t *testing.T) {
 	}
 	if limits.RateLimitReachedType != "rate_limit_reached" {
 		t.Fatalf("expected the pool to report depletion, got %#v", limits)
+	}
+}
+
+func TestRouteUrgencyPrefersQuotaExpiringSooner(t *testing.T) {
+	now := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
+	weeklyMinutes := int64(10_080)
+	soon := now.Add(24 * time.Hour).Unix()
+	later := now.Add(6 * 24 * time.Hour).Unix()
+	soonScore := routeUrgencyScore(now, &RateLimitWindow{
+		UsedPercent: 40, WindowDurationMins: &weeklyMinutes, ResetsAt: &soon,
+	}, resetCreditMetadata{})
+	laterScore := routeUrgencyScore(now, &RateLimitWindow{
+		UsedPercent: 40, WindowDurationMins: &weeklyMinutes, ResetsAt: &later,
+	}, resetCreditMetadata{})
+	if soonScore <= laterScore {
+		t.Fatalf("sooner reset should be more urgent: soon=%f later=%f", soonScore, laterScore)
+	}
+}
+
+func TestRouteUrgencyWeightsBankedResetsWithoutDominating(t *testing.T) {
+	now := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
+	weeklyMinutes := int64(10_080)
+	reset := now.Add(4 * 24 * time.Hour).Unix()
+	window := &RateLimitWindow{
+		UsedPercent: 50, WindowDurationMins: &weeklyMinutes, ResetsAt: &reset,
+	}
+	plain := routeUrgencyScore(now, window, resetCreditMetadata{Known: true})
+	banked := routeUrgencyScore(now, window, resetCreditMetadata{Known: true, AvailableCount: 2})
+	if banked <= plain {
+		t.Fatalf("banked resets should increase urgency: plain=%f banked=%f", plain, banked)
+	}
+	if banked > plain*1.31 {
+		t.Fatalf("banked reset bonus should remain bounded: plain=%f banked=%f", plain, banked)
+	}
+}
+
+func TestRouteUrgencyCapsResetBonus(t *testing.T) {
+	now := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
+	reset := now.Add(7 * 24 * time.Hour).Unix()
+	window := &RateLimitWindow{UsedPercent: 20, ResetsAt: &reset}
+	three := routeUrgencyScore(now, window, resetCreditMetadata{Known: true, AvailableCount: 3})
+	ten := routeUrgencyScore(now, window, resetCreditMetadata{Known: true, AvailableCount: 10})
+	if three != ten {
+		t.Fatalf("reset bonus cap was not applied: three=%f ten=%f", three, ten)
+	}
+}
+
+func TestRouteUrgencyFallsBackToWeeklyUtilization(t *testing.T) {
+	now := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
+	weeklyMinutes := int64(10_080)
+	lessUsed := routeUrgencyScore(now, &RateLimitWindow{
+		UsedPercent: 20, WindowDurationMins: &weeklyMinutes,
+	}, resetCreditMetadata{})
+	moreUsed := routeUrgencyScore(now, &RateLimitWindow{
+		UsedPercent: 80, WindowDurationMins: &weeklyMinutes,
+	}, resetCreditMetadata{})
+	if lessUsed <= moreUsed {
+		t.Fatalf("fallback should prefer the less-used account: less=%f more=%f", lessUsed, moreUsed)
 	}
 }

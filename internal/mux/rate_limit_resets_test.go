@@ -3,11 +3,13 @@ package mux
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/b-nnett/codex-subscription-router/internal/state"
 )
@@ -90,6 +92,72 @@ func TestPreviewResetCreditsUsesNativeCreditShape(t *testing.T) {
 		if credit.ID == "" || credit.Status != "available" || credit.Title == "" || credit.ExpiresAt == "" {
 			t.Fatalf("incomplete native credit: %#v", credit)
 		}
+	}
+}
+
+func TestDecodeResetCreditMetadataUsesApplicableCountAndEarliestExpiry(t *testing.T) {
+	metadata, err := decodeResetCreditMetadata(json.RawMessage(`{
+		"available_count": 3,
+		"applicable_available_count": 2,
+		"credits": [
+			{"status":"available","expires_at":"2026-09-10T12:00:00Z"},
+			{"status":"consumed","expires_at":"2026-08-01T12:00:00Z"},
+			{"status":"available","expires_at":"2026-09-01T12:00:00Z"}
+		]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantExpiry := time.Date(2026, time.September, 1, 12, 0, 0, 0, time.UTC).Unix()
+	if !metadata.Known || metadata.AvailableCount != 2 || metadata.EarliestExpiry == nil || *metadata.EarliestExpiry != wantExpiry {
+		t.Fatalf("unexpected reset metadata: %#v", metadata)
+	}
+}
+
+func TestRoutingResetCreditsCachesSuccessfulResponse(t *testing.T) {
+	root := t.TempDir()
+	primaryHome := filepath.Join(root, "primary")
+	if err := os.MkdirAll(primaryHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeResetTestAuth(t, primaryHome)
+	store, err := state.Open(filepath.Join(root, "mux"), primaryHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, ok := store.Account("primary")
+	if !ok {
+		t.Fatal("primary account was not created")
+	}
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests++
+		_, _ = response.Write([]byte(`{"available_count":1,"applicable_available_count":1,"credits":[]}`))
+	}))
+	defer server.Close()
+
+	multiplexer, err := New(Options{
+		RealExecutable: "codex", Store: store, Output: io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
+	multiplexer.now = func() time.Time { return now }
+	multiplexer.profileClient = server.Client()
+	multiplexer.resetCreditsEndpoint = server.URL
+
+	first := multiplexer.routingResetCredits(context.Background(), account)
+	second := multiplexer.routingResetCredits(context.Background(), account)
+	if !first.Known || first.AvailableCount != 1 || second.AvailableCount != 1 || requests != 1 {
+		t.Fatalf("cache miss: first=%#v second=%#v requests=%d", first, second, requests)
+	}
+
+	now = now.Add(resetCreditsCacheTTL + time.Second)
+	third := multiplexer.routingResetCredits(context.Background(), account)
+	if third.AvailableCount != 1 || requests != 2 {
+		t.Fatalf("expired cache was not refreshed: third=%#v requests=%d", third, requests)
 	}
 }
 

@@ -16,9 +16,23 @@ import (
 )
 
 const (
-	rateLimitResetCreditsURL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
-	rateLimitResetMaxBytes   = 2 << 20
+	rateLimitResetCreditsURL  = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
+	rateLimitResetMaxBytes    = 2 << 20
+	resetCreditsCacheTTL      = 5 * time.Minute
+	resetCreditsErrorTTL      = time.Minute
+	resetCreditsLookupTimeout = 1500 * time.Millisecond
 )
+
+type resetCreditMetadata struct {
+	Known          bool
+	AvailableCount int
+	EarliestExpiry *int64
+}
+
+type resetCreditsCacheEntry struct {
+	metadata  resetCreditMetadata
+	expiresAt time.Time
+}
 
 // ResetCreditsPreview exists only behind the UI-test control route. It lets us
 // exercise the real ChatGPT reset sheet without redeeming a real reset credit.
@@ -40,12 +54,16 @@ func (m *Multiplexer) RateLimitResetCredits(ctx context.Context, accountID strin
 	if preview, ok := m.resetCreditsPreview(accountID); ok {
 		return previewResetCredits(preview), nil
 	}
-	return fetchRateLimitResetCredits(
+	result, err := fetchRateLimitResetCredits(
 		ctx,
 		m.profileClient,
-		rateLimitResetCreditsURL,
+		m.resetCreditsEndpoint,
 		account,
 	)
+	if err == nil {
+		m.cacheResetCreditResponse(accountID, result, resetCreditsCacheTTL)
+	}
+	return result, err
 }
 
 func (m *Multiplexer) ConsumeRateLimitResetCredit(
@@ -95,12 +113,13 @@ func (m *Multiplexer) ConsumeRateLimitResetCredit(
 	result, err := requestRateLimitResetCredits(
 		ctx,
 		m.profileClient,
-		rateLimitResetCreditsURL+"/consume",
+		m.resetCreditsEndpoint+"/consume",
 		http.MethodPost,
 		account,
 		body,
 	)
 	if err == nil {
+		m.invalidateResetCreditCache(accountID)
 		m.publishAccountRefresh(accountID)
 	}
 	return result, err
@@ -121,8 +140,108 @@ func (m *Multiplexer) SetResetCreditsPreview(preview ResetCreditsPreview) error 
 	// UI tests from falling through to the live endpoint for that account.
 	m.resetPreviews[preview.AccountID] = preview
 	m.resetPreviewMu.Unlock()
+	m.invalidateResetCreditCache(preview.AccountID)
 	m.publish(Event{Type: "account-updated", AccountID: preview.AccountID, Message: "Reset preview changed"})
 	return nil
+}
+
+func (m *Multiplexer) routingResetCredits(ctx context.Context, account state.Account) resetCreditMetadata {
+	if preview, ok := m.resetCreditsPreview(account.ID); ok {
+		return resetCreditMetadata{Known: true, AvailableCount: preview.AvailableCount}
+	}
+
+	now := m.now()
+	m.resetCreditsMu.Lock()
+	entry, ok := m.resetCreditsCache[account.ID]
+	m.resetCreditsMu.Unlock()
+	if ok && now.Before(entry.expiresAt) {
+		return entry.metadata
+	}
+
+	lookupCtx, cancel := context.WithTimeout(ctx, resetCreditsLookupTimeout)
+	defer cancel()
+	result, err := fetchRateLimitResetCredits(
+		lookupCtx,
+		m.profileClient,
+		m.resetCreditsEndpoint,
+		account,
+	)
+	if err != nil {
+		metadata := resetCreditMetadata{}
+		m.cacheResetCreditMetadata(account.ID, metadata, resetCreditsErrorTTL)
+		return metadata
+	}
+	metadata, err := decodeResetCreditMetadata(result)
+	if err != nil {
+		metadata = resetCreditMetadata{}
+		m.cacheResetCreditMetadata(account.ID, metadata, resetCreditsErrorTTL)
+		return metadata
+	}
+	m.cacheResetCreditMetadata(account.ID, metadata, resetCreditsCacheTTL)
+	return metadata
+}
+
+func decodeResetCreditMetadata(payload json.RawMessage) (resetCreditMetadata, error) {
+	var response struct {
+		AvailableCount           *int `json:"available_count"`
+		ApplicableAvailableCount *int `json:"applicable_available_count"`
+		Credits                  []struct {
+			Status    string `json:"status"`
+			ExpiresAt string `json:"expires_at"`
+		} `json:"credits"`
+	}
+	if err := json.Unmarshal(payload, &response); err != nil {
+		return resetCreditMetadata{}, fmt.Errorf("decode rate-limit reset metadata: %w", err)
+	}
+	count := response.AvailableCount
+	if response.ApplicableAvailableCount != nil {
+		count = response.ApplicableAvailableCount
+	}
+	if count == nil {
+		return resetCreditMetadata{}, errors.New("rate-limit reset metadata has no available count")
+	}
+	if *count < 0 {
+		return resetCreditMetadata{}, errors.New("rate-limit reset metadata has a negative available count")
+	}
+	metadata := resetCreditMetadata{Known: true, AvailableCount: *count}
+	for _, credit := range response.Credits {
+		if credit.Status != "" && credit.Status != "available" {
+			continue
+		}
+		expiresAt, err := time.Parse(time.RFC3339, credit.ExpiresAt)
+		if err != nil {
+			continue
+		}
+		unix := expiresAt.Unix()
+		if metadata.EarliestExpiry == nil || unix < *metadata.EarliestExpiry {
+			value := unix
+			metadata.EarliestExpiry = &value
+		}
+	}
+	return metadata, nil
+}
+
+func (m *Multiplexer) cacheResetCreditResponse(accountID string, payload json.RawMessage, ttl time.Duration) {
+	metadata, err := decodeResetCreditMetadata(payload)
+	if err != nil {
+		return
+	}
+	m.cacheResetCreditMetadata(accountID, metadata, ttl)
+}
+
+func (m *Multiplexer) cacheResetCreditMetadata(accountID string, metadata resetCreditMetadata, ttl time.Duration) {
+	m.resetCreditsMu.Lock()
+	m.resetCreditsCache[accountID] = resetCreditsCacheEntry{
+		metadata:  metadata,
+		expiresAt: m.now().Add(ttl),
+	}
+	m.resetCreditsMu.Unlock()
+}
+
+func (m *Multiplexer) invalidateResetCreditCache(accountID string) {
+	m.resetCreditsMu.Lock()
+	delete(m.resetCreditsCache, accountID)
+	m.resetCreditsMu.Unlock()
 }
 
 func (m *Multiplexer) resetAccount(accountID string) (state.Account, error) {

@@ -22,8 +22,8 @@ binaries or a prebuilt application.
 
 ## Highlights
 
-- **Quota-aware routing.** New chats are assigned to an enabled subscription
-  with available capacity so weekly allowances drain at similar rates.
+- **Quota-aware routing.** New chats favour weekly allowance that will expire
+  sooner, with a bounded boost for accounts holding banked usage resets.
 - **Sticky conversations.** Once a thread is assigned, every follow-up returns
   to the same subscription unless that subscription is depleted.
 - **Automatic failover.** A depleted thread continues through another account
@@ -58,9 +58,10 @@ Codex Subscription Router.app
              └── thread ID → persistent account owner
 ```
 
-New-thread routing considers remaining quota, recent usage, pinned-thread
-count, and stable account order. Existing threads do not migrate merely for
-load balancing.
+New-thread routing compares the quota burn rate needed before each weekly reset,
+then applies a capped banked-reset boost. Short-window usage, pinned-thread
+count, and stable account order break close results. Existing threads do not
+migrate merely for load balancing.
 
 Read [the architecture](docs/ARCHITECTURE.md) for the request flow and
 [the security model](docs/SECURITY-MODEL.md) for trust boundaries.
@@ -191,7 +192,7 @@ starts another sign-in.
 
 | Situation | Behaviour |
 | --- | --- |
-| New chat | Assigned to an enabled account with available quota |
+| New chat | Assigned by quota-at-risk, banked resets, and short-window pressure |
 | Follow-up | Sent to the thread's persisted account owner |
 | Owner depleted | Continued through another account with capacity |
 | Every account depleted | Combined quota alert with the next known reset |

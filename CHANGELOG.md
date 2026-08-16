@@ -9,6 +9,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 - One-command installer with safe source updates, prerequisite checks, signed
   rebuilds, recoverable upgrades, and automatic launch.
+- Reset-aware routing that prioritizes weekly quota at risk of expiring and
+  gives a bounded boost to subscriptions with banked usage resets.
 
 ## [0.1.0] - 2026-08-15
 
