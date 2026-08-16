@@ -31,6 +31,7 @@ REQUIRED_FILES = (
     "package.json",
 )
 CURATED_SCREENSHOTS = (
+    "screenshots/account-menu.png",
     "screenshots/combined-profile-20px.png",
     "screenshots/plugin-account-picker-primary-final.png",
     "screenshots/plugin-account-picker-secondary-final.png",

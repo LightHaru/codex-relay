@@ -29,6 +29,7 @@ state.json
 
 # Keep local diagnostic captures while publishing only curated examples.
 /screenshots/*
+!/screenshots/account-menu.png
 !/screenshots/combined-profile-20px.png
 !/screenshots/plugin-account-picker-primary-final.png
 !/screenshots/plugin-account-picker-secondary-final.png

@@ -1,5 +1,7 @@
 # ChatGPT Multi Account
 
+![Multi-subscription account menu](screenshots/account-menu.png)
+
 Use multiple ChatGPT subscriptions from one independent macOS desktop app.
 
 ChatGPT Multi Account creates a locally patched copy of the official ChatGPT
