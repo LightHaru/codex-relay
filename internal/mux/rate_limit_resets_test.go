@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/b-nnett/codex-subscription-router/internal/state"
+	"github.com/LightHaru/codex-subscription-router/internal/state"
 )
 
 func TestFetchRateLimitResetCreditsUsesSelectedAccountCredentials(t *testing.T) {

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -86,7 +87,9 @@ def main() -> int:
         fail("package-lock.json does not match the declared @electron/asar version")
     if package.get("license") != "MIT":
         fail("package.json license does not match LICENSE")
-    if not ((ROOT / "install.sh").stat().st_mode & 0o111):
+    # Windows filesystems do not retain the POSIX executable bit represented by
+    # the Git mode, even though the release artifact is executable on Unix.
+    if os.name != "nt" and not ((ROOT / "install.sh").stat().st_mode & 0o111):
         fail("install.sh is not executable")
 
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
@@ -94,7 +97,7 @@ def main() -> int:
     if re.search(dated_heading, changelog, re.MULTILINE) is None:
         fail(f"CHANGELOG.md has no dated entry for {version}")
     expected_release_link = (
-        "https://github.com/b-nnett/codex-subscription-router/releases/tag/"
+        "https://github.com/LightHaru/codex-subscription-router/releases/tag/"
         f"v{version}"
     )
     if expected_release_link not in changelog:

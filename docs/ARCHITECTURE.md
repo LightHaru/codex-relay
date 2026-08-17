@@ -17,14 +17,17 @@ The desktop app opens one JSON-RPC app-server connection to the multiplexer.
 The multiplexer starts one real app-server child for every enabled account,
 each with its own `CODEX_HOME` and `CODEX_SQLITE_HOME`.
 
-New threads are assigned using a quota-urgency score: weekly percentage
-remaining divided by the hours until that account resets. Banked usage resets
-add a capped bonus, while short-window usage, existing pinned-thread count, and
-stable account order break close results. Reset-credit metadata is fetched in
-parallel, cached for five minutes, and treated as neutral when unavailable.
-Once a thread ID is known, `state.json` persists its owner. Requests, responses,
-approvals, and notifications are rewritten only as needed to preserve one
-coherent desktop session.
+New threads use the controller/Primary account first while it is connected and
+has remaining capacity in every reported quota window. When Primary is
+depleted or unavailable, the Router ranks eligible secondary subscriptions by
+a quota-urgency score: weekly percentage remaining divided by the hours until
+that account resets. Banked usage resets add a capped bonus, while
+short-window usage, existing pinned-thread count, and stable account order
+break close results. Reset-credit metadata is fetched in parallel, cached for
+five minutes, and treated as neutral when unavailable. Once a thread ID is
+known, `state.json` persists its owner. Requests, responses, approvals, and
+notifications are rewritten only as needed to preserve one coherent desktop
+session.
 
 If the owner is depleted, the multiplexer resumes the rollout on an account
 with capacity and updates ownership. Threads do not migrate for ordinary load
@@ -59,5 +62,8 @@ before forwarding the strict RPC request to the chosen child.
 The renderer talks to a loopback-only HTTP service on port 48123. All private
 routes require a random 256-bit token. CORS is limited to the copied app's
 `app://-` origin. The service exposes account metadata, aggregated usage and
-profile data, thread ownership, login/logout actions, and an authenticated SSE
-event stream; it never returns OAuth tokens.
+profile data, thread ownership, login/logout actions, a narrow pending-login
+cancellation action, and an authenticated SSE event stream; it never returns
+OAuth tokens. Browser sign-in is initiated by the official child app-server,
+which owns the localhost callback and writes credentials only in that
+subscription's isolated Codex home.

@@ -1,6 +1,7 @@
 /build/
 /dist/
 /node_modules/
+/.local/
 __pycache__/
 *.pyc
 /.DS_Store

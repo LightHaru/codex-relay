@@ -12,7 +12,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/b-nnett/codex-subscription-router/internal/state"
+	"github.com/LightHaru/codex-subscription-router/internal/state"
 )
 
 type usageBucket struct {

@@ -172,3 +172,56 @@ func TestUpdateAccountPreservesController(t *testing.T) {
 		t.Fatalf("unexpected updated account: %#v", account)
 	}
 }
+
+func TestDiscardProvisionalAccountRemovesOnlyUnownedSecondary(t *testing.T) {
+	root := t.TempDir()
+	store, err := Open(filepath.Join(root, "mux"), filepath.Join(root, "primary"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondary, err := store.AddAccount("Temporary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DiscardProvisionalAccount(secondary.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.Account(secondary.ID); ok {
+		t.Fatalf("discarded account %q is still present", secondary.ID)
+	}
+	if primary, ok := store.Controller(); !ok || primary.ID != "primary" || !primary.Controller {
+		t.Fatalf("discarding a secondary changed controller: %#v ok=%v", primary, ok)
+	}
+
+	reopened, err := Open(filepath.Join(root, "mux"), filepath.Join(root, "primary"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reopened.Account(secondary.ID); ok {
+		t.Fatalf("discarded account %q was persisted after reopen", secondary.ID)
+	}
+}
+
+func TestDiscardProvisionalAccountRejectsPrimaryAndThreadOwner(t *testing.T) {
+	root := t.TempDir()
+	store, err := Open(filepath.Join(root, "mux"), filepath.Join(root, "primary"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DiscardProvisionalAccount("primary"); err == nil {
+		t.Fatal("discarding primary should fail")
+	}
+	secondary, err := store.AddAccount("Assigned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetThreadOwner("thread-owned", secondary.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DiscardProvisionalAccount(secondary.ID); err == nil {
+		t.Fatal("discarding a thread-owning account should fail")
+	}
+	if _, ok := store.Account(secondary.ID); !ok {
+		t.Fatal("rejected discard removed the assigned account")
+	}
+}

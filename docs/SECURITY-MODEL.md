@@ -16,8 +16,11 @@
 OAuth material stays in `auth.json` under each account's Codex home. The
 multiplexer reads an account token only to call the same authenticated ChatGPT
 profile and rate-limit-reset endpoints used by the desktop experience. It does
-not log or return tokens. State persisted by the mux contains account paths,
-labels, enabled state, and thread ownership only.
+not log or return tokens. Windows browser sign-in is initiated by the official
+Codex child app-server; the Router receives only the official authorization URL
+and login identifier needed to cancel an unfinished flow. It never collects a
+password or performs its own OAuth token exchange. State persisted by the mux
+contains account paths, labels, enabled state, and thread ownership only.
 
 The state root is mode `0700`; state, config, and control-token files are mode
 `0600`. Existing control tokens are validated as 256-bit hexadecimal values and

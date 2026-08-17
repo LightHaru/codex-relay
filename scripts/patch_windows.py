@@ -1,0 +1,757 @@
+#!/usr/bin/env python3
+"""Create an independent Windows copy of ChatGPT with Codex multiplexing.
+
+The Microsoft Store installation is never modified. The copied application has
+a small DOM bridge plus narrowly version-pinned renderer patches for profile,
+Plugins, and rate-limit reset account selection. Every renderer anchor is
+matched exactly once so a Store update fails closed instead of applying a
+possibly incorrect rewrite.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import secrets
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+APP_FAMILY_PREFIX = "OpenAI.Codex_"
+CONTROL_PORT = 48123
+ROUTER_APP_NAME = "Codex Subscription Router"
+ROUTER_APP_DIRECTORY = "app"
+ASAR_UNPACK_DIRECTORIES = "{node_modules/better-sqlite3,node_modules/node-pty}"
+ASAR_UNPACK_FILES = "{node_modules/@worklouder/device-kit-oai/node_modules/@serialport/bindings-cpp/build/Release/bindings.node,node_modules/@worklouder/device-kit-oai/node_modules/node-hid/build/Release/HID.node}"
+TESTED_ASAR_HASHES = {
+    "c7ac6d76cf5f30aa5cb92e1e46561933c06e94e3fe2d6582a04dac18c76f3ed1",
+}
+
+# These anchors are deliberately tied to the ASAR hash above. The Windows
+# bundle does not share minified symbol names with the macOS build, so keeping
+# them here makes a new Store version an explicit review/update step.
+PROFILE_QUERY_ANCHOR = "async function yol(){let e=await r_.safeGet(`/wham/profiles/me`);"
+PROFILE_QUERY_REPLACEMENT = (
+    "async function yol(){let e=await(globalThis.CodexMuxWindows?.profileData?.()"
+    "??r_.safeGet(`/wham/profiles/me`));"
+)
+PLUGIN_REQUEST_ANCHOR = (
+    "async sendRequest(e,t,n){if(this.dispatchMessage==null)throw Error("
+    "`AppServerRequestClient is missing a message dispatcher`);return e===`config/read`?"
+    "this.sendConfigReadRequest(t,n):this.enqueueRequest(e,t,e===`plugin/list`&&n?.timeoutMs==null?"
+    "{...n,timeoutMs:Osn}:n)}"
+)
+PLUGIN_REQUEST_REPLACEMENT = (
+    "async sendRequest(e,t,n){t=globalThis.CodexMuxWindows?.scopePluginRequest?.(e,t)??t;"
+    "if(this.dispatchMessage==null)throw Error(`AppServerRequestClient is missing a message dispatcher`);"
+    "return e===`config/read`?this.sendConfigReadRequest(t,n):this.enqueueRequest(e,t,"
+    "e===`plugin/list`&&n?.timeoutMs==null?{...n,timeoutMs:Osn}:n)}"
+)
+RESET_QUERY_ANCHOR = (
+    "function Coi(){let e=(0,SI.c)(1),t;return e[0]===Symbol.for(`react.memo_cache_sentinel`)?"
+    "(t={queryKey:[`rate-limit-reset-credits`],queryFn:woi,refetchInterval:Gp.ONE_MINUTE,"
+    "staleTime:Gp.FIVE_SECONDS},e[0]=t):t=e[0],Lt(t)}"
+)
+RESET_QUERY_REPLACEMENT = (
+    "function Coi(){let e=(0,n$s.useSyncExternalStore)("
+    "e=>globalThis.CodexMuxWindows?.subscribeReset?.(e)??(()=>{}),"
+    "()=>globalThis.CodexMuxWindows?.getResetAccountId?.()??null,()=>null),"
+    "t={queryKey:[`rate-limit-reset-credits`,e??`primary`],"
+    "queryFn:e?()=>globalThis.CodexMuxWindows.rateLimitResets(e):woi,"
+    "refetchInterval:Gp.ONE_MINUTE,staleTime:Gp.FIVE_SECONDS};return Lt(t)}"
+)
+RESET_MUTATION_ANCHOR = (
+    "function Toi(){let e=(0,SI.c)(3),t=lt(),n=Fw(),r;return e[0]!==n||e[1]!==t?"
+    "(r={mutationFn:Eoi,onSuccess:(e,r)=>{let{creditId:i}=r,a=e.code;"
+    "if(a===`reset`||a===`already_redeemed`){let n=e.code===`reset`?e.credit?.id??i:i;"
+    "t.setQueryData([`rate-limit-reset-credits`],e=>Yai(e,a,n))}"
+    "Promise.all([n([`rate-limit-status`]),n([`rate-limit-reset-credits`])])}},"
+    "e[0]=n,e[1]=t,e[2]=r):r=e[2],$t(r)}"
+)
+RESET_MUTATION_REPLACEMENT = (
+    "function Toi(){let e=lt(),t=Fw(),n=globalThis.CodexMuxWindows?.getResetAccountId?.()??null,"
+    "r=[`rate-limit-reset-credits`,n??`primary`];return $t({"
+    "mutationFn:n?i=>globalThis.CodexMuxWindows.consumeRateLimitReset(n,i):Eoi,"
+    "onSuccess:(n,i)=>{let{creditId:a}=i,o=n.code;if(o===`reset`||o===`already_redeemed`){"
+    "let t=o===`reset`?n.credit?.id??a:a;e.setQueryData(r,e=>Yai(e,o,t))}"
+    "Promise.all([t([`rate-limit-status`]),t(r)])}})}"
+)
+SELECTED_USAGE_ANCHOR = "let y=v;if(g!=null){"
+SELECTED_USAGE_REPLACEMENT = (
+    "let y=globalThis.CodexMuxWindows?.selectedResetUsageWindows?.()??v;if(g!=null){"
+)
+RESET_HEADER_ANCHOR = (
+    "let ve;t[46]===ge?ve=t[47]:(ve=(0,L0.jsxs)(QL,{children:[ge,_e]}),"
+    "t[46]=ge,t[47]=ve);"
+)
+RESET_HEADER_REPLACEMENT = (
+    "let ve=(0,L0.jsxs)(QL,{children:[ge,_e,"
+    "(0,L0.jsx)(`codex-mux-reset-picker`,{})]});"
+)
+PROFILE_PICKER_ANCHOR = "children:[Yt,Xt,xn,Sn]"
+PROFILE_PICKER_REPLACEMENT = "children:[(0,$.jsx)(`codex-mux-profile-picker`,{}),Yt,Xt,xn,Sn]"
+PLUGIN_PICKER_ANCHOR = "I=(0,D.jsx)(g,{title:O,subtitle:k,action:F,children:w})"
+PLUGIN_PICKER_REPLACEMENT = (
+    "I=(0,D.jsx)(g,{title:O,subtitle:k,action:F,children:(0,D.jsxs)(`div`,"
+    "{className:`contents`,children:[(0,D.jsx)(`codex-mux-plugin-picker`,{}),w]})})"
+)
+
+# Keep the Store discovery and Router-only upgrade actions in small, explicit
+# PowerShell snippets. Both receive paths through a private child-process
+# environment variable rather than string interpolation, so a user profile
+# path cannot change the command being run.
+STORE_PACKAGE_DISCOVERY_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$packages = @(
+    Get-AppxPackage -Name 'OpenAI.Codex*' -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.InstallLocation -and
+            $_.Architecture -eq 'X64' -and
+            (Test-Path -LiteralPath (Join-Path $_.InstallLocation 'app\ChatGPT.exe') -PathType Leaf) -and
+            (Test-Path -LiteralPath (Join-Path $_.InstallLocation 'app\resources\app.asar') -PathType Leaf)
+        } |
+        Sort-Object -Property Version -Descending
+)
+if ($packages.Count -gt 0) {
+    [Console]::Out.Write($packages[0].InstallLocation)
+}
+""".strip()
+
+STOP_ROUTER_PROCESSES_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$installRoot = [System.IO.Path]::GetFullPath($env:CODEX_MUX_ROUTER_INSTALL_ROOT).TrimEnd('\')
+$prefix = $installRoot + '\'
+function Get-RouterProcesses {
+    @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+        $executablePath = $_.ExecutablePath
+        if ([string]::IsNullOrWhiteSpace($executablePath)) { return $false }
+        try {
+            $fullPath = [System.IO.Path]::GetFullPath($executablePath)
+            return $fullPath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)
+        } catch {
+            return $false
+        }
+    })
+}
+
+$routerProcesses = Get-RouterProcesses
+foreach ($process in $routerProcesses) {
+    Stop-Process -Id $process.ProcessId -ErrorAction SilentlyContinue
+}
+
+$deadline = (Get-Date).AddSeconds(8)
+do {
+    Start-Sleep -Milliseconds 250
+    $routerProcesses = Get-RouterProcesses
+} while ($routerProcesses.Count -gt 0 -and (Get-Date) -lt $deadline)
+
+# A copied Electron process can retain a child after its UI has exited. Force
+# only the remaining processes whose executable lives below the managed Router
+# install root; the Store package has a different path and is never selected.
+foreach ($process in $routerProcesses) {
+    Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+}
+Start-Sleep -Milliseconds 100
+if ((Get-RouterProcesses).Count -gt 0) {
+    throw "The existing Codex Subscription Router process did not exit. Close that Router copy and run the installer again."
+}
+""".strip()
+
+CREATE_SHORTCUT_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$target = $env:CODEX_MUX_SHORTCUT_TARGET
+$workingDirectory = $env:CODEX_MUX_SHORTCUT_WORKING_DIRECTORY
+$profile = $env:CODEX_MUX_SHORTCUT_PROFILE
+if (!(Test-Path -LiteralPath $target -PathType Leaf)) {
+    throw "Router executable was not found: $target"
+}
+$desktop = [Environment]::GetFolderPath([Environment+SpecialFolder]::DesktopDirectory)
+if ([string]::IsNullOrWhiteSpace($desktop)) {
+    throw 'Windows did not provide a Desktop directory for the current user.'
+}
+New-Item -ItemType Directory -Path $desktop -Force | Out-Null
+$shortcutPath = Join-Path $desktop 'Codex Subscription Router.lnk'
+$shell = New-Object -ComObject WScript.Shell
+$shortcut = $shell.CreateShortcut($shortcutPath)
+$shortcut.TargetPath = $target
+$shortcut.Arguments = ('--user-data-dir="{0}"' -f $profile)
+$shortcut.WorkingDirectory = $workingDirectory
+$shortcut.IconLocation = "$target,0"
+$shortcut.Description = 'Independent Codex Subscription Router (does not modify the Store app)'
+$shortcut.Save()
+[Console]::Out.Write($shortcutPath)
+""".strip()
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    parser.add_argument("--source", type=Path, help="Official ChatGPT app directory to copy")
+    parser.add_argument(
+        "--destination",
+        type=Path,
+        default=default_destination(),
+        help="Managed Router app destination (defaults to the stable per-user location)",
+    )
+    parser.add_argument("--force", action="store_true", help="Back up and replace an existing router copy")
+    parser.add_argument("--allow-untested-source", action="store_true", help="Allow an unrecorded app.asar hash")
+    parser.add_argument(
+        "--launch",
+        action="store_true",
+        help="Launch the independent Router after a successful install",
+    )
+    parser.add_argument(
+        "--no-desktop-shortcut",
+        dest="desktop_shortcut",
+        action="store_false",
+        help="Do not create or repair the current user's Desktop shortcut",
+    )
+    parser.set_defaults(desktop_shortcut=True)
+    return parser.parse_args()
+
+
+def local_app_data() -> Path:
+    return Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
+
+
+def router_install_root() -> Path:
+    return local_app_data() / ROUTER_APP_NAME
+
+
+def default_destination() -> Path:
+    return router_install_root() / ROUTER_APP_DIRECTORY
+
+
+def router_profile_directory() -> Path:
+    return Path(os.environ.get("APPDATA", Path.home() / "AppData/Roaming")) / ROUTER_APP_NAME
+
+
+def is_within(path: Path, parent: Path) -> bool:
+    try:
+        resolved_path = os.path.normcase(str(path.resolve()))
+        resolved_parent = os.path.normcase(str(parent.resolve()))
+        return os.path.commonpath((resolved_path, resolved_parent)) == resolved_parent
+    except ValueError:
+        return False
+
+
+def validate_managed_destination(destination: Path) -> Path:
+    """Accept only the stable per-user destination controlled by this installer."""
+    resolved = destination.expanduser().resolve()
+    expected = default_destination().resolve()
+    if os.path.normcase(str(resolved)) != os.path.normcase(str(expected)):
+        raise RuntimeError(
+            f"destination must be the managed per-user path: {expected}; got {resolved}"
+        )
+    if resolved == Path(resolved.anchor) or resolved == Path.home().resolve():
+        raise RuntimeError("refusing an unsafe Router destination")
+    return resolved
+
+
+def source_from_store_package() -> Path | None:
+    """Find the official Store package without depending on a running app."""
+    result = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            STORE_PACKAGE_DISCOVERY_SCRIPT,
+        ],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    install_location = result.stdout.strip()
+    if not install_location:
+        return None
+    candidate = Path(install_location) / "app"
+    if (candidate / "ChatGPT.exe").is_file() and (candidate / "resources" / "app.asar").is_file():
+        return candidate
+    return None
+
+
+def source_from_running_process() -> Path | None:
+    """Fallback for an older Store installation that package discovery cannot read."""
+    process_path = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "(Get-Process -Name ChatGPT -ErrorAction SilentlyContinue | "
+            "Where-Object { $_.Path -like '*OpenAI.Codex*' } | "
+            "Select-Object -First 1 -ExpandProperty Path)",
+        ],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    ).stdout.strip()
+    if process_path:
+        candidate = Path(process_path).parent
+        if (candidate / "resources" / "app.asar").is_file():
+            return candidate
+    return None
+
+
+def source_from_windowsapps_glob() -> Path | None:
+    """Last-resort discovery for systems whose WindowsApps ACL permits it."""
+    # WindowsApps commonly denies directory enumeration to ordinary users, so
+    # this remains a fallback after the package registration lookup above.
+    program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+    windows_apps = program_files / "WindowsApps"
+    try:
+        candidates = [
+            entry / "app"
+            for entry in windows_apps.glob(f"{APP_FAMILY_PREFIX}*")
+            if "_x64__" in entry.name and (entry / "app" / "ChatGPT.exe").is_file()
+        ]
+    except OSError:
+        return None
+    if candidates:
+        return max(candidates, key=lambda path: path.stat().st_mtime)
+    return None
+
+
+def default_source() -> Path:
+    for discover in (
+        source_from_store_package,
+        source_from_running_process,
+        source_from_windowsapps_glob,
+    ):
+        candidate = discover()
+        if candidate is not None:
+            return candidate
+    raise RuntimeError(
+        "could not locate the Microsoft Store ChatGPT installation; "
+        "open the official ChatGPT app or pass --source"
+    )
+
+
+def build(output: Path, package: str) -> None:
+    subprocess.run(["go", "build", "-trimpath", "-ldflags=-s -w", "-o", str(output), package], cwd=ROOT, check=True)
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def require_asar_tool() -> tuple[str, Path]:
+    node = shutil.which("node")
+    asar = ROOT / "node_modules" / "@electron" / "asar" / "bin" / "asar.mjs"
+    if node is None:
+        raise RuntimeError("Node.js is required to patch the renderer")
+    if not asar.is_file():
+        raise RuntimeError("ASAR build tool is missing; run `npm ci --ignore-scripts` first")
+    return node, asar
+
+
+def run_asar(node: str, asar: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [node, str(asar), *arguments],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
+def replace_once(source: str, anchor: str, replacement: str, description: str) -> str:
+    count = source.count(anchor)
+    if count != 1:
+        raise RuntimeError(
+            f"could not verify the Windows {description} anchor (expected 1, found {count})"
+        )
+    return source.replace(anchor, replacement, 1)
+
+
+def asset_with_anchor(assets: Path, pattern: str, anchor: str, description: str) -> Path:
+    matches = [
+        path
+        for path in assets.glob(pattern)
+        if anchor in path.read_text(encoding="utf-8")
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"could not find exactly one Windows {description} asset "
+            f"(found {len(matches)})"
+        )
+    return matches[0]
+
+
+def patch_windows_feature_bundles(extracted: Path) -> None:
+    """Patch only the reviewed renderer slots for the supported ASAR build."""
+    assets = extracted / "webview" / "assets"
+    if not assets.is_dir():
+        raise RuntimeError("could not find the Windows renderer assets directory")
+
+    initial_path = asset_with_anchor(
+        assets, "app-initial-*.js", PROFILE_QUERY_ANCHOR, "profile query"
+    )
+    initial = initial_path.read_text(encoding="utf-8")
+    initial = replace_once(
+        initial, PROFILE_QUERY_ANCHOR, PROFILE_QUERY_REPLACEMENT, "profile query"
+    )
+    initial = replace_once(
+        initial, PLUGIN_REQUEST_ANCHOR, PLUGIN_REQUEST_REPLACEMENT, "Plugins RPC"
+    )
+    initial = replace_once(
+        initial, RESET_QUERY_ANCHOR, RESET_QUERY_REPLACEMENT, "reset query"
+    )
+    initial = replace_once(
+        initial, RESET_MUTATION_ANCHOR, RESET_MUTATION_REPLACEMENT, "reset mutation"
+    )
+    initial = replace_once(
+        initial, SELECTED_USAGE_ANCHOR, SELECTED_USAGE_REPLACEMENT, "usage window"
+    )
+    initial = replace_once(
+        initial, RESET_HEADER_ANCHOR, RESET_HEADER_REPLACEMENT, "reset sheet header"
+    )
+    initial_path.write_text(initial, encoding="utf-8")
+
+    profile_path = asset_with_anchor(
+        assets, "profile-*.js", PROFILE_PICKER_ANCHOR, "Profile settings"
+    )
+    profile = profile_path.read_text(encoding="utf-8")
+    profile = replace_once(
+        profile, PROFILE_PICKER_ANCHOR, PROFILE_PICKER_REPLACEMENT, "Profile picker"
+    )
+    profile_path.write_text(profile, encoding="utf-8")
+
+    plugins_path = asset_with_anchor(
+        assets, "plugins-settings-*.js", PLUGIN_PICKER_ANCHOR, "Plugins settings"
+    )
+    plugins = plugins_path.read_text(encoding="utf-8")
+    plugins = replace_once(
+        plugins, PLUGIN_PICKER_ANCHOR, PLUGIN_PICKER_REPLACEMENT, "Plugins picker"
+    )
+    plugins_path.write_text(plugins, encoding="utf-8")
+
+
+def load_or_create_control_token(state_root: Path) -> str:
+    state_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    token_path = state_root / "control-token"
+    if token_path.is_file():
+        token = token_path.read_text(encoding="utf-8").strip()
+        try:
+            decoded = bytes.fromhex(token)
+        except ValueError as error:
+            raise RuntimeError(f"invalid existing control token: {error}") from error
+        if len(decoded) != 32:
+            raise RuntimeError("invalid existing control token: expected 32 random bytes")
+        return token
+    token = secrets.token_hex(32)
+    temporary = token_path.with_suffix(".tmp")
+    temporary.write_text(token, encoding="utf-8")
+    os.replace(temporary, token_path)
+    return token
+
+
+def patch_windows_renderer(resources: Path, temporary: Path, token: str) -> None:
+    node, asar = require_asar_tool()
+    original_asar = resources / "app.asar"
+    extracted = temporary / "asar"
+    repacked = temporary / "app.asar"
+    print("Patching the Windows subscription surfaces…")
+    run_asar(node, asar, "extract", str(original_asar), str(extracted))
+
+    index_path = extracted / "webview" / "index.html"
+    if not index_path.is_file():
+        raise RuntimeError("could not find the Windows renderer index.html")
+    index = index_path.read_text(encoding="utf-8")
+    connect_anchor = "connect-src &#39;self&#39;"
+    if index.count(connect_anchor) != 1:
+        raise RuntimeError("could not verify the renderer Content Security Policy")
+    index = index.replace(
+        connect_anchor,
+        f"{connect_anchor} http://127.0.0.1:{CONTROL_PORT}",
+        1,
+    )
+    script_name = "codex-mux-windows-menu.js"
+    script_tag = f'<script src="./assets/{script_name}"></script>'
+    if script_tag in index:
+        raise RuntimeError("source renderer already contains the Windows router menu")
+    if index.count("</head>") != 1:
+        raise RuntimeError("could not find the renderer document head")
+    index = index.replace("</head>", f"    {script_tag}\n</head>", 1)
+    index_path.write_text(index, encoding="utf-8")
+
+    patch_windows_feature_bundles(extracted)
+
+    bridge = (ROOT / "ui" / "windows-router-menu.js").read_text(encoding="utf-8")
+    if bridge.count("__CODEX_MUX_CONTROL_PORT__") != 1 or bridge.count("__CODEX_MUX_CONTROL_TOKEN__") != 1:
+        raise RuntimeError("Windows account-menu bridge placeholders are invalid")
+    bridge = bridge.replace("__CODEX_MUX_CONTROL_PORT__", str(CONTROL_PORT), 1)
+    bridge = bridge.replace("__CODEX_MUX_CONTROL_TOKEN__", token, 1)
+    target_script = extracted / "webview" / "assets" / script_name
+    if target_script.exists():
+        raise RuntimeError("renderer already contains a Windows router menu asset")
+    target_script.write_text(bridge, encoding="utf-8")
+    subprocess.run([node, "--check", str(target_script)], cwd=ROOT, check=True)
+
+    pack_arguments = [
+        "pack",
+        "--unpack-dir",
+        ASAR_UNPACK_DIRECTORIES,
+        "--unpack",
+        ASAR_UNPACK_FILES,
+        str(extracted),
+        str(repacked),
+    ]
+    run_asar(node, asar, *pack_arguments)
+    listing = run_asar(node, asar, "list", "--is-pack", str(repacked)).stdout
+    if script_name not in listing:
+        raise RuntimeError("repacked ASAR does not contain the Windows router menu")
+    unpacked = temporary / "app.asar.unpacked"
+    if not unpacked.is_dir():
+        raise RuntimeError("ASAR pack did not create the required native unpacked tree")
+    shutil.copy2(repacked, original_asar)
+    destination_unpacked = resources / "app.asar.unpacked"
+    # Keep upstream unpacked modules that the ASAR tool did not emit. Windows
+    # may also keep handles in this copied tree briefly after copytree(), so an
+    # in-place merge avoids a needless recursive delete and remains atomic for
+    # the modified files.
+    shutil.copytree(unpacked, destination_unpacked, dirs_exist_ok=True)
+
+
+def write_launcher(destination: Path) -> Path:
+    parent = destination.parent
+    profile = router_profile_directory()
+    launcher = parent / f"{ROUTER_APP_NAME}.cmd"
+    content = (
+        "@echo off\r\n"
+        f"start \"{ROUTER_APP_NAME}\" /D \"{destination}\" "
+        f"\"{destination / 'ChatGPT.exe'}\" --user-data-dir=\"{profile}\" %*\r\n"
+    )
+    launcher.write_text(content, encoding="utf-8", newline="")
+    return launcher
+
+
+def stop_router_processes(destination: Path) -> None:
+    """Stop only executables loaded from the managed Router install root.
+
+    This deliberately uses each process's executable path rather than its
+    image name. The independent Router and the Microsoft Store app both use
+    ChatGPT.exe; matching on the name would risk closing the Store app.
+    """
+    install_root = destination.parent
+    if not install_root.exists():
+        return
+    environment = os.environ.copy()
+    environment["CODEX_MUX_ROUTER_INSTALL_ROOT"] = str(install_root)
+    result = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            STOP_ROUTER_PROCESSES_SCRIPT,
+        ],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=environment,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(
+            "could not stop the existing Router copy"
+            + (f": {detail}" if detail else "")
+        )
+
+
+def create_desktop_shortcut(destination: Path) -> Path:
+    """Create or repair a direct per-user Desktop shortcut to the Router copy."""
+    target = destination / "ChatGPT.exe"
+    if not target.is_file():
+        raise RuntimeError(f"cannot create shortcut; Router executable is missing: {target}")
+    environment = os.environ.copy()
+    environment["CODEX_MUX_SHORTCUT_TARGET"] = str(target)
+    environment["CODEX_MUX_SHORTCUT_WORKING_DIRECTORY"] = str(destination)
+    environment["CODEX_MUX_SHORTCUT_PROFILE"] = str(router_profile_directory())
+    result = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            CREATE_SHORTCUT_SCRIPT,
+        ],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=environment,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(
+            "could not create the Desktop shortcut"
+            + (f": {detail}" if detail else "")
+        )
+    shortcut = result.stdout.strip()
+    return Path(shortcut) if shortcut else Path.home() / "Desktop" / f"{ROUTER_APP_NAME}.lnk"
+
+
+def launch_router(destination: Path) -> None:
+    """Launch the independent copy directly with its dedicated Electron profile."""
+    executable = destination / "ChatGPT.exe"
+    if not executable.is_file():
+        raise RuntimeError(f"cannot launch Router; executable is missing: {executable}")
+    subprocess.Popen(
+        [str(executable), f"--user-data-dir={router_profile_directory()}"],
+        cwd=destination,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def next_backup_path(state_root: Path) -> Path:
+    """Return a unique, Router-state-owned path for an app replacement backup."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    backups = state_root / "backups"
+    for attempt in range(1_000):
+        suffix = "" if attempt == 0 else f"-{attempt}"
+        candidate = backups / f"{stamp}{suffix}" / ROUTER_APP_DIRECTORY
+        if not candidate.exists() and not candidate.parent.exists():
+            return candidate
+    raise RuntimeError("could not allocate a unique Router backup directory")
+
+
+def validate_install_paths(source: Path, destination: Path) -> tuple[Path, Path]:
+    source = source.expanduser().resolve()
+    destination = validate_managed_destination(destination)
+    if source == destination or is_within(source, destination) or is_within(destination, source):
+        raise RuntimeError(
+            "source and destination must not overlap; the official app is never patched in place"
+        )
+    return source, destination
+
+
+def patch(
+    source: Path,
+    destination: Path,
+    force: bool,
+    allow_untested: bool,
+    *,
+    desktop_shortcut: bool = True,
+    launch: bool = False,
+) -> None:
+    source, destination = validate_install_paths(source, destination)
+    resources = source / "resources"
+    asar = resources / "app.asar"
+    if not source.is_dir() or not (source / "ChatGPT.exe").is_file() or not (resources / "codex.exe").is_file() or not asar.is_file():
+        raise RuntimeError(f"not a supported Windows ChatGPT app directory: {source}")
+    actual_hash = sha256(asar)
+    print(f"Source app: {source}\napp.asar SHA-256: {actual_hash}")
+    if actual_hash not in TESTED_ASAR_HASHES and not allow_untested:
+        raise RuntimeError("source app.asar is not approved; review the update or pass --allow-untested-source")
+    if shutil.which("go") is None:
+        raise RuntimeError("Go is required to build the mux")
+    require_asar_tool()
+    if destination.exists() and not force:
+        raise RuntimeError(f"destination exists: {destination} (pass --force to create a recoverable backup)")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    state_root = Path.home() / ".codex-mux"
+    token = load_or_create_control_token(state_root)
+    # ASAR extraction preserves npm's deeply nested dependency layout. Use the
+    # shorter system temp root on Windows to avoid legacy path-length cleanup
+    # failures after a successful install. Some Store trees contain symlink-like
+    # dependency layouts that Python cannot always remove immediately, so those
+    # leftovers are deliberately ignored rather than misreporting a completed
+    # replacement as failed.
+    with tempfile.TemporaryDirectory(
+        prefix="csr-",
+        dir=tempfile.gettempdir(),
+        ignore_cleanup_errors=True,
+    ) as temp:
+        staged = Path(temp) / "app"
+        proxy = Path(temp) / "codex.exe"
+        routerctl = Path(temp) / "routerctl.exe"
+        print("Building Windows mux and control CLI…")
+        build(proxy, "./cmd/codex-mux")
+        build(routerctl, "./cmd/routerctl")
+        print("Copying the official app to an independent location…")
+        shutil.copytree(source, staged)
+        staged_resources = staged / "resources"
+        patch_windows_renderer(staged_resources, Path(temp), token)
+        real_codex = staged_resources / "codex.real.exe"
+        if real_codex.exists():
+            raise RuntimeError("source already contains codex.real.exe")
+        (staged_resources / "codex.exe").rename(real_codex)
+        shutil.copy2(proxy, staged_resources / "codex.exe")
+        shutil.copy2(routerctl, staged / "routerctl.exe")
+        manifest = {
+            "version": VERSION,
+            "platform": "windows",
+            "source": str(source),
+            "sourceAsarSha256": actual_hash,
+            "rendererUi": "windows-renderer-patches-v1",
+            "profile": str(router_profile_directory()),
+        }
+        (staged / "codex-subscription-router.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        backup = None
+        # Build and patch the new copy before stopping anything. If an
+        # upstream update or a renderer-anchor check fails, all current Router
+        # copies stay open and untouched. Once staging is ready, stop only
+        # Router executables in the managed install root. This also prevents a
+        # pre-stable app-ui-v2/app-ui-v3 copy from retaining the control port.
+        stop_router_processes(destination)
+        if destination.exists():
+            backup = next_backup_path(state_root)
+            backup.parent.mkdir(parents=True, exist_ok=False)
+            destination.rename(backup)
+            print(f"Existing copy moved to {backup}")
+        try:
+            staged.rename(destination)
+        except OSError:
+            if backup is not None and backup.exists():
+                backup.rename(destination)
+            raise
+    launcher = write_launcher(destination)
+    shortcut = create_desktop_shortcut(destination) if desktop_shortcut else None
+    if launch:
+        launch_router(destination)
+    print(
+        f"Installed app: {destination}\n"
+        f"Launcher: {launcher}\n"
+        f"Desktop shortcut: {shortcut or 'not requested'}\n"
+        f"Control CLI: {destination / 'routerctl.exe'}"
+    )
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        patch(
+            args.source or default_source(),
+            args.destination,
+            args.force,
+            args.allow_untested_source,
+            desktop_shortcut=args.desktop_shortcut,
+            launch=args.launch,
+        )
+    except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
+        print(f"Windows patch failed: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

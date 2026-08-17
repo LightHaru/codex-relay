@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/b-nnett/codex-subscription-router/internal/mux"
+	"github.com/LightHaru/codex-subscription-router/internal/mux"
 )
 
 type Server struct {
@@ -241,6 +241,22 @@ func (s *Server) accountAction(response http.ResponseWriter, request *http.Reque
 			return
 		}
 		writeRawJSON(response, http.StatusOK, result)
+		return
+	}
+	if len(parts) == 3 && parts[1] == "login" && parts[2] == "cancel" && request.Method == http.MethodPost {
+		var input struct {
+			LoginID string `json:"loginId"`
+		}
+		if err := decodeJSON(request, &input); err != nil {
+			writeJSON(response, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		result, err := s.mux.CancelLogin(ctx, accountID, input.LoginID)
+		if err != nil {
+			writeJSON(response, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(response, http.StatusOK, result)
 		return
 	}
 	if len(parts) != 2 || request.Method != http.MethodPost {

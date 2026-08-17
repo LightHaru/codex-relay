@@ -8,15 +8,16 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/b-nnett/codex-subscription-router/internal/backend"
-	"github.com/b-nnett/codex-subscription-router/internal/protocol"
-	"github.com/b-nnett/codex-subscription-router/internal/state"
+	"github.com/LightHaru/codex-subscription-router/internal/backend"
+	"github.com/LightHaru/codex-subscription-router/internal/protocol"
+	"github.com/LightHaru/codex-subscription-router/internal/state"
 )
 
 const requestTimeout = 30 * time.Second
@@ -60,6 +61,8 @@ type Multiplexer struct {
 	childrenMu sync.RWMutex
 	children   map[string]*backend.Child
 	inbound    chan backend.Inbound
+	cancelMu   sync.Mutex
+	cancelling map[string]struct{}
 
 	initializationMu sync.RWMutex
 	initializeParams json.RawMessage
@@ -103,6 +106,7 @@ func New(options Options) (*Multiplexer, error) {
 		output:               options.Output,
 		children:             make(map[string]*backend.Child),
 		inbound:              make(chan backend.Inbound, 1024),
+		cancelling:           make(map[string]struct{}),
 		externalRoutes:       make(map[string]externalRoute),
 		serverRoutes:         make(map[string]serverRequestRoute),
 		events:               make(map[chan Event]struct{}),
@@ -323,7 +327,7 @@ func (m *Multiplexer) routeTurnStart(message protocol.Message, threadID, ownerID
 	ctx, cancel := context.WithTimeout(context.Background(), 2*requestTimeout)
 	defer cancel()
 	snapshot, err := m.accountSnapshotWithProfile(ctx, ownerID, false)
-	if err != nil || accountHasCapacity(snapshot) {
+	if err == nil && accountHasCapacity(snapshot) {
 		if err := m.forward(ownerID, message); err != nil {
 			m.write(protocol.Failure(message.ID, -32023, err.Error()))
 		}
@@ -587,6 +591,76 @@ func (m *Multiplexer) child(accountID string) (*backend.Child, bool) {
 	return child, ok
 }
 
+func (m *Multiplexer) removeChild(accountID string, expected *backend.Child) {
+	m.childrenMu.Lock()
+	defer m.childrenMu.Unlock()
+	if child, ok := m.children[accountID]; ok && (expected == nil || child == expected) {
+		delete(m.children, accountID)
+	}
+}
+
+// removeIsolatedAccountHome performs a deliberately narrow cleanup after the
+// state entry was safely removed. It never derives a deletion target from a
+// caller-provided path: the account home must be the exact child home created
+// by state.Store underneath CODEX_MUX_HOME/accounts/<id>.
+func (m *Multiplexer) removeIsolatedAccountHome(account state.Account) error {
+	if account.Controller || account.ID == "" || filepath.Base(account.ID) != account.ID {
+		return errors.New("refusing to remove a non-secondary account home")
+	}
+	expected, err := filepath.Abs(filepath.Join(m.store.Root(), "accounts", account.ID, "codex-home"))
+	if err != nil {
+		return fmt.Errorf("resolve expected account home: %w", err)
+	}
+	actual, err := filepath.Abs(account.CodexHome)
+	if err != nil {
+		return fmt.Errorf("resolve account home: %w", err)
+	}
+	if actual != expected {
+		return errors.New("refusing to remove an unexpected account home")
+	}
+	return os.RemoveAll(filepath.Dir(actual))
+}
+
+// purgeAccountReferences removes only transient router data for a secondary
+// account that has already been discarded from persistent state. An
+// unconnected provisional account cannot own a useful route, but clearing any
+// stale references prevents a late child notification from reviving UI state.
+func (m *Multiplexer) purgeAccountReferences(accountID string) {
+	m.externalMu.Lock()
+	for key, route := range m.externalRoutes {
+		if route.accountID == accountID {
+			delete(m.externalRoutes, key)
+		}
+	}
+	m.externalMu.Unlock()
+
+	m.serverMu.Lock()
+	for key, route := range m.serverRoutes {
+		if route.accountID == accountID {
+			delete(m.serverRoutes, key)
+		}
+	}
+	m.serverMu.Unlock()
+
+	m.profileMu.Lock()
+	delete(m.profileCache, accountID)
+	m.profileMu.Unlock()
+
+	m.resetCreditsMu.Lock()
+	delete(m.resetCreditsCache, accountID)
+	m.resetCreditsMu.Unlock()
+
+	m.resetPreviewMu.Lock()
+	delete(m.resetPreviews, accountID)
+	m.resetPreviewMu.Unlock()
+
+	m.previewMu.Lock()
+	if m.rateLimitPreview != nil && m.rateLimitPreview.AccountID == accountID {
+		m.rateLimitPreview = nil
+	}
+	m.previewMu.Unlock()
+}
+
 func (m *Multiplexer) controllerChild() (*backend.Child, bool) {
 	controller, ok := m.store.Controller()
 	if !ok {
@@ -623,6 +697,11 @@ func (m *Multiplexer) startChild(ctx context.Context, account state.Account) (*b
 		_, err := child.Request(requestCtx, "initialize", params)
 		cancel()
 		if err != nil {
+			_ = child.Close()
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = child.Wait(shutdownCtx)
+			shutdownCancel()
+			m.removeChild(account.ID, child)
 			return nil, err
 		}
 		if initialized {
@@ -703,8 +782,21 @@ func accountHasCapacity(snapshot AccountSnapshot) bool {
 	if !snapshot.Enabled || !snapshot.Connected || snapshot.AuthType != "chatgpt" {
 		return false
 	}
-	weekly, _ := longestAndShortestWindow(snapshot.RateLimits)
-	return weekly == nil || weekly.UsedPercent < 100
+	// Codex exposes a short and a longer quota window. A subscription is only
+	// routable when every reported window has remaining capacity; otherwise a
+	// short-window exhaustion would still receive one avoidable failing turn.
+	if snapshot.RateLimits == nil {
+		return true
+	}
+	for _, window := range []*RateLimitWindow{
+		snapshot.RateLimits.Primary,
+		snapshot.RateLimits.Secondary,
+	} {
+		if window != nil && window.UsedPercent >= 100 {
+			return false
+		}
+	}
+	return true
 }
 
 func isUsageLimitResponse(message protocol.Message) bool {

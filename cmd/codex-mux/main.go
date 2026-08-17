@@ -13,15 +13,16 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/b-nnett/codex-subscription-router/internal/control"
-	"github.com/b-nnett/codex-subscription-router/internal/mux"
-	"github.com/b-nnett/codex-subscription-router/internal/protocol"
-	"github.com/b-nnett/codex-subscription-router/internal/state"
+	"github.com/LightHaru/codex-subscription-router/internal/control"
+	"github.com/LightHaru/codex-subscription-router/internal/mux"
+	"github.com/LightHaru/codex-subscription-router/internal/protocol"
+	"github.com/LightHaru/codex-subscription-router/internal/state"
 )
 
 const defaultControlPort = 48123
@@ -131,7 +132,11 @@ func resolveRealExecutable() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve wrapper executable: %w", err)
 	}
-	realExecutable := filepath.Join(filepath.Dir(executable), "codex.real")
+	realName := "codex.real"
+	if runtime.GOOS == "windows" {
+		realName += ".exe"
+	}
+	realExecutable := filepath.Join(filepath.Dir(executable), realName)
 	if _, err := os.Stat(realExecutable); err != nil {
 		return "", fmt.Errorf("find bundled codex.real: %w", err)
 	}

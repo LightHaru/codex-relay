@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"sort"
+	"strings"
 	"time"
 
-	"github.com/b-nnett/codex-subscription-router/internal/state"
+	"github.com/LightHaru/codex-subscription-router/internal/state"
 )
 
 var errNoSubscriptionCapacity = errors.New("no enabled ChatGPT subscription has capacity")
@@ -61,6 +63,15 @@ type RouteReason struct {
 	ThreadCount          int      `json:"threadCount"`
 }
 
+// LoginCancellation reports the only two safe outcomes of cancelling an
+// additional-account browser login: the provisional account was discarded, or
+// the login had already completed and the connected account was preserved.
+type LoginCancellation struct {
+	Canceled  bool             `json:"canceled"`
+	Connected bool             `json:"connected"`
+	Account   *AccountSnapshot `json:"account,omitempty"`
+}
+
 func (m *Multiplexer) Accounts(ctx context.Context) []AccountSnapshot {
 	return m.accountSnapshots(ctx, true)
 }
@@ -104,6 +115,14 @@ func (m *Multiplexer) AddAccount(ctx context.Context, label string) (AccountSnap
 		return AccountSnapshot{}, err
 	}
 	if _, err := m.startChild(ctx, account); err != nil {
+		// The account was only provisioned locally and has not started a
+		// sign-in flow. Roll it back so a failed app-server launch cannot leave
+		// a permanent "Waiting for sign-in" row behind.
+		if _, discardErr := m.store.DiscardProvisionalAccount(account.ID); discardErr == nil {
+			if cleanupErr := m.removeIsolatedAccountHome(account); cleanupErr != nil {
+				fmt.Fprintf(os.Stderr, "codex-mux: remove failed account home %s: %v\n", account.ID, cleanupErr)
+			}
+		}
 		return AccountSnapshot{}, err
 	}
 	return m.accountSnapshot(ctx, account.ID)
@@ -138,6 +157,92 @@ func (m *Multiplexer) StartLogin(ctx context.Context, id, mode string) (json.Raw
 		return nil, err
 	}
 	return response.Result, nil
+}
+
+// CancelLogin cancels only an unconnected secondary-account login. It first
+// asks the official child app-server to cancel its browser flow, then re-reads
+// account state to guard the completion/cancel race. A completed login is
+// retained; otherwise the isolated child, state entry, and account home are
+// removed together.
+func (m *Multiplexer) CancelLogin(ctx context.Context, id, loginID string) (LoginCancellation, error) {
+	account, ok := m.store.Account(id)
+	if !ok {
+		return LoginCancellation{}, fmt.Errorf("account %q not found", id)
+	}
+	if account.Controller {
+		return LoginCancellation{}, errors.New("the primary account login cannot be cancelled here")
+	}
+
+	m.cancelMu.Lock()
+	if _, cancelling := m.cancelling[id]; cancelling {
+		m.cancelMu.Unlock()
+		return LoginCancellation{}, fmt.Errorf("account %q sign-in cancellation is already in progress", id)
+	}
+	m.cancelling[id] = struct{}{}
+	m.cancelMu.Unlock()
+	defer func() {
+		m.cancelMu.Lock()
+		delete(m.cancelling, id)
+		m.cancelMu.Unlock()
+	}()
+
+	snapshot, err := m.accountSnapshotWithProfile(ctx, id, false)
+	if err != nil {
+		return LoginCancellation{}, fmt.Errorf("read subscription before cancellation: %w", err)
+	}
+	if snapshot.Connected {
+		return LoginCancellation{Connected: true, Account: &snapshot}, nil
+	}
+
+	child, ok := m.child(id)
+	if !ok {
+		return LoginCancellation{}, fmt.Errorf("account %q is unavailable", id)
+	}
+	loginID = strings.TrimSpace(loginID)
+	if loginID != "" {
+		params, _ := json.Marshal(map[string]string{"loginId": loginID})
+		if _, err := child.Request(ctx, "account/login/cancel", params); err != nil {
+			// A completed browser callback can make cancellation return an error.
+			// Re-read once before surfacing it so a valid account is never discarded.
+			if refreshed, readErr := m.accountSnapshotWithProfile(ctx, id, false); readErr == nil && refreshed.Connected {
+				return LoginCancellation{Connected: true, Account: &refreshed}, nil
+			}
+			return LoginCancellation{}, fmt.Errorf("cancel browser sign-in: %w", err)
+		}
+	}
+
+	// The successful cancel acknowledgement fences the official login flow.
+	// Re-read immediately afterward in case the browser completed just before
+	// the acknowledgement arrived.
+	snapshot, err = m.accountSnapshotWithProfile(ctx, id, false)
+	if err != nil {
+		return LoginCancellation{}, fmt.Errorf("read subscription after cancellation: %w", err)
+	}
+	if snapshot.Connected {
+		return LoginCancellation{Connected: true, Account: &snapshot}, nil
+	}
+
+	if err := child.Close(); err != nil {
+		return LoginCancellation{}, fmt.Errorf("stop cancelled subscription: %w", err)
+	}
+	if err := child.Wait(ctx); err != nil {
+		return LoginCancellation{}, fmt.Errorf("wait for cancelled subscription to stop: %w", err)
+	}
+	m.removeChild(id, child)
+
+	removed, err := m.store.DiscardProvisionalAccount(id)
+	if err != nil {
+		return LoginCancellation{}, err
+	}
+	m.purgeAccountReferences(id)
+	if err := m.removeIsolatedAccountHome(removed); err != nil {
+		// Metadata is already safely gone, and the account can no longer be
+		// selected. Keep a recoverable empty local directory rather than turn a
+		// completed cancellation into an ambiguous UI failure.
+		fmt.Fprintf(os.Stderr, "codex-mux: remove cancelled account home %s: %v\n", id, err)
+	}
+	m.publish(Event{Type: "account-removed", AccountID: id, Message: "Cancelled subscription sign-in"})
+	return LoginCancellation{Canceled: true}, nil
 }
 
 func (m *Multiplexer) Logout(ctx context.Context, id string) error {
@@ -235,11 +340,24 @@ func planLabel(planType string) string {
 }
 
 func (m *Multiplexer) chooseAccount(ctx context.Context) (state.Account, RouteReason, error) {
-	return m.chooseAccountExcluding(ctx, nil)
+	snapshots := m.accountSnapshots(ctx, false)
+	if controller, ok := m.store.Controller(); ok {
+		if reason, available := controllerRouteReason(controller, snapshots); available {
+			// The controller identity is intentionally the default owner for
+			// new chats. Additional subscriptions remain a quota/failover pool
+			// until Primary is depleted or unavailable.
+			return controller, reason, nil
+		}
+	}
+	return m.chooseAccountFromSnapshots(ctx, snapshots, nil)
 }
 
 func (m *Multiplexer) chooseAccountExcluding(ctx context.Context, excluded map[string]struct{}) (state.Account, RouteReason, error) {
 	snapshots := m.accountSnapshots(ctx, false)
+	return m.chooseAccountFromSnapshots(ctx, snapshots, excluded)
+}
+
+func (m *Multiplexer) chooseAccountFromSnapshots(ctx context.Context, snapshots []AccountSnapshot, excluded map[string]struct{}) (state.Account, RouteReason, error) {
 	type candidate struct {
 		account      state.Account
 		reason       RouteReason
@@ -254,7 +372,7 @@ func (m *Multiplexer) chooseAccountExcluding(ctx context.Context, excluded map[s
 		if _, skip := excluded[snapshot.ID]; skip {
 			continue
 		}
-		if !snapshot.Enabled || !snapshot.Connected || snapshot.AuthType != "chatgpt" {
+		if !accountHasCapacity(snapshot) {
 			continue
 		}
 		account, ok := m.store.Account(snapshot.ID)
@@ -262,23 +380,14 @@ func (m *Multiplexer) chooseAccountExcluding(ctx context.Context, excluded map[s
 			continue
 		}
 		weekly, short := longestAndShortestWindow(snapshot.RateLimits)
-		if weekly != nil && weekly.UsedPercent >= 100 {
-			continue
-		}
 		weeklyUsed := 1_000.0
 		shortUsed := 1_000.0
-		reason := RouteReason{ThreadCount: snapshot.ThreadCount}
+		reason := routeReasonForSnapshot(snapshot)
 		if weekly != nil {
 			weeklyUsed = weekly.UsedPercent
-			reason.WeeklyUsedPercent = &weekly.UsedPercent
-			if weekly.ResetsAt != nil {
-				value := *weekly.ResetsAt
-				reason.WeeklyResetsAt = &value
-			}
 		}
 		if short != nil {
 			shortUsed = short.UsedPercent
-			reason.ShortUsedPercent = &short.UsedPercent
 		}
 		candidates = append(candidates, candidate{
 			account: account, reason: reason, weekly: weekly,
@@ -345,6 +454,37 @@ collectResetCredits:
 		return left.account.CreatedAt < right.account.CreatedAt
 	})
 	return candidates[0].account, candidates[0].reason, nil
+}
+
+// controllerRouteReason selects the configured controller only while its
+// actual account snapshot remains usable. It is kept separate from the
+// quota-aware fallback selector so the primary-first policy is easy to test
+// without changing how secondaries are ranked after a failover.
+func controllerRouteReason(controller state.Account, snapshots []AccountSnapshot) (RouteReason, bool) {
+	for _, snapshot := range snapshots {
+		if snapshot.ID == controller.ID && accountHasCapacity(snapshot) {
+			return routeReasonForSnapshot(snapshot), true
+		}
+	}
+	return RouteReason{}, false
+}
+
+func routeReasonForSnapshot(snapshot AccountSnapshot) RouteReason {
+	weekly, short := longestAndShortestWindow(snapshot.RateLimits)
+	reason := RouteReason{ThreadCount: snapshot.ThreadCount}
+	if weekly != nil {
+		value := weekly.UsedPercent
+		reason.WeeklyUsedPercent = &value
+		if weekly.ResetsAt != nil {
+			resetsAt := *weekly.ResetsAt
+			reason.WeeklyResetsAt = &resetsAt
+		}
+	}
+	if short != nil {
+		value := short.UsedPercent
+		reason.ShortUsedPercent = &value
+	}
+	return reason
 }
 
 func routeUrgencyScore(now time.Time, weekly *RateLimitWindow, credits resetCreditMetadata) float64 {

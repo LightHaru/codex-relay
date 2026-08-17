@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"sync"
 
-	"github.com/b-nnett/codex-subscription-router/internal/protocol"
+	"github.com/LightHaru/codex-subscription-router/internal/protocol"
 )
 
 func (m *Multiplexer) aggregateThreadList(request protocol.Message) {

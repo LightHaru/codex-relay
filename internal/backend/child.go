@@ -9,12 +9,13 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 
-	"github.com/b-nnett/codex-subscription-router/internal/protocol"
+	"github.com/LightHaru/codex-subscription-router/internal/protocol"
 )
 
 type Inbound struct {
@@ -137,10 +138,34 @@ func (c *Child) Request(ctx context.Context, method string, params json.RawMessa
 }
 
 func (c *Child) Close() error {
+	select {
+	case <-c.closed:
+		return nil
+	default:
+	}
 	if c.command.Process == nil {
 		return nil
 	}
+	// Windows does not support delivering os.Interrupt to a process started
+	// with redirected pipes. This process is only the Router-owned isolated
+	// app-server child (never the Store desktop app), so terminate that exact
+	// child to release its account home during cancellation and shutdown.
+	if runtime.GOOS == "windows" {
+		return c.command.Process.Kill()
+	}
 	return c.command.Process.Signal(os.Interrupt)
+}
+
+// Wait blocks until the child app-server has exited. It lets the router wait
+// for Windows to release the isolated account home before a cancelled,
+// unconnected subscription is discarded.
+func (c *Child) Wait(ctx context.Context) error {
+	select {
+	case <-c.closed:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (c *Child) readLoop(stdout io.Reader) {

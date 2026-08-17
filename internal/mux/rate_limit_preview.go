@@ -6,7 +6,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/b-nnett/codex-subscription-router/internal/protocol"
+	"github.com/LightHaru/codex-subscription-router/internal/protocol"
 )
 
 type RateLimitPreviewMode string

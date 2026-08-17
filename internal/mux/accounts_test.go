@@ -1,8 +1,12 @@
 package mux
 
 import (
+	"context"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/LightHaru/codex-subscription-router/internal/state"
 )
 
 func TestPlanLabel(t *testing.T) {
@@ -148,5 +152,105 @@ func TestRouteUrgencyFallsBackToWeeklyUtilization(t *testing.T) {
 	}, resetCreditMetadata{})
 	if lessUsed <= moreUsed {
 		t.Fatalf("fallback should prefer the less-used account: less=%f more=%f", lessUsed, moreUsed)
+	}
+}
+
+func TestControllerRouteReasonPrefersUsablePrimaryOverSecondaryQuota(t *testing.T) {
+	shortMinutes := int64(300)
+	weeklyMinutes := int64(10_080)
+	controller := state.Account{ID: "primary", Controller: true}
+	reason, ok := controllerRouteReason(controller, []AccountSnapshot{
+		{
+			ID: "primary", Controller: true, Enabled: true, Connected: true, AuthType: "chatgpt",
+			RateLimits: &RateLimits{
+				Primary:   &RateLimitWindow{UsedPercent: 85, WindowDurationMins: &shortMinutes},
+				Secondary: &RateLimitWindow{UsedPercent: 95, WindowDurationMins: &weeklyMinutes},
+			},
+		},
+		{
+			ID: "secondary", Enabled: true, Connected: true, AuthType: "chatgpt",
+			RateLimits: &RateLimits{
+				Primary:   &RateLimitWindow{UsedPercent: 1, WindowDurationMins: &shortMinutes},
+				Secondary: &RateLimitWindow{UsedPercent: 1, WindowDurationMins: &weeklyMinutes},
+			},
+		},
+	})
+	if !ok {
+		t.Fatal("usable primary was not selected")
+	}
+	if reason.WeeklyUsedPercent == nil || *reason.WeeklyUsedPercent != 95 {
+		t.Fatalf("controller route reason did not describe primary: %#v", reason)
+	}
+}
+
+func TestControllerRouteReasonFallsBackWhenPrimaryWindowIsDepleted(t *testing.T) {
+	shortMinutes := int64(300)
+	weeklyMinutes := int64(10_080)
+	controller := state.Account{ID: "primary", Controller: true}
+	for _, exhausted := range []struct {
+		name    string
+		primary float64
+		weekly  float64
+	}{
+		{name: "short window", primary: 100, weekly: 40},
+		{name: "weekly window", primary: 40, weekly: 100},
+	} {
+		t.Run(exhausted.name, func(t *testing.T) {
+			_, ok := controllerRouteReason(controller, []AccountSnapshot{{
+				ID: "primary", Controller: true, Enabled: true, Connected: true, AuthType: "chatgpt",
+				RateLimits: &RateLimits{
+					Primary:   &RateLimitWindow{UsedPercent: exhausted.primary, WindowDurationMins: &shortMinutes},
+					Secondary: &RateLimitWindow{UsedPercent: exhausted.weekly, WindowDurationMins: &weeklyMinutes},
+				},
+			}})
+			if ok {
+				t.Fatal("depleted primary was still considered routable")
+			}
+		})
+	}
+}
+
+func TestQuotaFallbackSelectsSecondaryWhenPrimaryHasNoCapacity(t *testing.T) {
+	root := t.TempDir()
+	store, err := state.Open(filepath.Join(root, "mux"), filepath.Join(root, "primary"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondary, err := store.AddAccount("Subscription 2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shortMinutes := int64(300)
+	weeklyMinutes := int64(10_080)
+	multiplexer := &Multiplexer{
+		store: store,
+		now:   time.Now,
+		// Keep selection deterministic and fully local: the fallback algorithm
+		// sees known reset metadata instead of making a live API request.
+		resetPreviews: map[string]ResetCreditsPreview{
+			secondary.ID: {AccountID: secondary.ID, AvailableCount: 0},
+		},
+	}
+	account, _, err := multiplexer.chooseAccountFromSnapshots(context.Background(), []AccountSnapshot{
+		{
+			ID: "primary", Controller: true, Enabled: true, Connected: true, AuthType: "chatgpt",
+			RateLimits: &RateLimits{
+				Primary:   &RateLimitWindow{UsedPercent: 100, WindowDurationMins: &shortMinutes},
+				Secondary: &RateLimitWindow{UsedPercent: 60, WindowDurationMins: &weeklyMinutes},
+			},
+		},
+		{
+			ID: secondary.ID, Enabled: true, Connected: true, AuthType: "chatgpt",
+			RateLimits: &RateLimits{
+				Primary:   &RateLimitWindow{UsedPercent: 25, WindowDurationMins: &shortMinutes},
+				Secondary: &RateLimitWindow{UsedPercent: 40, WindowDurationMins: &weeklyMinutes},
+			},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.ID != secondary.ID {
+		t.Fatalf("fallback selected %q, want %q", account.ID, secondary.ID)
 	}
 }

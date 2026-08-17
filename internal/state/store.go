@@ -217,6 +217,41 @@ func (s *Store) UpdateAccount(id string, label *string, enabled *bool) (Account,
 	return Account{}, fmt.Errorf("account %q not found", id)
 }
 
+// DiscardProvisionalAccount removes a secondary subscription that never
+// completed sign-in. Callers must first establish that the account is not
+// connected. This narrow operation intentionally cannot remove the controller
+// or an account that owns a thread, so a cancelled browser-login flow cannot
+// accidentally erase the primary identity or a live conversation assignment.
+func (s *Store) DiscardProvisionalAccount(id string) (Account, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for index, account := range s.accounts {
+		if account.ID != id {
+			continue
+		}
+		if account.Controller {
+			return Account{}, errors.New("the primary account cannot be discarded")
+		}
+		for threadID, ownerID := range s.owners {
+			if ownerID == id {
+				return Account{}, fmt.Errorf(
+					"account %q owns thread %q and cannot be discarded", id, threadID,
+				)
+			}
+		}
+
+		previous := s.accounts
+		s.accounts = append(slices.Clone(s.accounts[:index]), s.accounts[index+1:]...)
+		if err := s.saveLocked(); err != nil {
+			s.accounts = previous
+			return Account{}, err
+		}
+		return account, nil
+	}
+	return Account{}, fmt.Errorf("account %q not found", id)
+}
+
 func (s *Store) ThreadOwner(threadID string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
