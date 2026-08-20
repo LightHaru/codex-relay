@@ -395,8 +395,12 @@ func (s *Server) authorized(request *http.Request) bool {
 
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if request.Header.Get("Origin") == "app://-" {
-			response.Header().Set("Access-Control-Allow-Origin", "app://-")
+		if origin := strings.TrimSpace(request.Header.Get("Origin")); trustedRendererOrigin(origin) {
+			// The packaged Windows renderer is loaded from a file URL, whose
+			// serialized Origin is "null".  Keep the allowlist explicit: this
+			// endpoint carries a per-install token and must not become a general
+			// cross-origin API.
+			response.Header().Set("Access-Control-Allow-Origin", origin)
 			response.Header().Set("Vary", "Origin")
 		}
 		response.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Codex-Mux-Token")
@@ -410,6 +414,19 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(response, request)
 	})
+}
+
+// trustedRendererOrigin returns the only origins used by the packaged
+// renderer builds.  Electron's current Windows build loads webview/index.html
+// with file://, which browsers report as the opaque "null" origin.  The app://
+// forms are retained for builds that use Electron's privileged app protocol.
+func trustedRendererOrigin(origin string) bool {
+	switch origin {
+	case "app://-", "app://-/", "file://", "null":
+		return true
+	default:
+		return false
+	}
 }
 
 func decodeJSON(request *http.Request, target any) error {

@@ -67,3 +67,52 @@ func TestUsageRouteRequiresRouterTokenAndGET(t *testing.T) {
 		t.Fatalf("POST usage returned %d, want 405: %s", wrongMethod.Code, wrongMethod.Body.String())
 	}
 }
+
+func TestSecurityHeadersAllowPackagedRendererOrigins(t *testing.T) {
+	server := testServer(t)
+
+	tests := []struct {
+		name            string
+		origin          string
+		wantAllowOrigin string
+	}{
+		{name: "electron app origin", origin: "app://-", wantAllowOrigin: "app://-"},
+		{name: "electron app origin with slash", origin: "app://-/", wantAllowOrigin: "app://-/"},
+		{name: "file renderer opaque origin", origin: "null", wantAllowOrigin: "null"},
+		{name: "file scheme compatibility", origin: "file://", wantAllowOrigin: "file://"},
+		{name: "untrusted web origin", origin: "https://example.test", wantAllowOrigin: ""},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
+			request.Header.Set("Origin", test.origin)
+			recorder := httptest.NewRecorder()
+			server.http.Handler.ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("health returned %d, want 200: %s", recorder.Code, recorder.Body.String())
+			}
+			if got := recorder.Header().Get("Access-Control-Allow-Origin"); got != test.wantAllowOrigin {
+				t.Fatalf("Access-Control-Allow-Origin = %q, want %q", got, test.wantAllowOrigin)
+			}
+		})
+	}
+}
+
+func TestSecurityHeadersHandleRendererPreflight(t *testing.T) {
+	server := testServer(t)
+	request := httptest.NewRequest(http.MethodOptions, "/v1/usage", nil)
+	request.Header.Set("Origin", "null")
+	request.Header.Set("Access-Control-Request-Method", http.MethodGet)
+	request.Header.Set("Access-Control-Request-Headers", "x-codex-mux-token")
+	recorder := httptest.NewRecorder()
+	server.http.Handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("preflight returned %d, want 204", recorder.Code)
+	}
+	if got := recorder.Header().Get("Access-Control-Allow-Origin"); got != "null" {
+		t.Fatalf("preflight Access-Control-Allow-Origin = %q, want %q", got, "null")
+	}
+}

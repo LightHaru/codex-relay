@@ -4,6 +4,14 @@ The patcher is intentionally tied to known ChatGPT desktop bundle structures.
 It verifies every modified renderer, main-process, and native binary anchor and
 stops instead of applying a partial patch.
 
+## Release 0.3.3
+
+This hotfix keeps the reviewed Windows renderer profiles unchanged and fixes
+the local Settings → Usage bridge for the packaged `file://` renderer. The
+loopback service now answers the browser's `Origin: null` CORS preflight (and
+the small compatibility set used by older Electron builds) without opening
+the API to arbitrary web origins. The token requirement remains unchanged.
+
 ## Release 0.3.1
 
 This release keeps both reviewed Windows Store `app.asar` profiles and adds one

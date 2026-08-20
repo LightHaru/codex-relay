@@ -3,6 +3,16 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/) and
 this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.3] - 2026-08-20
+
+### Fixed
+
+- Windows Settings → Usage now works from the packaged renderer. The local
+  Usage bridge accepts the opaque `null`/`file://` Origin emitted by Electron's
+  `file://` page, while retaining an explicit allowlist and token protection.
+  This removes the generic **“Oops, an error has occurred”** screen caused by
+  the browser rejecting the local request during CORS preflight.
+
 ## [0.3.2] - 2026-08-20
 
 ### Fixed
@@ -103,7 +113,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 - Loopback-only, token-authenticated diagnostic UI states.
 - Source-only CI, draft release automation, security documentation, and smoke tests.
 
-[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.3
 [0.3.2]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.2
 [0.3.1]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.1
 [0.3.0]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.0
