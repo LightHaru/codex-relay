@@ -74,6 +74,8 @@ class FakeElement {
   getBoundingClientRect() { return this.rect || { width: 0, height: 0 }; }
 
   getClientRects() { return [this.getBoundingClientRect()]; }
+
+  closest() { return null; }
 }
 
 function loadBridge({ fetchImpl, privateLoginImpl, updaterImpl } = {}) {
@@ -433,9 +435,12 @@ test("Usage panel chooses the native content column instead of the outer shell",
   assert.equal(placement.container, content);
 });
 
-test("Usage panel is inserted after the native Usage heading block", () => {
+test("Usage panel is inserted after the native Usage title and description", () => {
   const source = fs.readFileSync(path.join(__dirname, "windows-router-menu.js"), "utf8");
-  assert.match(source, /headingBlock\.nextElementSibling/);
+  assert.match(source, /semanticHeadings/);
+  assert.match(source, /isNavigationElement/);
+  assert.match(source, /placement\.heading\.nextElementSibling/);
+  assert.match(source, /parent\.insertBefore\(host, before\)/);
   assert.doesNotMatch(source, /placement\.container\.firstElementChild/);
 });
 

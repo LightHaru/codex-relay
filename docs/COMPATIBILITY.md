@@ -14,6 +14,14 @@ Relay app with the existing three-subscription profile; all local bridge
 requests returned 200 and the native Usage page rendered without its generic
 error screen.
 
+## Release 0.3.8
+
+This hotfix keeps the `0.3.7` multi-subscription Usage data and moves its
+Windows renderer insertion point to the native Usage subpage title anchor. The
+Settings navigation and all other Settings pages remain untouched. Both
+reviewed Windows Store renderer profiles continue to use the same exact
+compatibility anchors.
+
 ## Release 0.3.7
 
 This feature release keeps the reviewed Windows `26.818.2441.0` renderer

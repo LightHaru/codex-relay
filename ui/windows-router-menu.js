@@ -757,8 +757,15 @@
   }
 
   function usageBillingPlacement() {
-    const elements = [...document.querySelectorAll("h1, h2, h3, [role='heading'], body *")].filter(isVisible);
-    const heading = elements.find((element) => labelMatches(element.textContent, USAGE_BILLING_LABELS));
+    const isNavigationElement = (element) => Boolean(
+      element.closest("nav, aside, [role='navigation'], [role='menu'], [role='menubar']"),
+    );
+    // The settings sidebar repeats the same visible label as the page title.
+    // Prefer semantic headings and explicitly reject navigation ancestors so
+    // the panel can never be mounted under the sidebar's Usage row.
+    const semanticHeadings = [...document.querySelectorAll("h1, h2, h3, [role='heading']")]
+      .filter((element) => isVisible(element) && !isNavigationElement(element));
+    const heading = semanticHeadings.find((element) => labelMatches(element.textContent, USAGE_BILLING_LABELS));
     if (!heading) return null;
     // Walk upward from the visible heading and choose the *smallest* sizeable
     // ancestor. The app's outer shell also contains the sidebar; selecting a
@@ -778,20 +785,22 @@
   function installUsageBillingSurface() {
     const placement = usageBillingPlacement();
     if (!placement) return;
-    let host = placement.container.querySelector(`#${USAGE_BILLING_ID}`);
+    let host = placement.container.querySelector(`#${USAGE_BILLING_ID}`) || document.getElementById(USAGE_BILLING_ID);
     if (!host) {
       host = make("codex-mux-usage-billing", "", "");
       host.id = USAGE_BILLING_ID;
-      // Insert after the smallest direct child that contains the native
-      // heading/subtitle. This keeps the Relay cards in the Usage & billing
-      // content flow, below the native title, instead of turning them into a
-      // sidebar or a sibling column beside Settings navigation.
-      let headingBlock = placement.heading;
-      while (headingBlock.parentElement && headingBlock.parentElement !== placement.container) {
-        headingBlock = headingBlock.parentElement;
-      }
-      const parent = headingBlock.parentElement || placement.container;
-      parent.insertBefore(host, headingBlock.nextElementSibling || null);
+    }
+    // Anchor to the actual visible title element. The next sibling is the
+    // native description on the reviewed Windows bundle; placing before the
+    // sibling after that description keeps both title lines and the native
+    // `Your plan` card visible, while the Relay cards remain in the same
+    // Usage & billing content flow. If the bundle omits a description, append
+    // directly after the title instead.
+    const parent = placement.heading.parentElement || placement.container;
+    const description = placement.heading.nextElementSibling;
+    const before = description?.nextElementSibling || null;
+    if (host.parentElement !== parent || host !== before) {
+      parent.insertBefore(host, before);
     }
     const lastRefresh = Number(host.dataset.loadedAt || 0);
     if (host.dataset.loading !== "true" && Date.now() - lastRefresh > 30000) void mountUsageBilling(host);

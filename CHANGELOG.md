@@ -3,6 +3,20 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/) and
 this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.8] - 2026-08-21
+
+### Fixed
+
+- Windows Usage & billing aggregation is now mounted only inside the native
+  Usage subpage, directly after its title and description and before **Your
+  plan**. It no longer occupies the Settings shell, sidebar, or neighboring
+  navigation content.
+- Existing Relay Usage cards are relocated to the correct title anchor when a
+  renderer rerenders the Settings page, preventing duplicate or full-page
+  overlays.
+
+Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.8
+
 ## [0.3.7] - 2026-08-21
 
 ### Added
@@ -175,7 +189,8 @@ Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.7
 - Loopback-only, token-authenticated diagnostic UI states.
 - Source-only CI, draft release automation, security documentation, and smoke tests.
 
-[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.3.7...HEAD
+[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.3.8...HEAD
+[0.3.8]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.8
 [0.3.7]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.7
 [0.3.6]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.6
 [0.3.5]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.5
