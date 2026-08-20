@@ -18,6 +18,9 @@ from unittest import mock
 
 from patch_windows import (
     CREATE_SHORTCUT_SCRIPT,
+    CURRENT_RENDERER_PROFILE,
+    LOGIN_MAIN_TRAILER_ANCHOR,
+    LOGIN_PRELOAD_TRAILER_ANCHOR,
     PLUGIN_PICKER_ANCHOR,
     PLUGIN_PICKER_REPLACEMENT,
     PLUGIN_REQUEST_ANCHOR,
@@ -35,13 +38,17 @@ from patch_windows import (
     SELECTED_USAGE_ANCHOR,
     SELECTED_USAGE_REPLACEMENT,
     STOP_ROUTER_PROCESSES_SCRIPT,
+    WINDOWS_RENDERER_PROFILES,
     default_destination,
     default_source,
     create_desktop_shortcut,
+    legacy_router_profile_directory,
     next_backup_path,
     patch_windows_feature_bundles,
+    patch_windows_login_bundles,
     source_from_store_package,
     stop_router_processes,
+    router_profile_directory,
     validate_install_paths,
     validate_managed_destination,
 )
@@ -50,45 +57,80 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class WindowsRendererPatchTests(unittest.TestCase):
-    def make_renderer(self, root: Path) -> Path:
+    def make_renderer(self, root: Path, profile=None) -> Path:
+        profile = profile or {
+            "profile_query_anchor": PROFILE_QUERY_ANCHOR,
+            "plugin_request_anchor": PLUGIN_REQUEST_ANCHOR,
+            "reset_query_anchor": RESET_QUERY_ANCHOR,
+            "reset_mutation_anchor": RESET_MUTATION_ANCHOR,
+            "selected_usage_anchor": SELECTED_USAGE_ANCHOR,
+            "reset_header_anchor": RESET_HEADER_ANCHOR,
+            "profile_picker_anchor": PROFILE_PICKER_ANCHOR,
+            "plugin_picker_anchor": PLUGIN_PICKER_ANCHOR,
+        }
         assets = root / "webview" / "assets"
         assets.mkdir(parents=True)
         (assets / "app-initial-fixture.js").write_text(
             "\n".join(
                 (
-                    PROFILE_QUERY_ANCHOR,
-                    PLUGIN_REQUEST_ANCHOR,
-                    RESET_QUERY_ANCHOR,
-                    RESET_MUTATION_ANCHOR,
-                    SELECTED_USAGE_ANCHOR,
-                    RESET_HEADER_ANCHOR,
+                    profile["profile_query_anchor"],
+                    profile["plugin_request_anchor"],
+                    profile["reset_query_anchor"],
+                    profile["reset_mutation_anchor"],
+                    profile["selected_usage_anchor"],
+                    profile["reset_header_anchor"],
                 )
             ),
             encoding="utf-8",
         )
         (assets / "profile-fixture.js").write_text(
-            PROFILE_PICKER_ANCHOR, encoding="utf-8"
+            profile["profile_picker_anchor"], encoding="utf-8"
         )
         (assets / "plugins-settings-fixture.js").write_text(
-            PLUGIN_PICKER_ANCHOR, encoding="utf-8"
+            profile["plugin_picker_anchor"], encoding="utf-8"
         )
         return assets
 
-    def assert_replacements(self, assets: Path) -> None:
+    def assert_replacements(self, assets: Path, profile=None) -> None:
+        expected = profile or {
+            "profile_query_replacement": PROFILE_QUERY_REPLACEMENT,
+            "plugin_request_replacement": PLUGIN_REQUEST_REPLACEMENT,
+            "reset_query_replacement": RESET_QUERY_REPLACEMENT,
+            "reset_mutation_replacement": RESET_MUTATION_REPLACEMENT,
+            "selected_usage_replacement": SELECTED_USAGE_REPLACEMENT,
+            "reset_header_replacement": RESET_HEADER_REPLACEMENT,
+            "profile_picker_replacement": PROFILE_PICKER_REPLACEMENT,
+            "plugin_picker_replacement": PLUGIN_PICKER_REPLACEMENT,
+        }
         initial = next(assets.glob("app-initial-*.js")).read_text(encoding="utf-8")
-        profile = next(assets.glob("profile-*.js")).read_text(encoding="utf-8")
+        profile_source = next(assets.glob("profile-*.js")).read_text(encoding="utf-8")
         plugins = next(assets.glob("plugins-settings-*.js")).read_text(encoding="utf-8")
         for replacement in (
-            PROFILE_QUERY_REPLACEMENT,
-            PLUGIN_REQUEST_REPLACEMENT,
-            RESET_QUERY_REPLACEMENT,
-            RESET_MUTATION_REPLACEMENT,
-            SELECTED_USAGE_REPLACEMENT,
-            RESET_HEADER_REPLACEMENT,
+            expected["profile_query_replacement"],
+            expected["plugin_request_replacement"],
+            expected["reset_query_replacement"],
+            expected["reset_mutation_replacement"],
+            expected["selected_usage_replacement"],
+            expected["reset_header_replacement"],
         ):
             self.assertIn(replacement, initial)
-        self.assertIn(PROFILE_PICKER_REPLACEMENT, profile)
-        self.assertIn(PLUGIN_PICKER_REPLACEMENT, plugins)
+        self.assertIn(expected["profile_picker_replacement"], profile_source)
+        self.assertIn(expected["plugin_picker_replacement"], plugins)
+
+    def make_login_bundles(self, root: Path) -> tuple[Path, Path]:
+        build = root / ".vite" / "build"
+        build.mkdir(parents=True)
+        preload = build / "preload.js"
+        preload.write_text(
+            "let electron = require('electron');" + LOGIN_PRELOAD_TRAILER_ANCHOR,
+            encoding="utf-8",
+        )
+        main = build / "main-fixture.js"
+        main.write_text(
+            LOGIN_MAIN_TRAILER_ANCHOR + "main-fixture.js.map",
+            encoding="utf-8",
+        )
+        return preload, main
 
     def test_patches_all_scoped_windows_surfaces(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -106,6 +148,55 @@ class WindowsRendererPatchTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(RuntimeError, "Profile settings"):
                 patch_windows_feature_bundles(root)
+
+    def test_patches_private_login_preload_and_main_process(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            preload, main = self.make_login_bundles(root)
+            patched_preload, patched_main = patch_windows_login_bundles(root)
+            self.assertEqual(patched_preload, preload)
+            self.assertEqual(patched_main, main)
+            preload_source = preload.read_text(encoding="utf-8")
+            main_source = main.read_text(encoding="utf-8")
+            self.assertIn("codexMuxLoginWindow", preload_source)
+            self.assertIn("codex-mux:open-isolated-login", preload_source)
+            self.assertIn("codex-mux-login-${randomUUID()}", main_source)
+            self.assertIn("sandbox: true", main_source)
+            self.assertIn("nodeIntegration: false", main_source)
+            self.assertIn("webSecurity: true", main_source)
+            self.assertIn("setPermissionRequestHandler", main_source)
+            self.assertIn("clearStorageData", main_source)
+            self.assertIn("codexMuxUpdater", preload_source)
+            self.assertIn("router-updater", main_source)
+            self.assertNotIn("shell.openExternal", main_source)
+
+    def test_patches_the_current_renderer_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            assets = self.make_renderer(root, CURRENT_RENDERER_PROFILE)
+            self.assertEqual(len(WINDOWS_RENDERER_PROFILES), 2)
+            patch_windows_feature_bundles(root, CURRENT_RENDERER_PROFILE)
+            self.assert_replacements(assets, CURRENT_RENDERER_PROFILE)
+
+    def test_rejects_duplicate_private_login_preload_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            preload, _main = self.make_login_bundles(root)
+            preload.write_text(
+                preload.read_text(encoding="utf-8") + LOGIN_PRELOAD_TRAILER_ANCHOR,
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "private login preload"):
+                patch_windows_login_bundles(root)
+
+    def test_menu_uses_the_private_login_bridge_without_window_open(self) -> None:
+        menu = (ROOT / "ui" / "windows-router-menu.js").read_text(encoding="utf-8")
+        self.assertIn("codexMuxLoginWindow", menu)
+        self.assertIn("codexMuxUpdater", menu)
+        self.assertIn("Update now", menu)
+        self.assertIn("fresh temporary browser session", menu)
+        self.assertIn("await showBrowserLogin", menu)
+        self.assertNotIn("window.open(", menu)
 
     def test_store_registration_is_the_first_source_choice(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -192,7 +283,7 @@ class WindowsRendererPatchTests(unittest.TestCase):
             destination = Path(directory) / "app"
             destination.mkdir()
             (destination / "ChatGPT.exe").touch()
-            shortcut_path = Path(directory) / "Desktop" / "Codex Subscription Router.lnk"
+            shortcut_path = Path(directory) / "Desktop" / "Codex Relay.lnk"
             completed = subprocess.CompletedProcess(
                 args=[],
                 returncode=0,
@@ -213,7 +304,7 @@ class WindowsRendererPatchTests(unittest.TestCase):
             )
             self.assertEqual(
                 environment["CODEX_MUX_SHORTCUT_PROFILE"],
-                str(Path(directory) / "Roaming" / "Codex Subscription Router"),
+                str(Path(directory) / "Roaming" / "Codex Relay"),
             )
             self.assertIn("$shortcut.TargetPath = $target", CREATE_SHORTCUT_SCRIPT)
             self.assertIn("--user-data-dir", CREATE_SHORTCUT_SCRIPT)
@@ -229,7 +320,7 @@ class WindowsRendererPatchTests(unittest.TestCase):
             self.assertEqual(next_backup_path(state_root), expected)
 
     def test_double_click_installer_calls_the_safe_patcher_path(self) -> None:
-        cmd = (ROOT / "Install Codex Subscription Router.cmd").read_text(encoding="utf-8")
+        cmd = (ROOT / "Install Codex Relay.cmd").read_text(encoding="utf-8")
         powershell = (ROOT / "scripts" / "install_windows.ps1").read_text(
             encoding="utf-8"
         )
@@ -238,6 +329,14 @@ class WindowsRendererPatchTests(unittest.TestCase):
         self.assertIn("'--force', '--launch'", powershell)
         self.assertIn("Get-Command py.exe", powershell)
         self.assertIn("never targets", powershell)
+
+    def test_legacy_profile_is_preserved_during_the_brand_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+            os.environ, {"APPDATA": str(Path(directory) / "Roaming")}, clear=False
+        ):
+            legacy = legacy_router_profile_directory()
+            legacy.mkdir(parents=True)
+            self.assertEqual(router_profile_directory(), legacy)
 
     @unittest.skipUnless(
         os.environ.get("CODEX_MUX_WINDOWS_RENDERER_DIR"),
@@ -255,8 +354,14 @@ class WindowsRendererPatchTests(unittest.TestCase):
                 next(source_assets.glob("plugins-settings-*.js")),
             ):
                 shutil.copy2(source, assets / source.name)
-            patch_windows_feature_bundles(Path(directory))
-            self.assert_replacements(assets)
+            initial_source = next(assets.glob("app-initial-*.js")).read_text(encoding="utf-8")
+            renderer_profile = (
+                CURRENT_RENDERER_PROFILE
+                if CURRENT_RENDERER_PROFILE["profile_query_anchor"] in initial_source
+                else None
+            )
+            patch_windows_feature_bundles(Path(directory), renderer_profile)
+            self.assert_replacements(assets, renderer_profile)
 
 
 if __name__ == "__main__":

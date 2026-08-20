@@ -19,7 +19,7 @@ func TestFetchProfileImageURL(t *testing.T) {
 		}
 		response.Header().Set("Content-Type", "application/json")
 		_, _ = response.Write([]byte(`{
-			"profile":{"profile_picture_url":"https://example.com/wanted.png"}
+			"profile":{"profile_picture_url":"https://example.com/wanted.png","display_name":"Bennett","username":"bennett-user"}
 		}`))
 	}))
 	defer server.Close()
@@ -42,6 +42,33 @@ func TestFetchProfileImageURL(t *testing.T) {
 	}
 	if imageURL != "https://example.com/wanted.png" {
 		t.Fatalf("unexpected image URL %q", imageURL)
+	}
+}
+
+func TestFetchProfileIdentityIncludesDisplayNameAndUsername(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{
+			"profile":{"profile_picture_url":"https://example.com/wanted.png","display_name":"  Bennett  ","username":"bennett-user"}
+		}`))
+	}))
+	defer server.Close()
+
+	authPath := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(authPath, []byte(`{
+		"tokens":{"access_token":"secret-token","account_id":"account-123"}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	identity, err := fetchProfileIdentity(
+		context.Background(), server.Client(), server.URL, authPath,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.DisplayName != "Bennett" || identity.Username != "bennett-user" {
+		t.Fatalf("unexpected profile identity: %#v", identity)
 	}
 }
 

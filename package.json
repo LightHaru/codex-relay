@@ -1,16 +1,16 @@
 {
-  "name": "codex-subscription-router-patcher",
+  "name": "codex-relay-patcher",
   "private": true,
-  "version": "0.1.0",
-  "description": "Build tooling for independent Codex Subscription Router desktop app patches",
+  "version": "0.3.0",
+  "description": "Build tooling for independent Codex Relay desktop app patches",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/LightHaru/codex-subscription-router.git"
+    "url": "git+https://github.com/LightHaru/codex-relay.git"
   },
-  "homepage": "https://github.com/LightHaru/codex-subscription-router#readme",
+  "homepage": "https://github.com/LightHaru/codex-relay#readme",
   "bugs": {
-    "url": "https://github.com/LightHaru/codex-subscription-router/issues"
+    "url": "https://github.com/LightHaru/codex-relay/issues"
   },
   "engines": {
     "node": ">=22.12"
@@ -18,7 +18,7 @@
   "scripts": {
     "check": "npm run check:go && npm run check:js && npm run check:python && npm run check:windows && npm run check:shell",
     "check:go": "go test ./... && go vet ./...",
-    "check:js": "node --check ui/account-menu.js && node --check ui/thread-subscription.js && node --check ui/ui-test-bridge.cjs && node --check ui/windows-router-menu.js && node --test ui/test-windows-router-menu.cjs",
+    "check:js": "node --check ui/account-menu.js && node --check ui/thread-subscription.js && node --check ui/ui-test-bridge.cjs && node --check ui/windows-router-menu.js && node --check ui/windows-router-login-preload.js && node --check ui/windows-router-login-main.js && node --check ui/windows-router-update-preload.js && node --check ui/windows-router-update-main.js && node --test ui/test-windows-router-menu.cjs ui/test-windows-router-login-main.cjs ui/test-windows-router-update-main.cjs",
     "check:python": "python3 -m py_compile scripts/patch_app.py scripts/patch_windows.py scripts/check_release.py scripts/test_patch_windows.py || python -m py_compile scripts/patch_app.py scripts/patch_windows.py scripts/check_release.py scripts/test_patch_windows.py",
     "check:windows": "python3 scripts/test_patch_windows.py || python scripts/test_patch_windows.py",
     "check:shell": "bash -n install.sh",

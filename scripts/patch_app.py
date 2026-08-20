@@ -22,15 +22,17 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PROJECT_VERSION = (PROJECT_ROOT / "VERSION").read_text(encoding="utf-8").strip()
 DEFAULT_SOURCE = Path("/Applications/ChatGPT.app")
-DEFAULT_DESTINATION = Path.home() / "Applications" / "Codex Subscription Router.app"
+DEFAULT_DESTINATION = Path.home() / "Applications" / "Codex Relay.app"
 DEFAULT_STATE_ROOT = Path.home() / ".codex-mux"
 CONTROL_PORT = 48123
+# Keep this on-disk profile key stable so an existing macOS Router keeps its
+# Electron history and settings after the visible application is renamed.
 DESKTOP_PROFILE_NAME = "Codex Subscription Router"
 DESKTOP_BUNDLE_IDENTIFIER = "app.cdxmux.multi"
 OPENAI_DESKTOP_CODE_IDENTIFIER = "com.openai.codex"
 OPENAI_COMPUTER_USE_BUNDLE_IDENTIFIER = "com.openai.sky.CUAService"
 COMPUTER_USE_BUNDLE_IDENTIFIER = "com.cdxmux.sky.CUAService"
-COMPUTER_USE_DISPLAY_NAME = "Codex Subscription Router Computer Use"
+COMPUTER_USE_DISPLAY_NAME = "Codex Relay Computer Use"
 COMPUTER_USE_APP_NAME = f"{COMPUTER_USE_DISPLAY_NAME}.app"
 LAUNCH_SERVICES_REGISTER = Path(
     "/System/Library/Frameworks/CoreServices.framework/Frameworks/"
@@ -1101,8 +1103,8 @@ def patch_info_plist(
     plist_path = app / "Contents" / "Info.plist"
     with plist_path.open("rb") as handle:
         info = plistlib.load(handle)
-    info["CFBundleDisplayName"] = "Codex Subscription Router"
-    info["CFBundleName"] = "Codex Subscription Router"
+    info["CFBundleDisplayName"] = "Codex Relay"
+    info["CFBundleName"] = "Codex Relay"
     # A distinct identifier keeps Launch Services and external Computer Use from
     # confusing this independently signed copy with the official ChatGPT app.
     info["CFBundleIdentifier"] = DESKTOP_BUNDLE_IDENTIFIER
@@ -1193,7 +1195,7 @@ def patch_app(
     if force:
         ensure_components_are_stopped((destination, installed_computer_use_app))
 
-    with tempfile.TemporaryDirectory(prefix=".codex-subscription-router-", dir=destination.parent) as temporary:
+    with tempfile.TemporaryDirectory(prefix=".codex-relay-", dir=destination.parent) as temporary:
         temporary_path = Path(temporary)
         staged_app = temporary_path / destination.name
         staged_computer_use_app = temporary_path / COMPUTER_USE_APP_NAME

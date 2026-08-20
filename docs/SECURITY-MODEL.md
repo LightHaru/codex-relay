@@ -38,9 +38,14 @@ The control server binds to `127.0.0.1`. Private endpoints require the token
 embedded into the independently built local renderer. Profile images must use
 HTTPS. Response sizes and JSON request bodies are bounded.
 
-The project itself does not provide a telemetry or update endpoint. Network
-traffic beyond loopback is performed by the official Codex children or by the
-documented ChatGPT profile and rate-limit APIs.
+The Windows Router checks one documented GitHub Releases manifest only when a
+patched copy is running. The manifest is restricted to the project's GitHub
+hosts, the downloaded source archive is checked against its SHA-256 value, and
+the external updater validates the archive paths before invoking the local
+installer. No credentials or control token are sent with the check. There is
+no telemetry endpoint; traffic beyond loopback is otherwise performed by the
+official Codex children or by the documented ChatGPT profile and rate-limit
+APIs. Releases contain source only, never an OpenAI ASAR or executable.
 
 ## Signing and native access
 

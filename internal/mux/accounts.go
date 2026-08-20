@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LightHaru/codex-subscription-router/internal/state"
+	"github.com/LightHaru/codex-relay/internal/state"
 )
 
 var errNoSubscriptionCapacity = errors.New("no enabled ChatGPT subscription has capacity")
@@ -36,21 +36,30 @@ type RateLimits struct {
 }
 
 type AccountSnapshot struct {
-	ID              string          `json:"id"`
-	Label           string          `json:"label"`
-	Enabled         bool            `json:"enabled"`
-	Controller      bool            `json:"controller"`
-	Connected       bool            `json:"connected"`
-	Email           string          `json:"email,omitempty"`
-	PlanType        string          `json:"planType,omitempty"`
-	PlanLabel       string          `json:"planLabel,omitempty"`
-	AuthType        string          `json:"authType,omitempty"`
-	ProfileImageURL string          `json:"profileImageUrl,omitempty"`
-	RateLimits      *RateLimits     `json:"rateLimits,omitempty"`
-	ThreadCount     int             `json:"threadCount"`
-	Error           string          `json:"error,omitempty"`
-	CreatedAt       int64           `json:"createdAt"`
-	RawAccount      json.RawMessage `json:"-"`
+	ID                   string      `json:"id"`
+	Label                string      `json:"label"`
+	Enabled              bool        `json:"enabled"`
+	Controller           bool        `json:"controller"`
+	Connected            bool        `json:"connected"`
+	DisplayName          string      `json:"displayName,omitempty"`
+	Username             string      `json:"username,omitempty"`
+	Email                string      `json:"email,omitempty"`
+	PlanType             string      `json:"planType,omitempty"`
+	PlanLabel            string      `json:"planLabel,omitempty"`
+	AuthType             string      `json:"authType,omitempty"`
+	ProfileImageURL      string      `json:"profileImageUrl,omitempty"`
+	RateLimits           *RateLimits `json:"rateLimits,omitempty"`
+	NextRateLimitResetAt *int64      `json:"nextRateLimitResetAt,omitempty"`
+	// RateLimitAvailable distinguishes a subscription whose quota endpoint has
+	// not returned data yet from one whose windows are genuinely at 0% left.
+	// The UI uses this flag to avoid presenting missing data as a fake 100% or a
+	// confusing dash.
+	RateLimitAvailable bool            `json:"rateLimitAvailable"`
+	RateLimitError     string          `json:"rateLimitError,omitempty"`
+	ThreadCount        int             `json:"threadCount"`
+	Error              string          `json:"error,omitempty"`
+	CreatedAt          int64           `json:"createdAt"`
+	RawAccount         json.RawMessage `json:"-"`
 }
 
 type RouteReason struct {
@@ -70,6 +79,14 @@ type LoginCancellation struct {
 	Canceled  bool             `json:"canceled"`
 	Connected bool             `json:"connected"`
 	Account   *AccountSnapshot `json:"account,omitempty"`
+}
+
+// PrimaryChange is returned by the control API after a Primary switch. The
+// restart count lets the UI explain that the Router-owned Codex sessions were
+// actually restarted, rather than merely changing a label in the menu.
+type PrimaryChange struct {
+	Account           AccountSnapshot `json:"account"`
+	RestartedChildren int             `json:"restartedChildren"`
 }
 
 func (m *Multiplexer) Accounts(ctx context.Context) []AccountSnapshot {
@@ -133,6 +150,119 @@ func (m *Multiplexer) UpdateAccount(ctx context.Context, id string, label *strin
 		return AccountSnapshot{}, err
 	}
 	return m.accountSnapshot(ctx, id)
+}
+
+// SetPrimary changes the Router's controller independently of the account
+// currently selected by the native Codex application. It deliberately does
+// not require quota capacity: a selected account may be depleted and should
+// then fail over to another connected subscription for new work. The change
+// also restarts every Router-owned Codex child so the active session observes
+// the new controller immediately.
+func (m *Multiplexer) SetPrimary(ctx context.Context, id string) (AccountSnapshot, error) {
+	result, err := m.SetPrimaryAndRestart(ctx, id)
+	return result.Account, err
+}
+
+// SetPrimaryAndRestart performs the Primary transition and reports how many
+// isolated Codex app-server children were restarted. Keeping this separate
+// from SetPrimary preserves the small state-oriented API used by tests and
+// internal callers while allowing the HTTP UI to show a truthful completion
+// message.
+func (m *Multiplexer) SetPrimaryAndRestart(ctx context.Context, id string) (PrimaryChange, error) {
+	m.accountMutationMu.Lock()
+	defer m.accountMutationMu.Unlock()
+
+	account, ok := m.store.Account(id)
+	if !ok {
+		return PrimaryChange{}, fmt.Errorf("account %q not found", id)
+	}
+	if !account.Enabled {
+		return PrimaryChange{}, errors.New("the selected account is disabled")
+	}
+	snapshot, err := m.accountSnapshotWithProfile(ctx, id, false)
+	if err != nil {
+		return PrimaryChange{}, fmt.Errorf("read subscription before selecting Primary: %w", err)
+	}
+	if !snapshot.Connected || snapshot.AuthType != "chatgpt" {
+		return PrimaryChange{}, errors.New("the selected account is not a connected ChatGPT subscription")
+	}
+	previous, hadPrevious := m.store.Controller()
+	if hadPrevious && previous.ID == id {
+		return PrimaryChange{Account: snapshot}, nil
+	}
+	if _, err := m.store.SetController(id); err != nil {
+		return PrimaryChange{}, err
+	}
+	restarted, restartErr := m.restartChildrenLocked(ctx)
+	if restartErr != nil {
+		// Do not leave the persisted controller pointing at a session pool that
+		// could not be rebuilt. Best-effort rollback keeps the previous working
+		// choice when a child executable or initialization fails.
+		if hadPrevious {
+			_, _ = m.store.SetController(previous.ID)
+			_, _ = m.restartChildrenLocked(ctx)
+		}
+		return PrimaryChange{}, fmt.Errorf("restart Router sessions after changing Primary: %w", restartErr)
+	}
+	// The pre-switch snapshot already came from the selected child. Update its
+	// local controller bit instead of issuing another request after the child
+	// restart; this keeps the response fast and avoids a transient reconnect
+	// race being reported as a failed Primary change.
+	updated := snapshot
+	updated.Controller = true
+	m.publish(Event{Type: "primary-changed", AccountID: id, Data: updated})
+	m.publish(Event{Type: "router-restarted", AccountID: id, Message: "Router Codex sessions restarted"})
+	return PrimaryChange{Account: updated, RestartedChildren: restarted}, nil
+}
+
+// RemoveAccount disconnects and removes a secondary subscription from Router
+// state. The controller must be changed first, and accounts owning chats need
+// an explicit force confirmation so the UI cannot silently orphan history.
+func (m *Multiplexer) RemoveAccount(ctx context.Context, id string, force bool) (AccountSnapshot, error) {
+	m.accountMutationMu.Lock()
+	defer m.accountMutationMu.Unlock()
+
+	account, ok := m.store.Account(id)
+	if !ok {
+		return AccountSnapshot{}, fmt.Errorf("account %q not found", id)
+	}
+	if account.Controller {
+		return AccountSnapshot{}, errors.New("choose another Primary account before removing this account")
+	}
+	if len(m.store.Accounts()) <= 1 {
+		return AccountSnapshot{}, errors.New("at least one subscription must remain")
+	}
+	if !force {
+		owned := m.store.ThreadIDsForAccount(id)
+		if len(owned) > 0 {
+			return AccountSnapshot{}, fmt.Errorf(
+				"account %q owns %d chat(s); confirm removal to continue", id, len(owned),
+			)
+		}
+	}
+
+	if child, exists := m.child(id); exists {
+		if err := child.Close(); err != nil {
+			return AccountSnapshot{}, fmt.Errorf("stop subscription %q: %w", id, err)
+		}
+		if err := child.Wait(ctx); err != nil {
+			return AccountSnapshot{}, fmt.Errorf("wait for subscription %q to stop: %w", id, err)
+		}
+		m.removeChild(id, child)
+	}
+	removed, err := m.store.RemoveAccount(id, force)
+	if err != nil {
+		return AccountSnapshot{}, err
+	}
+	m.purgeAccountReferences(id)
+	if err := m.removeIsolatedAccountHome(removed); err != nil {
+		// The state entry and child are already gone. Keep the metadata removal
+		// successful while reporting cleanup in the process log; importantly,
+		// removeIsolatedAccountHome refuses the native .codex home.
+		fmt.Fprintf(os.Stderr, "codex-mux: remove account home %s: %v\n", id, err)
+	}
+	m.publish(Event{Type: "account-removed", AccountID: id, Message: "Subscription removed"})
+	return AccountSnapshot{ID: removed.ID, Label: removed.Label, Enabled: removed.Enabled, Controller: removed.Controller, CreatedAt: removed.CreatedAt}, nil
 }
 
 func (m *Multiplexer) ThreadAccount(ctx context.Context, threadID string) (AccountSnapshot, error) {
@@ -286,17 +416,28 @@ func (m *Multiplexer) accountSnapshotWithProfile(ctx context.Context, accountID 
 	}
 	if snapshot.Connected {
 		var details struct {
-			Type     string `json:"type"`
-			Email    string `json:"email"`
-			PlanType string `json:"planType"`
+			Type        string `json:"type"`
+			Email       string `json:"email"`
+			PlanType    string `json:"planType"`
+			DisplayName string `json:"displayName"`
+			Username    string `json:"username"`
 		}
 		_ = json.Unmarshal(accountResult.Account, &details)
 		snapshot.AuthType = details.Type
 		snapshot.Email = details.Email
 		snapshot.PlanType = details.PlanType
 		snapshot.PlanLabel = planLabel(details.PlanType)
+		snapshot.DisplayName = strings.TrimSpace(details.DisplayName)
+		snapshot.Username = strings.TrimSpace(details.Username)
 		if includeProfile {
-			snapshot.ProfileImageURL = m.profileImageURL(ctx, account)
+			identity := m.profileIdentity(ctx, account)
+			snapshot.ProfileImageURL = identity.ImageURL
+			if identity.DisplayName != "" {
+				snapshot.DisplayName = identity.DisplayName
+			}
+			if identity.Username != "" {
+				snapshot.Username = identity.Username
+			}
 		}
 		if details.Type == "chatgpt" {
 			rateResponse, rateErr := child.Request(ctx, "account/rateLimits/read", nil)
@@ -306,7 +447,13 @@ func (m *Multiplexer) accountSnapshotWithProfile(ctx context.Context, accountID 
 				}
 				if json.Unmarshal(rateResponse.Result, &rateResult) == nil {
 					snapshot.RateLimits = &rateResult.RateLimits
+					snapshot.RateLimitAvailable = true
+					snapshot.NextRateLimitResetAt = earliestRateLimitResetAt(snapshot.RateLimits)
+				} else {
+					snapshot.RateLimitError = "quota data could not be read"
 				}
+			} else {
+				snapshot.RateLimitError = "quota data is temporarily unavailable"
 			}
 		}
 	}
@@ -337,6 +484,23 @@ func planLabel(planType string) string {
 	default:
 		return ""
 	}
+}
+
+func earliestRateLimitResetAt(limits *RateLimits) *int64 {
+	if limits == nil {
+		return nil
+	}
+	var earliest *int64
+	for _, window := range []*RateLimitWindow{limits.Primary, limits.Secondary} {
+		if window == nil || window.ResetsAt == nil || *window.ResetsAt <= 0 {
+			continue
+		}
+		if earliest == nil || *window.ResetsAt < *earliest {
+			value := *window.ResetsAt
+			earliest = &value
+		}
+	}
+	return earliest
 }
 
 func (m *Multiplexer) chooseAccount(ctx context.Context) (state.Account, RouteReason, error) {

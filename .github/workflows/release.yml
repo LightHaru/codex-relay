@@ -41,12 +41,45 @@ jobs:
       - name: Run checks
         run: npm run check
 
+      - name: Build the source update payload and manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          archive="codex-relay-source-${version}.zip"
+          git archive --format=zip --prefix="codex-relay-${version}/" HEAD > "${archive}"
+          sha256="$(shasum -a 256 "${archive}" | awk '{print $1}')"
+          python3 - "${version}" "${archive}" "${sha256}" <<'PY'
+          import json
+          import sys
+
+          version, archive, sha256 = sys.argv[1:]
+          json.dump(
+              {
+                  "schema": 1,
+                  "product": "codex-subscription-router",
+                  "version": version,
+                  "sourceUrl": f"https://github.com/LightHaru/codex-relay/releases/download/v{version}/{archive}",
+                  "sourceSha256": sha256,
+                  "releaseUrl": f"https://github.com/LightHaru/codex-relay/releases/tag/v{version}",
+                  "notes": "Verified Codex Relay source update. Relay will stage it, restart, and reopen automatically.",
+              },
+              open("windows-update.json", "w", encoding="utf-8"),
+              indent=2,
+          )
+          with open("windows-update.json", "a", encoding="utf-8") as handle:
+              handle.write("\n")
+          PY
+
       - name: Create source-only GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create "${GITHUB_REF_NAME}"
-          --generate-notes
-          --draft
-          --title "${GITHUB_REF_NAME}"
-          --verify-tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --draft \
+            --title "${GITHUB_REF_NAME}" \
+            --verify-tag \
+            "codex-relay-source-${version}.zip" \
+            windows-update.json

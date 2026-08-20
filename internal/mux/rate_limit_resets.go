@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LightHaru/codex-subscription-router/internal/state"
+	"github.com/LightHaru/codex-relay/internal/state"
 )
 
 const (
@@ -313,7 +313,7 @@ func requestRateLimitResetCredits(
 	request.Header.Set("Authorization", "Bearer "+credentials.Tokens.AccessToken)
 	request.Header.Set("ChatGPT-Account-ID", credentials.Tokens.AccountID)
 	request.Header.Set("Accept", "application/json")
-	request.Header.Set("User-Agent", "Codex Subscription Router")
+	request.Header.Set("User-Agent", "Codex Relay")
 	if len(body) > 0 {
 		request.Header.Set("Content-Type", "application/json")
 	}

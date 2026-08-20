@@ -69,14 +69,14 @@ try {
         $pythonArguments += '--allow-untested-source'
     }
 
-    Write-Host 'Installing the independent Codex Subscription Router...'
+    Write-Host 'Installing the independent Codex Relay...'
     & $pythonCommand @pythonArguments
     if ($LASTEXITCODE -ne 0) {
         throw "patch_windows.py exited with code $LASTEXITCODE"
     }
 
     Write-Host ''
-    Write-Host 'Done. A Desktop shortcut named "Codex Subscription Router" has been created or repaired.'
+    Write-Host 'Done. A Desktop shortcut named "Codex Relay" has been created or repaired.'
     exit 0
 }
 catch {

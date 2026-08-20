@@ -2,11 +2,13 @@
 
 set -euo pipefail
 
-readonly REPOSITORY_URL="https://github.com/LightHaru/codex-subscription-router.git"
-readonly DEFAULT_SOURCE_DIR="${HOME}/.codex-subscription-router/source"
-readonly SOURCE_DIR="${CODEX_SUBSCRIPTION_ROUTER_SOURCE_DIR:-${DEFAULT_SOURCE_DIR}}"
-readonly DESTINATION_APP="${HOME}/Applications/Codex Subscription Router.app"
-readonly DESTINATION_HELPER="${HOME}/Applications/Codex Subscription Router Computer Use.app"
+readonly REPOSITORY_URL="https://github.com/LightHaru/codex-relay.git"
+readonly DEFAULT_SOURCE_DIR="${HOME}/.codex-relay/source"
+readonly SOURCE_DIR="${CODEX_RELAY_SOURCE_DIR:-${CODEX_SUBSCRIPTION_ROUTER_SOURCE_DIR:-${DEFAULT_SOURCE_DIR}}}"
+readonly DESTINATION_APP="${HOME}/Applications/Codex Relay.app"
+readonly DESTINATION_HELPER="${HOME}/Applications/Codex Relay Computer Use.app"
+readonly LEGACY_DESTINATION_APP="${HOME}/Applications/Codex Subscription Router.app"
+readonly LEGACY_DESTINATION_HELPER="${HOME}/Applications/Codex Subscription Router Computer Use.app"
 
 log() {
     printf '\n==> %s\n' "$1" >&2
@@ -19,10 +21,10 @@ fail() {
 
 require_prerequisites() {
     if [ "$(uname -s)" != "Darwin" ]; then
-        fail "Codex Subscription Router supports macOS only."
+        fail "Codex Relay supports macOS only."
     fi
     if [ "$(uname -m)" != "arm64" ]; then
-        fail "Codex Subscription Router currently requires Apple silicon."
+        fail "Codex Relay currently requires Apple silicon."
     fi
     if [ ! -d "/Applications/ChatGPT.app" ]; then
         fail "install the official ChatGPT app in /Applications first."
@@ -132,11 +134,16 @@ main() {
         stop_bundle_processes "${DESTINATION_HELPER}"
         patch_arguments+=("--force")
     fi
+    if [ -d "${LEGACY_DESTINATION_APP}" ] || [ -d "${LEGACY_DESTINATION_HELPER}" ]; then
+        log "Stopping the legacy Codex Subscription Router copy"
+        stop_bundle_processes "${LEGACY_DESTINATION_APP}"
+        stop_bundle_processes "${LEGACY_DESTINATION_HELPER}"
+    fi
 
-    log "Building and signing Codex Subscription Router"
+    log "Building and signing Codex Relay"
     python3 scripts/patch_app.py "${patch_arguments[@]}"
 
-    log "Launching Codex Subscription Router"
+    log "Launching Codex Relay"
     open "${DESTINATION_APP}"
     printf '\nInstalled successfully: %s\n' "${DESTINATION_APP}"
 }

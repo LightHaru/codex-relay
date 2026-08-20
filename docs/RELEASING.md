@@ -1,4 +1,4 @@
-# Releasing
+# Releasing Codex Relay
 
 Releases are source-only. Never attach a patched app, ASAR, extracted official
 file, signing certificate, provisioning profile, or account data.
@@ -17,6 +17,15 @@ file, signing certificate, provisioning profile, or account data.
 7. Configure the protected `release` environment, tag the reviewed commit as
    `vX.Y.Z`, and push the tag.
 
+The canonical repository is now
+`https://github.com/LightHaru/codex-relay`. Keep the manifest's
+`product: "codex-subscription-router"` compatibility identifier unchanged:
+installed 0.2.x Windows builds validate that value before they can update to a
+Relay release. The visible product name and release URLs use Codex Relay.
+
 The release workflow verifies that the tag matches `VERSION`, repeats all
-checks, and creates a draft GitHub source release with generated notes. Review
-the draft and smoke-test record before publishing it manually.
+checks, creates a source archive, calculates its SHA-256, writes
+`windows-update.json`, and attaches both files to a draft GitHub release. The
+Windows Router only checks this manifest after the draft is published. Review
+the archive name, hash, draft, and smoke-test record before publishing it
+manually; never attach the official Store app or a patched ASAR.

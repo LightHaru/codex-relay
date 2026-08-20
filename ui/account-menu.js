@@ -193,7 +193,7 @@ function CodexMuxResetAccountSelector({
                   children: [
                     (0, e7.jsx)(CodexMuxAccountAvatar, {
                       imageUrl: account.profileImageUrl,
-                      label: account.label,
+                      label: codexMuxAccountDisplayName(account),
                       className: "size-7",
                     }),
                     (0, e7.jsxs)("span", {
@@ -201,18 +201,16 @@ function CodexMuxResetAccountSelector({
                       children: [
                         (0, e7.jsx)("span", {
                           className: "max-w-40 truncate text-sm font-medium",
-                          children: account.planLabel
-                            ? `${account.label} · ${account.planLabel}`
-                            : account.label,
+                          children: codexMuxAccountName(account),
                         }),
                         (0, e7.jsx)("span", {
                           className: "text-xs text-token-text-tertiary",
                           children:
-                            count == null
+                            `${count == null
                               ? "Resets unavailable"
                               : count === 1
                                 ? "1 reset available"
-                                : `${count} resets available`,
+                                : `${count} resets available`} · ${codexMuxResetSummary(account)}`,
                         }),
                       ],
                     }),
@@ -267,7 +265,11 @@ function CodexMuxAccountMenu() {
           codexMuxLoginActive = false;
           setLogin(null);
         }
-        if (payload.type === "account-updated") refresh();
+        if (
+          payload.type === "account-updated" ||
+          payload.type === "primary-changed" ||
+          payload.type === "router-restarted"
+        ) refresh();
       } catch {}
     };
     const warmupTimer = setTimeout(refresh, 2_000);
@@ -300,13 +302,13 @@ function CodexMuxAccountMenu() {
   const weeklyWindows = connected.map((account) =>
     codexMuxWeeklyWindow(account.rateLimits),
   );
-  const hasCompleteUsage =
-    connected.length > 0 && weeklyWindows.every((weekly) => weekly != null);
-  const totalRemaining = weeklyWindows.reduce(
+  const knownWindows = weeklyWindows.filter((weekly) => weekly != null);
+  const totalRemaining = knownWindows.reduce(
     (total, weekly) =>
-      total + (weekly == null ? 0 : Math.max(0, 100 - weekly.usedPercent)),
+      total + Math.max(0, 100 - weekly.usedPercent),
     0,
   );
+  const missingUsage = Math.max(0, connected.length - knownWindows.length);
 
   async function addSubscription(event) {
     event.preventDefault();
@@ -373,16 +375,18 @@ function CodexMuxAccountMenu() {
         LeftIcon: S2,
         SubText: loading
           ? "Connecting subscriptions…"
-          : connected.length === 1
-            ? "1 connected subscription"
-            : `${connected.length} connected subscriptions`,
+          : missingUsage > 0
+            ? `${knownWindows.length}/${connected.length} quota available · updating ${missingUsage}`
+            : connected.length === 1
+              ? "1 connected subscription"
+              : `${connected.length} connected subscriptions`,
         rightIcon: (0, e7.jsx)("span", {
           className: "text-token-description-foreground tabular-nums",
           children: loading
             ? "…"
-            : hasCompleteUsage
+            : knownWindows.length > 0
               ? `${Math.round(totalRemaining)}%`
-              : "–",
+              : "Updating…",
         }),
         onSelect: () => BW(modalScope, CodexMuxUsageModal, {}),
         children: "Usage remaining",
@@ -407,19 +411,25 @@ function CodexMuxAccountMenu() {
             (0, e7.jsx)(CodexMuxAccountAvatar, {
               ...iconProps,
               imageUrl: account.profileImageUrl,
-              label: account.label,
+              label: codexMuxAccountDisplayName(account),
             }),
-          SubText: account.email
-            ? (0, e7.jsx)(CodexMuxMaskedEmail, { email: account.email })
-            : account.planType || "ChatGPT subscription",
+          SubText: (0, e7.jsxs)("span", {
+            children: [
+              account.email
+                ? (0, e7.jsx)(CodexMuxMaskedEmail, { email: account.email })
+                : account.label || account.planType || "ChatGPT subscription",
+              " · ",
+              codexMuxResetSummary(account),
+            ],
+          }),
           className: "group",
           rightIcon: (0, e7.jsx)("span", {
             className: "text-token-description-foreground tabular-nums",
-            children: remaining == null ? "–" : `${Math.round(remaining)}%`,
+            children: remaining == null
+              ? account.rateLimitError ? "Unavailable" : "Updating…"
+              : `${Math.round(remaining)}%`,
           }),
-          children: account.planLabel
-            ? `${account.label} · ${account.planLabel}`
-            : account.label,
+          children: codexMuxAccountName(account),
         },
         `codex-mux-account-${account.id}`,
       ),
@@ -491,12 +501,51 @@ function codexMuxWeeklyWindow(rateLimits) {
 function codexMuxUsageWindows(rateLimits) {
   return [rateLimits?.primary, rateLimits?.secondary]
     .filter(Boolean)
-    .map((window) => ({
-      usedPercent: window.usedPercent,
-      remainingPercent: Math.max(0, 100 - window.usedPercent),
-      windowMinutes: window.windowDurationMins || 0,
-      resetsAt: window.resetsAt ?? null,
-    }));
+    .map((window) => {
+      const usedPercent = Number(window.usedPercent);
+      if (!Number.isFinite(usedPercent)) return null;
+      return {
+        usedPercent: Math.max(0, Math.min(100, usedPercent)),
+        remainingPercent: Math.max(0, Math.min(100, 100 - usedPercent)),
+        windowMinutes: Number(window.windowDurationMins) || 0,
+        resetsAt: window.resetsAt ?? null,
+      };
+    })
+    .filter(Boolean);
+}
+
+function codexMuxAccountDisplayName(account) {
+  return [account?.displayName, account?.username, account?.email, account?.label]
+    .map((value) => String(value || "").trim())
+    .find(Boolean) || "Subscription";
+}
+
+function codexMuxAccountName(account) {
+  const name = codexMuxAccountDisplayName(account);
+  return account?.planLabel ? `${name} · ${account.planLabel}` : name;
+}
+
+function codexMuxResetCountdown(resetsAt, now = Date.now()) {
+  const seconds = Number(resetsAt);
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  const minutes = Math.ceil((seconds * 1000 - now) / 60000);
+  if (minutes <= 0) return "now";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  if (hours < 48) return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  return `${days}d${hours % 24 ? ` ${hours % 24}h` : ""}`;
+}
+
+function codexMuxResetSummary(account) {
+  const windows = codexMuxUsageWindows(account?.rateLimits)
+    .filter((window) => Number.isFinite(Number(window.resetsAt)) && Number(window.resetsAt) > 0)
+    .sort((left, right) => Number(left.resetsAt) - Number(right.resetsAt));
+  if (windows.length === 0) {
+    return account?.rateLimitError ? "Reset time unavailable" : "Reset time not reported";
+  }
+  return `Reset ${windows.map((window) => `${window.windowMinutes || "quota"}: ${codexMuxResetCountdown(window.resetsAt)}`).join(" · ")}`;
 }
 
 function CodexMuxPlusIcon(props) {

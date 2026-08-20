@@ -29,6 +29,11 @@ REQUIRED_FILES = (
     "docs/RELEASING.md",
     "docs/SECURITY-MODEL.md",
     "docs/SMOKE-TEST.md",
+    "cmd/router-updater/main.go",
+    "cmd/router-updater/main_test.go",
+    "ui/windows-router-update-main.js",
+    "ui/windows-router-update-preload.js",
+    "ui/test-windows-router-update-main.cjs",
     "package-lock.json",
     "package.json",
 )
@@ -97,7 +102,7 @@ def main() -> int:
     if re.search(dated_heading, changelog, re.MULTILINE) is None:
         fail(f"CHANGELOG.md has no dated entry for {version}")
     expected_release_link = (
-        "https://github.com/LightHaru/codex-subscription-router/releases/tag/"
+        "https://github.com/LightHaru/codex-relay/releases/tag/"
         f"v{version}"
     )
     if expected_release_link not in changelog:
@@ -106,6 +111,10 @@ def main() -> int:
     compatibility = (ROOT / "docs/COMPATIBILITY.md").read_text(encoding="utf-8")
     if f"## Release {version}" not in compatibility:
         fail(f"docs/COMPATIBILITY.md has no entry for {version}")
+
+    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    if "windows-update.json" not in workflow or "sourceSha256" not in workflow:
+        fail("release workflow does not publish the Windows update manifest")
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     if MACOS_USER_PREFIX in readme:

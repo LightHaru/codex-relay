@@ -155,6 +155,48 @@ func (s *Store) Controller() (Account, bool) {
 	return s.accounts[0], true
 }
 
+// PrimaryCodexHome returns the home owned by the original Codex installation.
+// It is used by the mux cleanup path to ensure account management can never
+// remove the user's native Codex credentials or conversation database.
+func (s *Store) PrimaryCodexHome() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.primaryCodexHome
+}
+
+// SetController makes exactly one existing account the Router Primary. The
+// caller is responsible for checking that the account is connected and
+// eligible; keeping this method state-only makes the persisted transition
+// easy to test and avoids coupling the metadata store to app-server I/O.
+func (s *Store) SetController(id string) (Account, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return Account{}, errors.New("account ID is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var selected Account
+	found := false
+	previous := slices.Clone(s.accounts)
+	for index := range s.accounts {
+		if s.accounts[index].ID == id {
+			selected = s.accounts[index]
+			found = true
+		}
+		s.accounts[index].Controller = s.accounts[index].ID == id
+	}
+	if !found {
+		s.accounts = previous
+		return Account{}, fmt.Errorf("account %q not found", id)
+	}
+	if err := s.saveLocked(); err != nil {
+		s.accounts = previous
+		return Account{}, err
+	}
+	selected.Controller = true
+	return selected, nil
+}
+
 func (s *Store) AddAccount(label string) (Account, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -252,6 +294,61 @@ func (s *Store) DiscardProvisionalAccount(id string) (Account, error) {
 	return Account{}, fmt.Errorf("account %q not found", id)
 }
 
+// RemoveAccount removes an account from persistent routing state. Removing a
+// Primary account is intentionally forbidden; callers must select another
+// Primary first so a concurrent new chat can never be routed through an
+// ambiguous controller. Thread ownership is also protected by default and
+// may only be discarded when the caller explicitly passes force=true.
+func (s *Store) RemoveAccount(id string, force bool) (Account, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return Account{}, errors.New("account ID is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index, account := range s.accounts {
+		if account.ID != id {
+			continue
+		}
+		if account.Controller {
+			return Account{}, errors.New("choose another Primary account before removing this account")
+		}
+		if len(s.accounts) <= 1 {
+			return Account{}, errors.New("at least one subscription must remain")
+		}
+		owned := make([]string, 0)
+		for threadID, ownerID := range s.owners {
+			if ownerID == id {
+				owned = append(owned, threadID)
+			}
+		}
+		if len(owned) > 0 && !force {
+			return Account{}, fmt.Errorf(
+				"account %q owns %d chat(s); confirm removal with force=true", id, len(owned),
+			)
+		}
+
+		previousAccounts := slices.Clone(s.accounts)
+		previousOwners := make(map[string]string, len(s.owners))
+		for threadID, ownerID := range s.owners {
+			previousOwners[threadID] = ownerID
+		}
+		s.accounts = append(slices.Clone(s.accounts[:index]), s.accounts[index+1:]...)
+		if force {
+			for _, threadID := range owned {
+				delete(s.owners, threadID)
+			}
+		}
+		if err := s.saveLocked(); err != nil {
+			s.accounts = previousAccounts
+			s.owners = previousOwners
+			return Account{}, err
+		}
+		return account, nil
+	}
+	return Account{}, fmt.Errorf("account %q not found", id)
+}
+
 func (s *Store) ThreadOwner(threadID string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -280,6 +377,21 @@ func (s *Store) ThreadCounts() map[string]int {
 		counts[accountID]++
 	}
 	return counts
+}
+
+// ThreadIDsForAccount returns a snapshot of chat ownership for one account.
+// It is used only for an explicit account-removal confirmation/error; callers
+// cannot mutate the store through the returned slice.
+func (s *Store) ThreadIDsForAccount(accountID string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]string, 0)
+	for threadID, ownerID := range s.owners {
+		if ownerID == accountID {
+			result = append(result, threadID)
+		}
+	}
+	return result
 }
 
 func (s *Store) saveLocked() error {

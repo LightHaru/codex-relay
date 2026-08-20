@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LightHaru/codex-subscription-router/internal/protocol"
-	"github.com/LightHaru/codex-subscription-router/internal/state"
+	"github.com/LightHaru/codex-relay/internal/protocol"
+	"github.com/LightHaru/codex-relay/internal/state"
 )
 
 // TestMuxCancelLoginHelper is executed as a child app-server by the tests

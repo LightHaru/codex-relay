@@ -7,7 +7,7 @@ state directory remain stable across the product rename so existing macOS
 privacy grants, connected accounts, and sticky thread ownership continue to
 work.
 
-Codex Subscription Router replaces the copied app's bundled `codex` executable
+Codex Relay replaces the copied app's bundled `codex` executable
 with a small Go multiplexer and keeps the original binary beside it as
 `codex.real`.
 
@@ -43,8 +43,13 @@ Each isolated account forces file-backed CLI and MCP OAuth credentials.
 ## Desktop integration
 
 The patcher extracts `app.asar`, verifies exact upstream anchors, inserts the
-account UI, disables self-update, and repacks the archive with an updated
-integrity hash. The app receives a separate Chromium profile and URL scheme.
+account UI, disables the copied app's native self-update, and repacks the
+archive with an updated integrity hash. Windows also injects a small,
+version-neutral update bridge. It checks the Router's source-only GitHub
+release manifest, then hands a hash-verified archive to an updater executable
+stored outside the managed app so the app can quit and restart safely. The
+official Store package is never replaced. The app receives a separate
+Chromium profile and URL scheme.
 
 The copied Computer Use service, Node runtime, and callers are re-signed under
 one Apple team. The helper uses a separate bundle identity and socket, avoiding

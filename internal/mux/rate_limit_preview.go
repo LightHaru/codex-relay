@@ -6,7 +6,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/LightHaru/codex-subscription-router/internal/protocol"
+	"github.com/LightHaru/codex-relay/internal/protocol"
 )
 
 type RateLimitPreviewMode string
@@ -125,4 +125,6 @@ func (m *Multiplexer) applyRateLimitPreview(snapshot *AccountSnapshot) {
 		limits.RateLimitReachedType = "legacy_rate_limit_reached"
 	}
 	snapshot.RateLimits = limits
+	snapshot.RateLimitAvailable = true
+	snapshot.RateLimitError = ""
 }

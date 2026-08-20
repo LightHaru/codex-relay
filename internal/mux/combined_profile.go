@@ -12,7 +12,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/LightHaru/codex-subscription-router/internal/state"
+	"github.com/LightHaru/codex-relay/internal/state"
 )
 
 type usageBucket struct {
@@ -62,6 +62,9 @@ type whamProfile struct {
 type CombinedProfileAccount struct {
 	ID              string `json:"id"`
 	Label           string `json:"label"`
+	DisplayName     string `json:"displayName,omitempty"`
+	Username        string `json:"username,omitempty"`
+	Email           string `json:"email,omitempty"`
 	PlanLabel       string `json:"planLabel,omitempty"`
 	ProfileImageURL string `json:"profileImageUrl,omitempty"`
 }
@@ -97,6 +100,7 @@ func (m *Multiplexer) CombinedProfile(ctx context.Context) (CombinedProfile, err
 		accounts = append(accounts, account)
 		descriptors = append(descriptors, CombinedProfileAccount{
 			ID: snapshot.ID, Label: snapshot.Label, PlanLabel: snapshot.PlanLabel,
+			DisplayName: snapshot.DisplayName, Username: snapshot.Username, Email: snapshot.Email,
 			ProfileImageURL: snapshot.ProfileImageURL,
 		})
 	}
@@ -154,6 +158,7 @@ func (m *Multiplexer) AccountProfile(ctx context.Context, accountID string) (Com
 		}
 		descriptors = append(descriptors, CombinedProfileAccount{
 			ID: snapshot.ID, Label: snapshot.Label, PlanLabel: snapshot.PlanLabel,
+			DisplayName: snapshot.DisplayName, Username: snapshot.Username, Email: snapshot.Email,
 			ProfileImageURL: snapshot.ProfileImageURL,
 		})
 		if snapshot.ID == accountID {
@@ -182,7 +187,7 @@ func fetchWhamProfile(ctx context.Context, client *http.Client, endpoint string,
 	request.Header.Set("Authorization", "Bearer "+credentials.Tokens.AccessToken)
 	request.Header.Set("ChatGPT-Account-ID", credentials.Tokens.AccountID)
 	request.Header.Set("Accept", "application/json")
-	request.Header.Set("User-Agent", "Codex Subscription Router")
+	request.Header.Set("User-Agent", "Codex Relay")
 	response, err := client.Do(request)
 	if err != nil {
 		return whamProfile{}, fmt.Errorf("fetch combined profile: %w", err)

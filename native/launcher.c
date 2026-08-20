@@ -24,20 +24,20 @@ static int executable_directory(char *destination, size_t capacity) {
 int main(int argc, char **argv) {
     char directory[PATH_MAX];
     if (executable_directory(directory, sizeof(directory)) != 0) {
-        perror("Codex Subscription Router launcher");
+        perror("Codex Relay launcher");
         return EXIT_FAILURE;
     }
 
     char executable[PATH_MAX];
     if (snprintf(executable, sizeof(executable), "%s/ChatGPT", directory) >=
         (int)sizeof(executable)) {
-        fprintf(stderr, "Codex Subscription Router launcher: executable path is too long\n");
+        fprintf(stderr, "Codex Relay launcher: executable path is too long\n");
         return EXIT_FAILURE;
     }
 
     const char *home = getenv("HOME");
     if (home == NULL || home[0] == '\0') {
-        fprintf(stderr, "Codex Subscription Router launcher: HOME is not set\n");
+        fprintf(stderr, "Codex Relay launcher: HOME is not set\n");
         return EXIT_FAILURE;
     }
 
@@ -45,13 +45,13 @@ int main(int argc, char **argv) {
     if (snprintf(profile, sizeof(profile),
                  "--user-data-dir=%s/Library/Application Support/Codex Subscription Router",
                  home) >= (int)sizeof(profile)) {
-        fprintf(stderr, "Codex Subscription Router launcher: profile path is too long\n");
+        fprintf(stderr, "Codex Relay launcher: profile path is too long\n");
         return EXIT_FAILURE;
     }
 
     char **arguments = calloc((size_t)argc + 2, sizeof(*arguments));
     if (arguments == NULL) {
-        perror("Codex Subscription Router launcher");
+        perror("Codex Relay launcher");
         return EXIT_FAILURE;
     }
     arguments[0] = executable;
@@ -62,7 +62,7 @@ int main(int argc, char **argv) {
     arguments[argc + 1] = NULL;
 
     execv(executable, arguments);
-    perror("Codex Subscription Router launcher");
+    perror("Codex Relay launcher");
     free(arguments);
     return EXIT_FAILURE;
 }

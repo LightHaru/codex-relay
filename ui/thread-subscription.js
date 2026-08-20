@@ -39,6 +39,8 @@ function CodexMuxThreadSubscription() {
         const payload = JSON.parse(event.data);
         if (
           payload.type === "account-updated" ||
+          payload.type === "primary-changed" ||
+          payload.type === "router-restarted" ||
           (payload.type === "thread-failed-over" &&
             payload.data?.threadId === threadId)
         ) {
@@ -60,6 +62,8 @@ function CodexMuxThreadSubscription() {
   const weekly = codexMuxThreadWeeklyWindow(account.rateLimits);
   const remaining = weekly == null ? null : Math.max(0, 100 - weekly.usedPercent);
   const depleted = remaining === 0;
+  const reset = codexMuxThreadResetLabel(weekly?.resetsAt);
+  const accountName = codexMuxThreadAccountName(account);
   const AccountAvatar = globalThis.CodexMuxAccountAvatar;
   return (0, zE.jsx)(K.Section, {
     sectionKey: "codex-mux-subscription",
@@ -73,15 +77,13 @@ function CodexMuxThreadSubscription() {
             AccountAvatar
               ? (0, zE.jsx)(AccountAvatar, {
                   imageUrl: account.profileImageUrl,
-                  label: account.label,
+                  label: accountName,
                   className: "size-5 shrink-0",
                 })
               : null,
             (0, zE.jsx)("span", {
               className: "truncate text-token-text-primary",
-              children: account.planLabel
-                ? `${account.label} · ${account.planLabel}`
-                : account.label,
+              children: account.planLabel ? `${accountName} · ${account.planLabel}` : accountName,
             }),
           ],
         }),
@@ -91,12 +93,32 @@ function CodexMuxThreadSubscription() {
             remaining == null
               ? "Usage unavailable"
               : depleted
-                ? "Depleted"
-                : `${Math.round(remaining)}% remaining`,
+                ? reset ? `Depleted · reset ${reset}` : "Depleted"
+                : reset ? `${Math.round(remaining)}% · reset ${reset}` : `${Math.round(remaining)}% remaining`,
         }),
       ],
     }),
   });
+}
+
+function codexMuxThreadAccountName(account) {
+  const name = [account?.displayName, account?.username, account?.email, account?.label]
+    .map((value) => String(value || "").trim())
+    .find(Boolean) || "Subscription";
+  return name;
+}
+
+function codexMuxThreadResetLabel(resetsAt) {
+  const seconds = Number(resetsAt);
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  const minutes = Math.ceil((seconds * 1000 - Date.now()) / 60000);
+  if (minutes <= 0) return "now";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  if (hours < 48) return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  return `${days}d${hours % 24 ? ` ${hours % 24}h` : ""}`;
 }
 
 function codexMuxThreadWeeklyWindow(rateLimits) {

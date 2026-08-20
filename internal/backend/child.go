@@ -15,7 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/LightHaru/codex-subscription-router/internal/protocol"
+	"github.com/LightHaru/codex-relay/internal/protocol"
 )
 
 type Inbound struct {

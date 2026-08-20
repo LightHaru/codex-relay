@@ -1,4 +1,4 @@
-// routerctl manages a running Codex Subscription Router instance.
+// routerctl manages a running Codex Relay instance.
 //
 // It is deliberately a local-only companion to the Windows port: credentials
 // remain in the isolated Codex homes and device-code authentication happens in
@@ -37,7 +37,7 @@ func run(args []string) error {
 	}
 	tokenBytes, err := os.ReadFile(tokenPath)
 	if err != nil {
-		return fmt.Errorf("read control token %s: %w (start Codex Subscription Router first)", tokenPath, err)
+		return fmt.Errorf("read control token %s: %w (start Codex Relay first)", tokenPath, err)
 	}
 	client := &client{baseURL: strings.TrimRight(baseURL, "/"), token: strings.TrimSpace(string(tokenBytes)), http: &http.Client{Timeout: 30 * time.Second}}
 	switch remaining[0] {

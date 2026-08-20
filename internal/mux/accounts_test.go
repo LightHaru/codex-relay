@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LightHaru/codex-subscription-router/internal/state"
+	"github.com/LightHaru/codex-relay/internal/state"
 )
 
 func TestPlanLabel(t *testing.T) {
@@ -48,6 +48,21 @@ func TestLongestAndShortestWindowHandlesSingleWindow(t *testing.T) {
 	longest, shortest := longestAndShortestWindow(&RateLimits{Primary: only})
 	if longest != only || shortest != only {
 		t.Fatalf("single window should serve both roles: longest=%#v shortest=%#v", longest, shortest)
+	}
+}
+
+func TestEarliestRateLimitResetAtIsPerAccountWindow(t *testing.T) {
+	soon := int64(1_700_000_100)
+	later := int64(1_700_000_900)
+	got := earliestRateLimitResetAt(&RateLimits{
+		Primary:   &RateLimitWindow{ResetsAt: &later},
+		Secondary: &RateLimitWindow{ResetsAt: &soon},
+	})
+	if got == nil || *got != soon {
+		t.Fatalf("earliest reset=%v, want %d", got, soon)
+	}
+	if got := earliestRateLimitResetAt(nil); got != nil {
+		t.Fatalf("nil limits returned reset %v", got)
 	}
 }
 

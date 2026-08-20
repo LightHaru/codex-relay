@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/LightHaru/codex-subscription-router/internal/mux"
+	"github.com/LightHaru/codex-relay/internal/mux"
 )
 
 type Server struct {
@@ -217,6 +217,39 @@ func (s *Server) accountAction(response http.ResponseWriter, request *http.Reque
 		writeJSON(response, http.StatusOK, map[string]any{"account": account})
 		return
 	}
+	if len(parts) == 1 && request.Method == http.MethodDelete {
+		var input struct {
+			Force bool `json:"force"`
+		}
+		// An empty DELETE body means a safe, non-forced removal attempt. The
+		// UI sends {"force":true} only after the user confirms chat ownership
+		// and account deletion.
+		if request.ContentLength != 0 {
+			if err := decodeJSON(request, &input); err != nil {
+				writeJSON(response, http.StatusBadRequest, map[string]any{"error": err.Error()})
+				return
+			}
+		}
+		removed, err := s.mux.RemoveAccount(ctx, accountID, input.Force)
+		if err != nil {
+			writeJSON(response, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(response, http.StatusOK, map[string]any{"ok": true, "account": removed})
+		return
+	}
+	if len(parts) == 2 && parts[1] == "primary" && request.Method == http.MethodPost {
+		change, err := s.mux.SetPrimaryAndRestart(ctx, accountID)
+		if err != nil {
+			writeJSON(response, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(response, http.StatusOK, map[string]any{
+			"account":           change.Account,
+			"restartedChildren": change.RestartedChildren,
+		})
+		return
+	}
 	if len(parts) == 2 && parts[1] == "rate-limit-resets" && request.Method == http.MethodGet {
 		result, err := s.mux.RateLimitResetCredits(ctx, accountID)
 		if err != nil {
@@ -344,7 +377,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 			response.Header().Set("Vary", "Origin")
 		}
 		response.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Codex-Mux-Token")
-		response.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, OPTIONS")
+		response.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
 		response.Header().Set("Cache-Control", "no-store")
 		response.Header().Set("Referrer-Policy", "no-referrer")
 		response.Header().Set("X-Content-Type-Options", "nosniff")

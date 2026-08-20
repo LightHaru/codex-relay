@@ -10,9 +10,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
-	"github.com/LightHaru/codex-subscription-router/internal/state"
+	"github.com/LightHaru/codex-relay/internal/state"
 )
 
 const (
@@ -22,8 +23,16 @@ const (
 )
 
 type profileCacheEntry struct {
-	imageURL  string
-	expiresAt time.Time
+	imageURL    string
+	displayName string
+	username    string
+	expiresAt   time.Time
+}
+
+type profileIdentity struct {
+	ImageURL    string
+	DisplayName string
+	Username    string
 }
 
 type authFile struct {
@@ -36,34 +45,42 @@ type authFile struct {
 type profileResponse struct {
 	Profile struct {
 		ProfilePictureURL string `json:"profile_picture_url"`
+		DisplayName       string `json:"display_name"`
+		Username          string `json:"username"`
 	} `json:"profile"`
 }
 
-func (m *Multiplexer) profileImageURL(ctx context.Context, account state.Account) string {
+func (m *Multiplexer) profileIdentity(ctx context.Context, account state.Account) profileIdentity {
 	now := time.Now()
 	m.profileMu.Lock()
 	cached, ok := m.profileCache[account.ID]
 	m.profileMu.Unlock()
 	if ok && now.Before(cached.expiresAt) {
-		return cached.imageURL
+		return profileIdentity{
+			ImageURL: cached.imageURL, DisplayName: cached.displayName, Username: cached.username,
+		}
 	}
 
-	imageURL, err := fetchProfileImageURL(
+	identity, err := fetchProfileIdentity(
 		ctx,
 		m.profileClient,
 		profileURL,
 		filepath.Join(account.CodexHome, "auth.json"),
 	)
 	if err != nil {
-		return ""
+		return profileIdentity{}
 	}
 	m.profileMu.Lock()
 	m.profileCache[account.ID] = profileCacheEntry{
-		imageURL:  imageURL,
-		expiresAt: now.Add(profileCacheTTL),
+		imageURL: identity.ImageURL, displayName: identity.DisplayName,
+		username: identity.Username, expiresAt: now.Add(profileCacheTTL),
 	}
 	m.profileMu.Unlock()
-	return imageURL
+	return identity
+}
+
+func (m *Multiplexer) profileImageURL(ctx context.Context, account state.Account) string {
+	return m.profileIdentity(ctx, account).ImageURL
 }
 
 func fetchProfileImageURL(
@@ -72,36 +89,65 @@ func fetchProfileImageURL(
 	endpoint string,
 	authPath string,
 ) (string, error) {
-	credentials, err := readAuthFile(authPath)
+	identity, err := fetchProfileIdentity(ctx, client, endpoint, authPath)
 	if err != nil {
 		return "", err
 	}
+	return identity.ImageURL, nil
+}
+
+func fetchProfileIdentity(
+	ctx context.Context,
+	client *http.Client,
+	endpoint string,
+	authPath string,
+) (profileIdentity, error) {
+	credentials, err := readAuthFile(authPath)
+	if err != nil {
+		return profileIdentity{}, err
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return "", fmt.Errorf("create profile request: %w", err)
+		return profileIdentity{}, fmt.Errorf("create profile request: %w", err)
 	}
 	request.Header.Set("Authorization", "Bearer "+credentials.Tokens.AccessToken)
 	if credentials.Tokens.AccountID != "" {
 		request.Header.Set("ChatGPT-Account-ID", credentials.Tokens.AccountID)
 	}
 	request.Header.Set("Accept", "application/json")
-	request.Header.Set("User-Agent", "Codex Subscription Router")
+	request.Header.Set("User-Agent", "Codex Relay")
 
 	response, err := client.Do(request)
 	if err != nil {
-		return "", fmt.Errorf("fetch profile: %w", err)
+		return profileIdentity{}, fmt.Errorf("fetch profile: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, profileMaxBytes))
-		return "", fmt.Errorf("fetch profile: status %d", response.StatusCode)
+		return profileIdentity{}, fmt.Errorf("fetch profile: status %d", response.StatusCode)
 	}
 	var profile profileResponse
 	decoder := json.NewDecoder(io.LimitReader(response.Body, profileMaxBytes))
 	if err := decoder.Decode(&profile); err != nil {
-		return "", fmt.Errorf("decode profile: %w", err)
+		return profileIdentity{}, fmt.Errorf("decode profile: %w", err)
 	}
-	return validatedProfileImageURL(profile.Profile.ProfilePictureURL)
+	imageURL, err := validatedProfileImageURL(profile.Profile.ProfilePictureURL)
+	if err != nil {
+		return profileIdentity{}, err
+	}
+	return profileIdentity{
+		ImageURL:    imageURL,
+		DisplayName: normalizedProfileName(profile.Profile.DisplayName),
+		Username:    normalizedProfileName(profile.Profile.Username),
+	}, nil
+}
+
+func normalizedProfileName(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) > 200 {
+		return value[:200]
+	}
+	return value
 }
 
 func readAuthFile(path string) (authFile, error) {

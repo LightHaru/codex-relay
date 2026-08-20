@@ -13,17 +13,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LightHaru/codex-subscription-router/internal/protocol"
-	"github.com/LightHaru/codex-subscription-router/internal/state"
+	"github.com/LightHaru/codex-relay/internal/protocol"
+	"github.com/LightHaru/codex-relay/internal/state"
 )
 
 type routingHelperConfig struct {
-	LogPath         string  `json:"logPath"`
-	PrimaryHome     string  `json:"primaryHome"`
-	PrimaryShort    float64 `json:"primaryShort"`
-	PrimaryWeekly   float64 `json:"primaryWeekly"`
-	SecondaryShort  float64 `json:"secondaryShort"`
-	SecondaryWeekly float64 `json:"secondaryWeekly"`
+	LogPath                   string  `json:"logPath"`
+	PrimaryHome               string  `json:"primaryHome"`
+	PrimaryShort              float64 `json:"primaryShort"`
+	PrimaryWeekly             float64 `json:"primaryWeekly"`
+	SecondaryShort            float64 `json:"secondaryShort"`
+	SecondaryWeekly           float64 `json:"secondaryWeekly"`
+	ThreadHistoryRelativePath string  `json:"threadHistoryRelativePath"`
+	ThreadHistoryContents     string  `json:"threadHistoryContents"`
 }
 
 // TestMuxRoutingHelper is a deterministic JSONL app-server used only by the
@@ -74,8 +76,40 @@ func TestMuxRoutingHelper(t *testing.T) {
 			result = rateLimits
 		case "thread/read":
 			appendRoutingHelperLog(config.LogPath, role+":"+message.Method)
-			result = json.RawMessage(`{"thread":{"id":"thread-1","path":"C:\\fake\\thread.jsonl","cwd":"C:\\fake","modelProvider":"openai"}}`)
-		case "thread/resume", "thread/start", "turn/start":
+			path := filepath.Join(config.PrimaryHome, "sessions", config.ThreadHistoryRelativePath)
+			encoded, _ := json.Marshal(map[string]any{"thread": map[string]any{
+				"id": "thread-1", "path": path, "cwd": "C:\\fake", "modelProvider": "openai",
+			}})
+			result = encoded
+		case "thread/resume":
+			var params map[string]json.RawMessage
+			_ = json.Unmarshal(message.Params, &params)
+			if _, exists := params["path"]; exists {
+				encoded, _ := protocol.Encode(protocol.Failure(message.ID, -32602, "thread/resume path is unsupported"))
+				_, _ = writer.Write(append(encoded, '\n'))
+				_ = writer.Flush()
+				continue
+			}
+			if _, exists := params["history"]; exists {
+				encoded, _ := protocol.Encode(protocol.Failure(message.ID, -32602, "thread/resume history is unsupported"))
+				_, _ = writer.Write(append(encoded, '\n'))
+				_ = writer.Flush()
+				continue
+			}
+			if role == "secondary" {
+				historyPath := filepath.Join(os.Getenv("CODEX_HOME"), "sessions", config.ThreadHistoryRelativePath)
+				history, err := os.ReadFile(historyPath)
+				if err != nil || string(history) != config.ThreadHistoryContents {
+					encoded, _ := protocol.Encode(protocol.Failure(message.ID, -32602, "target history was not migrated"))
+					_, _ = writer.Write(append(encoded, '\n'))
+					_ = writer.Flush()
+					continue
+				}
+				appendRoutingHelperLog(config.LogPath, role+":history-copied")
+			}
+			appendRoutingHelperLog(config.LogPath, role+":"+message.Method)
+			result = json.RawMessage(`{"thread":{"id":"thread-1"}}`)
+		case "thread/start", "turn/start":
 			appendRoutingHelperLog(config.LogPath, role+":"+message.Method)
 			result = json.RawMessage(`{"thread":{"id":"thread-1"}}`)
 		}
@@ -140,13 +174,24 @@ func newRoutingTestPool(
 	}
 	configPath := filepath.Join(root, "routing-helper.json")
 	logPath := filepath.Join(root, "routing-helper.log")
+	historyRelativePath := filepath.Join("2026", "08", "20", "rollout-thread-1.jsonl")
+	historyContents := `{"type":"session_meta","id":"thread-1"}` + "\n"
+	historyPath := filepath.Join(primaryHome, "sessions", historyRelativePath)
+	if err := os.MkdirAll(filepath.Dir(historyPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(historyPath, []byte(historyContents), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	configData, err := json.Marshal(routingHelperConfig{
-		LogPath:         logPath,
-		PrimaryHome:     primaryHome,
-		PrimaryShort:    primaryShort,
-		PrimaryWeekly:   primaryWeekly,
-		SecondaryShort:  secondaryShort,
-		SecondaryWeekly: secondaryWeekly,
+		LogPath:                   logPath,
+		PrimaryHome:               primaryHome,
+		PrimaryShort:              primaryShort,
+		PrimaryWeekly:             primaryWeekly,
+		SecondaryShort:            secondaryShort,
+		SecondaryWeekly:           secondaryWeekly,
+		ThreadHistoryRelativePath: historyRelativePath,
+		ThreadHistoryContents:     historyContents,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -255,11 +300,68 @@ func TestRouteTurnFailsOverToSecondaryAndPersistsNewOwner(t *testing.T) {
 	))
 	waitForRoutingEvidence(t, pool,
 		"primary:thread/read",
+		"secondary:history-copied",
 		"secondary:thread/resume",
 		"secondary:turn/start",
 	)
 	owner, ok := pool.store.ThreadOwner("thread-1")
 	if !ok || owner != pool.secondary.ID {
 		t.Fatalf("failover owner=%q ok=%v, want %q", owner, ok, pool.secondary.ID)
+	}
+}
+
+func TestSetPrimaryPersistsRouterChoiceIndependentOfNativePrimary(t *testing.T) {
+	pool := newRoutingTestPool(t, 20, 25, 30, 35)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	before := make(map[string]any)
+	for _, entry := range pool.multiplexer.childEntries() {
+		before[entry.account.ID] = entry.child
+	}
+	change, err := pool.multiplexer.SetPrimaryAndRestart(ctx, pool.secondary.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := change.Account
+	if selected.ID != pool.secondary.ID || !selected.Controller {
+		t.Fatalf("unexpected selected Router Primary: %#v", selected)
+	}
+	if change.RestartedChildren != 2 {
+		t.Fatalf("restarted children=%d, want 2", change.RestartedChildren)
+	}
+	for _, entry := range pool.multiplexer.childEntries() {
+		if before[entry.account.ID] == entry.child {
+			t.Fatalf("account %s kept the same app-server child after Primary change", entry.account.ID)
+		}
+	}
+	controller, ok := pool.store.Controller()
+	if !ok || controller.ID != pool.secondary.ID {
+		t.Fatalf("Router Primary was not persisted independently: %#v ok=%v", controller, ok)
+	}
+	if original, ok := pool.store.Account("primary"); !ok || original.Controller {
+		t.Fatalf("native/original account unexpectedly remained Router Primary: %#v ok=%v", original, ok)
+	}
+}
+
+func TestRemoveSecondaryStopsChildAndCleansRouterHome(t *testing.T) {
+	pool := newRoutingTestPool(t, 20, 25, 30, 35)
+	secondaryHome := pool.secondary.CodexHome
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	removed, err := pool.multiplexer.RemoveAccount(ctx, pool.secondary.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed.ID != pool.secondary.ID {
+		t.Fatalf("removed unexpected account: %#v", removed)
+	}
+	if _, ok := pool.store.Account(pool.secondary.ID); ok {
+		t.Fatal("removed account remained in Router state")
+	}
+	if _, err := os.Stat(secondaryHome); !os.IsNotExist(err) {
+		t.Fatalf("secondary home was not cleaned up: err=%v", err)
+	}
+	if controller, ok := pool.store.Controller(); !ok || controller.ID != "primary" {
+		t.Fatalf("removing secondary changed Primary: %#v ok=%v", controller, ok)
 	}
 }

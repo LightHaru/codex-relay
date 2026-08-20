@@ -2,10 +2,11 @@
 """Create an independent Windows copy of ChatGPT with Codex multiplexing.
 
 The Microsoft Store installation is never modified. The copied application has
-a small DOM bridge plus narrowly version-pinned renderer patches for profile,
-Plugins, and rate-limit reset account selection. Every renderer anchor is
-matched exactly once so a Store update fails closed instead of applying a
-possibly incorrect rewrite.
+a small DOM bridge, a narrowly scoped Electron bridge for private sign-in
+windows, and version-pinned renderer patches for profile, Plugins, and
+rate-limit reset account selection. Every renderer anchor is matched exactly
+once so a Store update fails closed instead of applying a possibly incorrect
+rewrite.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -26,17 +28,18 @@ ROOT = Path(__file__).resolve().parent.parent
 VERSION = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
 APP_FAMILY_PREFIX = "OpenAI.Codex_"
 CONTROL_PORT = 48123
-ROUTER_APP_NAME = "Codex Subscription Router"
+# Codex Relay is the public product name. Keep the old name only as a
+# migration source: existing 0.2.x installations, their browser profile, and
+# their update helper must remain usable while the replacement is staged.
+ROUTER_APP_NAME = "Codex Relay"
+LEGACY_ROUTER_APP_NAME = "Codex Subscription Router"
 ROUTER_APP_DIRECTORY = "app"
 ASAR_UNPACK_DIRECTORIES = "{node_modules/better-sqlite3,node_modules/node-pty}"
 ASAR_UNPACK_FILES = "{node_modules/@worklouder/device-kit-oai/node_modules/@serialport/bindings-cpp/build/Release/bindings.node,node_modules/@worklouder/device-kit-oai/node_modules/node-hid/build/Release/HID.node}"
-TESTED_ASAR_HASHES = {
-    "c7ac6d76cf5f30aa5cb92e1e46561933c06e94e3fe2d6582a04dac18c76f3ed1",
-}
-
-# These anchors are deliberately tied to the ASAR hash above. The Windows
-# bundle does not share minified symbol names with the macOS build, so keeping
-# them here makes a new Store version an explicit review/update step.
+# These legacy anchors are deliberately tied to the matching ASAR hash in
+# WINDOWS_RENDERER_PROFILES below. The Windows bundle does not share minified
+# symbol names with the macOS build, so keeping them here makes a new Store
+# version an explicit review/update step.
 PROFILE_QUERY_ANCHOR = "async function yol(){let e=await r_.safeGet(`/wham/profiles/me`);"
 PROFILE_QUERY_REPLACEMENT = (
     "async function yol(){let e=await(globalThis.CodexMuxWindows?.profileData?.()"
@@ -103,24 +106,148 @@ PLUGIN_PICKER_REPLACEMENT = (
     "{className:`contents`,children:[(0,D.jsx)(`codex-mux-plugin-picker`,{}),w]})})"
 )
 
+# The current Windows Store release renamed its minified symbols and changed
+# the reset modal component. Keep each renderer rewrite tied to the exact ASAR
+# hash so older checked builds continue to work while an unfamiliar release
+# still fails closed.
+CURRENT_RENDERER_PROFILE = {
+    "profile_query_anchor": "async function $Hl(){let e=await K_.safeGet(`/wham/profiles/me`);",
+    "profile_query_replacement": (
+        "async function $Hl(){let e=await(globalThis.CodexMuxWindows?.profileData?.()"
+        "??K_.safeGet(`/wham/profiles/me`));"
+    ),
+    "plugin_request_anchor": (
+        "async sendRequest(e,t,n){if(this.dispatchMessage==null)throw Error("
+        "`AppServerRequestClient is missing a message dispatcher`);return e===`config/read`?"
+        "this.sendConfigReadRequest(t,n):this.enqueueRequest(e,t,e===`plugin/list`&&n?.timeoutMs==null?"
+        "{...n,timeoutMs:fFt}:n)}"
+    ),
+    "plugin_request_replacement": (
+        "async sendRequest(e,t,n){t=globalThis.CodexMuxWindows?.scopePluginRequest?.(e,t)??t;"
+        "if(this.dispatchMessage==null)throw Error(`AppServerRequestClient is missing a message dispatcher`);"
+        "return e===`config/read`?this.sendConfigReadRequest(t,n):this.enqueueRequest(e,t,"
+        "e===`plugin/list`&&n?.timeoutMs==null?{...n,timeoutMs:fFt}:n)}"
+    ),
+    "reset_query_anchor": (
+        "function Oxa(){let e=(0,JV.c)(1),t;return e[0]===Symbol.for(`react.memo_cache_sentinel`)?"
+        "(t={queryKey:[`rate-limit-reset-credits`],queryFn:kxa,refetchInterval:Mp.ONE_MINUTE,"
+        "staleTime:Mp.FIVE_SECONDS},e[0]=t):t=e[0],It(t)}"
+    ),
+    "reset_query_replacement": (
+        "function Oxa(){let e=(0,n$s.useSyncExternalStore)("
+        "e=>globalThis.CodexMuxWindows?.subscribeReset?.(e)??(()=>{}),"
+        "()=>globalThis.CodexMuxWindows?.getResetAccountId?.()??null,()=>null),"
+        "t={queryKey:[`rate-limit-reset-credits`,e??`primary`],"
+        "queryFn:e?()=>globalThis.CodexMuxWindows.rateLimitResets(e):kxa,"
+        "refetchInterval:Mp.ONE_MINUTE,staleTime:Mp.FIVE_SECONDS};return It(t)}"
+    ),
+    "reset_mutation_anchor": (
+        "function Axa(){let e=(0,JV.c)(3),t=ct(),n=wb(),r;return e[0]!==n||e[1]!==t?"
+        "(r={mutationFn:jxa,onSuccess:(e,r)=>{let{creditId:i}=r,a=e.code;"
+        "if(a===`reset`||a===`already_redeemed`){let n=e.code===`reset`?e.credit?.id??i:i;"
+        "t.setQueryData([`rate-limit-reset-credits`],e=>exa(e,a,n))}"
+        "Promise.all([n([`rate-limit-status`]),n([`rate-limit-reset-credits`])])}},"
+        "e[0]=n,e[1]=t,e[2]=r):r=e[2],Qt(r)}"
+    ),
+    "reset_mutation_replacement": (
+        "function Axa(){let e=ct(),t=wb(),n=globalThis.CodexMuxWindows?.getResetAccountId?.()??null,"
+        "r=[`rate-limit-reset-credits`,n??`primary`];return Qt({"
+        "mutationFn:n?i=>globalThis.CodexMuxWindows.consumeRateLimitReset(n,i):jxa,"
+        "onSuccess:(n,i)=>{let{creditId:a}=i,o=n.code;if(o===`reset`||o===`already_redeemed`){"
+        "let s=o===`reset`?n.credit?.id??a:a;e.setQueryData(r,e=>exa(e,o,s))}"
+        "Promise.all([t([`rate-limit-status`]),t(r)])}})}"
+    ),
+    "selected_usage_anchor": "let y=v;if(g!=null){",
+    "selected_usage_replacement": (
+        "let y=globalThis.CodexMuxWindows?.selectedResetUsageWindows?.()??v;if(g!=null){"
+    ),
+    "reset_header_anchor": (
+        "let _e;t[46]===he?_e=t[47]:(_e=(0,u4.jsxs)(tz,{children:[he,ge]}),"
+        "t[46]=he,t[47]=_e);"
+    ),
+    "reset_header_replacement": (
+        "let _e=(0,u4.jsxs)(tz,{children:[he,ge,(0,u4.jsx)(`codex-mux-reset-picker`,{})]});"
+    ),
+    "profile_picker_anchor": "children:[Sn,Cn,Tn]",
+    "profile_picker_replacement": "children:[(0,$.jsx)(`codex-mux-profile-picker`,{}),Sn,Cn,Tn]",
+    "plugin_picker_anchor": "I=(0,D.jsx)(v,{title:O,subtitle:k,action:F,children:w})",
+    "plugin_picker_replacement": (
+        "I=(0,D.jsx)(v,{title:O,subtitle:k,action:F,children:(0,D.jsxs)(`div`,"
+        "{className:`contents`,children:[(0,D.jsx)(`codex-mux-plugin-picker`,{}),w]})})"
+    ),
+}
+
+LEGACY_RENDERER_PROFILE = {
+    "profile_query_anchor": PROFILE_QUERY_ANCHOR,
+    "profile_query_replacement": PROFILE_QUERY_REPLACEMENT,
+    "plugin_request_anchor": PLUGIN_REQUEST_ANCHOR,
+    "plugin_request_replacement": PLUGIN_REQUEST_REPLACEMENT,
+    "reset_query_anchor": RESET_QUERY_ANCHOR,
+    "reset_query_replacement": RESET_QUERY_REPLACEMENT,
+    "reset_mutation_anchor": RESET_MUTATION_ANCHOR,
+    "reset_mutation_replacement": RESET_MUTATION_REPLACEMENT,
+    "selected_usage_anchor": SELECTED_USAGE_ANCHOR,
+    "selected_usage_replacement": SELECTED_USAGE_REPLACEMENT,
+    "reset_header_anchor": RESET_HEADER_ANCHOR,
+    "reset_header_replacement": RESET_HEADER_REPLACEMENT,
+    "profile_picker_anchor": PROFILE_PICKER_ANCHOR,
+    "profile_picker_replacement": PROFILE_PICKER_REPLACEMENT,
+    "plugin_picker_anchor": PLUGIN_PICKER_ANCHOR,
+    "plugin_picker_replacement": PLUGIN_PICKER_REPLACEMENT,
+}
+
+WINDOWS_RENDERER_PROFILES = {
+    "c7ac6d76cf5f30aa5cb92e1e46561933c06e94e3fe2d6582a04dac18c76f3ed1": LEGACY_RENDERER_PROFILE,
+    "71c60b36a782e5597f1ca90abf70dba6a9a6aa4e61f3be69e422be43666a7d70": CURRENT_RENDERER_PROFILE,
+}
+TESTED_ASAR_HASHES = set(WINDOWS_RENDERER_PROFILES)
+# The private-login bridge is injected into the standard main-renderer preload
+# and main-process bundle of the supported ASAR. The installer checks the ASAR
+# hash before it reaches these anchors, and both replacements must match once.
+LOGIN_PRELOAD_TRAILER_ANCHOR = "\n//# sourceMappingURL=preload.js.map"
+LOGIN_MAIN_TRAILER_ANCHOR = "exports.runMainAppStartup=cje;\n//# sourceMappingURL="
+LOGIN_MAIN_TRAILER_PATTERN = re.compile(
+    r"exports\.runMainAppStartup=([^;]+);[ \t]*(?:\n[ \t]*)?//# sourceMappingURL="
+)
+
 # Keep the Store discovery and Router-only upgrade actions in small, explicit
 # PowerShell snippets. Both receive paths through a private child-process
 # environment variable rather than string interpolation, so a user profile
 # path cannot change the command being run.
 STORE_PACKAGE_DISCOVERY_SCRIPT = r"""
-$ErrorActionPreference = 'Stop'
-$packages = @(
-    Get-AppxPackage -Name 'OpenAI.Codex*' -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.InstallLocation -and
-            $_.Architecture -eq 'X64' -and
-            (Test-Path -LiteralPath (Join-Path $_.InstallLocation 'app\ChatGPT.exe') -PathType Leaf) -and
-            (Test-Path -LiteralPath (Join-Path $_.InstallLocation 'app\resources\app.asar') -PathType Leaf)
-        } |
-        Sort-Object -Property Version -Descending
-)
+$ErrorActionPreference = 'Continue'
+$packages = @()
+try {
+    $packages = @(
+        Get-AppxPackage -Name 'OpenAI.Codex*' -ErrorAction Stop |
+            Where-Object {
+                $_.InstallLocation -and
+                $_.Architecture -eq 'X64' -and
+                (Test-Path -LiteralPath (Join-Path $_.InstallLocation 'app\ChatGPT.exe') -PathType Leaf) -and
+                (Test-Path -LiteralPath (Join-Path $_.InstallLocation 'app\resources\app.asar') -PathType Leaf)
+            } |
+            Sort-Object -Property Version -Descending
+    )
+} catch {
+    # Some Store installations deny the Appx module query to a normal user.
+    # The read-only process registration is an equivalent path lookup and does
+    # not open or modify the official package.
+    $packages = @()
+}
 if ($packages.Count -gt 0) {
     [Console]::Out.Write($packages[0].InstallLocation)
+    exit 0
+}
+$processes = @(
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.ExecutablePath -and
+            $_.ExecutablePath -like '*\OpenAI.Codex_*\app\ChatGPT.exe'
+        } |
+        Sort-Object -Property ProcessId
+)
+if ($processes.Count -gt 0) {
+    [Console]::Out.Write((Split-Path -Parent (Split-Path -Parent $processes[0].ExecutablePath)))
 }
 """.strip()
 
@@ -160,7 +287,7 @@ foreach ($process in $routerProcesses) {
 }
 Start-Sleep -Milliseconds 100
 if ((Get-RouterProcesses).Count -gt 0) {
-    throw "The existing Codex Subscription Router process did not exit. Close that Router copy and run the installer again."
+    throw "The existing Codex Relay process did not exit. Close that Relay copy and run the installer again."
 }
 """.strip()
 
@@ -177,14 +304,14 @@ if ([string]::IsNullOrWhiteSpace($desktop)) {
     throw 'Windows did not provide a Desktop directory for the current user.'
 }
 New-Item -ItemType Directory -Path $desktop -Force | Out-Null
-$shortcutPath = Join-Path $desktop 'Codex Subscription Router.lnk'
+$shortcutPath = Join-Path $desktop 'Codex Relay.lnk'
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
 $shortcut.TargetPath = $target
 $shortcut.Arguments = ('--user-data-dir="{0}"' -f $profile)
 $shortcut.WorkingDirectory = $workingDirectory
 $shortcut.IconLocation = "$target,0"
-$shortcut.Description = 'Independent Codex Subscription Router (does not modify the Store app)'
+$shortcut.Description = 'Independent Codex Relay (does not modify the Store app)'
 $shortcut.Save()
 [Console]::Out.Write($shortcutPath)
 """.strip()
@@ -225,12 +352,49 @@ def router_install_root() -> Path:
     return local_app_data() / ROUTER_APP_NAME
 
 
+def legacy_router_install_root() -> Path:
+    """Return the 0.2.x managed root that can be migrated after staging."""
+    return local_app_data() / LEGACY_ROUTER_APP_NAME
+
+
 def default_destination() -> Path:
     return router_install_root() / ROUTER_APP_DIRECTORY
 
 
+def legacy_destination() -> Path:
+    return legacy_router_install_root() / ROUTER_APP_DIRECTORY
+
+
+def app_data() -> Path:
+    return Path(os.environ.get("APPDATA", Path.home() / "AppData/Roaming"))
+
+
+def legacy_router_profile_directory() -> Path:
+    return app_data() / LEGACY_ROUTER_APP_NAME
+
+
 def router_profile_directory() -> Path:
-    return Path(os.environ.get("APPDATA", Path.home() / "AppData/Roaming")) / ROUTER_APP_NAME
+    """Use the new profile unless a 0.2.x profile must be preserved.
+
+    Moving an Electron profile while an updater has just closed it is fragile
+    and can lose browser/session state. A renamed Relay install therefore
+    keeps using the legacy profile until a user starts with a fresh profile.
+    Router account state itself stays in ``~/.codex-mux`` in either case.
+    """
+    canonical = app_data() / ROUTER_APP_NAME
+    legacy = legacy_router_profile_directory()
+    if not canonical.exists() and legacy.is_dir():
+        return legacy
+    return canonical
+
+
+def updater_directory() -> Path:
+    """Return the stable directory that is outside the replaceable Router app."""
+    return local_app_data() / f"{ROUTER_APP_NAME} Updater"
+
+
+def updater_destination() -> Path:
+    return updater_directory() / "router-updater.exe"
 
 
 def is_within(path: Path, parent: Path) -> bool:
@@ -341,6 +505,52 @@ def build(output: Path, package: str) -> None:
     subprocess.run(["go", "build", "-trimpath", "-ldflags=-s -w", "-o", str(output), package], cwd=ROOT, check=True)
 
 
+def install_updater_helper(binary: Path) -> Path:
+    """Install the updater beside, rather than inside, the managed app.
+
+    A helper launched by the previous Router instance can still have its EXE
+    open during an update.  In that case retain the known-good helper; it is
+    deliberately backwards-compatible and can install the new source release
+    even when the new UI has already been staged.
+    """
+    destination = updater_destination().resolve()
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = destination.with_suffix(".new")
+    try:
+        shutil.copy2(binary, temporary)
+        os.replace(temporary, destination)
+    except OSError as error:
+        temporary.unlink(missing_ok=True)
+        if not destination.is_file():
+            raise RuntimeError(f"could not install the Router update helper: {error}") from error
+        print(f"Keeping the existing Router update helper while it is in use: {error}")
+    return destination
+
+
+def copy_store_app(source: Path, staged: Path) -> None:
+    """Copy a Store app while preserving harmless reparse points.
+
+    Recent Store builds contain an optional CUA JavaScript dependency cache
+    made of package-link reparse points.  Ordinary users can read the app but
+    cannot resolve a few dangling links, which makes a plain ``copytree``
+    abort even though Windows CUA is not part of this port.  Keep real files
+    and symlink metadata, and omit only that optional cache.
+    """
+    def ignore_optional_cache(directory: str, names: list[str]) -> set[str]:
+        path = Path(directory)
+        if "cua_node" in path.parts and path.name == "dist" and "js-dependency-cache" in names:
+            return {"js-dependency-cache"}
+        return set()
+
+    shutil.copytree(
+        source,
+        staged,
+        symlinks=True,
+        ignore_dangling_symlinks=True,
+        ignore=ignore_optional_cache,
+    )
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -393,53 +603,159 @@ def asset_with_anchor(assets: Path, pattern: str, anchor: str, description: str)
     return matches[0]
 
 
-def patch_windows_feature_bundles(extracted: Path) -> None:
-    """Patch only the reviewed renderer slots for the supported ASAR build."""
+def patch_windows_feature_bundles(
+    extracted: Path,
+    renderer_profile: dict[str, str] | None = None,
+) -> None:
+    """Patch only the reviewed renderer slots for one ASAR profile."""
+    profile = renderer_profile or LEGACY_RENDERER_PROFILE
     assets = extracted / "webview" / "assets"
     if not assets.is_dir():
         raise RuntimeError("could not find the Windows renderer assets directory")
 
     initial_path = asset_with_anchor(
-        assets, "app-initial-*.js", PROFILE_QUERY_ANCHOR, "profile query"
+        assets, "app-initial-*.js", profile["profile_query_anchor"], "profile query"
     )
     initial = initial_path.read_text(encoding="utf-8")
     initial = replace_once(
-        initial, PROFILE_QUERY_ANCHOR, PROFILE_QUERY_REPLACEMENT, "profile query"
+        initial,
+        profile["profile_query_anchor"],
+        profile["profile_query_replacement"],
+        "profile query",
     )
     initial = replace_once(
-        initial, PLUGIN_REQUEST_ANCHOR, PLUGIN_REQUEST_REPLACEMENT, "Plugins RPC"
+        initial,
+        profile["plugin_request_anchor"],
+        profile["plugin_request_replacement"],
+        "Plugins RPC",
     )
     initial = replace_once(
-        initial, RESET_QUERY_ANCHOR, RESET_QUERY_REPLACEMENT, "reset query"
+        initial,
+        profile["reset_query_anchor"],
+        profile["reset_query_replacement"],
+        "reset query",
     )
     initial = replace_once(
-        initial, RESET_MUTATION_ANCHOR, RESET_MUTATION_REPLACEMENT, "reset mutation"
+        initial,
+        profile["reset_mutation_anchor"],
+        profile["reset_mutation_replacement"],
+        "reset mutation",
     )
     initial = replace_once(
-        initial, SELECTED_USAGE_ANCHOR, SELECTED_USAGE_REPLACEMENT, "usage window"
+        initial,
+        profile["selected_usage_anchor"],
+        profile["selected_usage_replacement"],
+        "usage window",
     )
     initial = replace_once(
-        initial, RESET_HEADER_ANCHOR, RESET_HEADER_REPLACEMENT, "reset sheet header"
+        initial,
+        profile["reset_header_anchor"],
+        profile["reset_header_replacement"],
+        "reset sheet header",
     )
     initial_path.write_text(initial, encoding="utf-8")
 
     profile_path = asset_with_anchor(
-        assets, "profile-*.js", PROFILE_PICKER_ANCHOR, "Profile settings"
+        assets, "profile-*.js", profile["profile_picker_anchor"], "Profile settings"
     )
-    profile = profile_path.read_text(encoding="utf-8")
-    profile = replace_once(
-        profile, PROFILE_PICKER_ANCHOR, PROFILE_PICKER_REPLACEMENT, "Profile picker"
+    profile_text = profile_path.read_text(encoding="utf-8")
+    profile_text = replace_once(
+        profile_text,
+        profile["profile_picker_anchor"],
+        profile["profile_picker_replacement"],
+        "Profile picker",
     )
-    profile_path.write_text(profile, encoding="utf-8")
+    profile_path.write_text(profile_text, encoding="utf-8")
 
     plugins_path = asset_with_anchor(
-        assets, "plugins-settings-*.js", PLUGIN_PICKER_ANCHOR, "Plugins settings"
+        assets,
+        "plugins-settings-*.js",
+        profile["plugin_picker_anchor"],
+        "Plugins settings",
     )
     plugins = plugins_path.read_text(encoding="utf-8")
     plugins = replace_once(
-        plugins, PLUGIN_PICKER_ANCHOR, PLUGIN_PICKER_REPLACEMENT, "Plugins picker"
+        plugins,
+        profile["plugin_picker_anchor"],
+        profile["plugin_picker_replacement"],
+        "Plugins picker",
     )
     plugins_path.write_text(plugins, encoding="utf-8")
+
+
+def load_windows_login_asset(filename: str) -> str:
+    """Return a reviewed source asset used by the version-pinned ASAR patch."""
+    path = ROOT / "ui" / filename
+    if not path.is_file():
+        raise RuntimeError(f"could not find Windows private-login asset: {path}")
+    source = path.read_text(encoding="utf-8").strip()
+    if not source:
+        raise RuntimeError(f"Windows private-login asset is empty: {path}")
+    return source
+
+
+def patch_windows_login_bundles(
+    extracted: Path,
+    router_version: str = VERSION,
+) -> tuple[Path, Path]:
+    """Inject the isolated sign-in bridge into the supported Electron bundle.
+
+    The renderer can call only a small preload API. The main-process companion
+    validates the official initial URL and creates an ephemeral per-login
+    Electron partition, so the remote page never receives Node or Router
+    control-service access.
+    """
+    build = extracted / ".vite" / "build"
+    if not build.is_dir():
+        raise RuntimeError("could not find the Windows Electron build directory")
+
+    preload_path = build / "preload.js"
+    if not preload_path.is_file():
+        raise RuntimeError("could not find the Windows Electron preload bundle")
+    preload = preload_path.read_text(encoding="utf-8")
+    preload_patch = load_windows_login_asset("windows-router-login-preload.js")
+    update_preload_patch = load_windows_login_asset("windows-router-update-preload.js")
+    preload = replace_once(
+        preload,
+        LOGIN_PRELOAD_TRAILER_ANCHOR,
+        f"\n{preload_patch}\n{update_preload_patch}{LOGIN_PRELOAD_TRAILER_ANCHOR}",
+        "private login preload",
+    )
+    preload_path.write_text(preload, encoding="utf-8")
+
+    main_candidates = []
+    for path in build.glob("main-*.js"):
+        source = path.read_text(encoding="utf-8")
+        if len(LOGIN_MAIN_TRAILER_PATTERN.findall(source)) == 1:
+            main_candidates.append((path, source))
+    if len(main_candidates) != 1:
+        raise RuntimeError(
+            "could not find exactly one Windows private login main-process "
+            f"asset (found {len(main_candidates)})"
+        )
+    main_path, main = main_candidates[0]
+    main = main_path.read_text(encoding="utf-8")
+    main_patch = load_windows_login_asset("windows-router-login-main.js")
+    update_main_patch = load_windows_login_asset("windows-router-update-main.js")
+    for placeholder, value in (
+        ("__CODEX_MUX_ROUTER_VERSION__", router_version),
+        (
+            "__CODEX_MUX_UPDATE_MANIFEST_URL__",
+            "https://github.com/LightHaru/codex-relay/releases/latest/download/windows-update.json",
+        ),
+    ):
+        update_main_patch = update_main_patch.replace(placeholder, value)
+    insertion = f"exports.runMainAppStartup={{STARTUP}};\n{main_patch}\n{update_main_patch}\n//# sourceMappingURL="
+    match = LOGIN_MAIN_TRAILER_PATTERN.search(main)
+    if match is None:
+        raise RuntimeError("could not verify the Windows private login main-process anchor")
+    startup = match.group(1)
+    # The injected JavaScript contains many object-literal braces, so use a
+    # literal placeholder replacement rather than str.format().
+    replacement = insertion.replace("{STARTUP}", startup, 1)
+    main = main[: match.start()] + replacement + main[match.end() :]
+    main_path.write_text(main, encoding="utf-8")
+    return preload_path, main_path
 
 
 def load_or_create_control_token(state_root: Path) -> str:
@@ -461,7 +777,14 @@ def load_or_create_control_token(state_root: Path) -> str:
     return token
 
 
-def patch_windows_renderer(resources: Path, temporary: Path, token: str) -> None:
+def patch_windows_renderer(
+    resources: Path,
+    temporary: Path,
+    token: str,
+    *,
+    renderer_profile: dict[str, str] | None = None,
+    router_version: str = VERSION,
+) -> None:
     node, asar = require_asar_tool()
     original_asar = resources / "app.asar"
     extracted = temporary / "asar"
@@ -490,7 +813,8 @@ def patch_windows_renderer(resources: Path, temporary: Path, token: str) -> None
     index = index.replace("</head>", f"    {script_tag}\n</head>", 1)
     index_path.write_text(index, encoding="utf-8")
 
-    patch_windows_feature_bundles(extracted)
+    patch_windows_feature_bundles(extracted, renderer_profile)
+    login_preload, login_main = patch_windows_login_bundles(extracted, router_version)
 
     bridge = (ROOT / "ui" / "windows-router-menu.js").read_text(encoding="utf-8")
     if bridge.count("__CODEX_MUX_CONTROL_PORT__") != 1 or bridge.count("__CODEX_MUX_CONTROL_TOKEN__") != 1:
@@ -502,6 +826,8 @@ def patch_windows_renderer(resources: Path, temporary: Path, token: str) -> None
         raise RuntimeError("renderer already contains a Windows router menu asset")
     target_script.write_text(bridge, encoding="utf-8")
     subprocess.run([node, "--check", str(target_script)], cwd=ROOT, check=True)
+    subprocess.run([node, "--check", str(login_preload)], cwd=ROOT, check=True)
+    subprocess.run([node, "--check", str(login_main)], cwd=ROOT, check=True)
 
     pack_arguments = [
         "pack",
@@ -662,11 +988,23 @@ def patch(
     print(f"Source app: {source}\napp.asar SHA-256: {actual_hash}")
     if actual_hash not in TESTED_ASAR_HASHES and not allow_untested:
         raise RuntimeError("source app.asar is not approved; review the update or pass --allow-untested-source")
+    renderer_profile = WINDOWS_RENDERER_PROFILES.get(actual_hash)
+    if renderer_profile is None:
+        raise RuntimeError(
+            "source app.asar has no reviewed Windows renderer profile; "
+            "update the exact anchors before installing it"
+        )
     if shutil.which("go") is None:
         raise RuntimeError("Go is required to build the mux")
     require_asar_tool()
-    if destination.exists() and not force:
-        raise RuntimeError(f"destination exists: {destination} (pass --force to create a recoverable backup)")
+    legacy_root = legacy_router_install_root().resolve()
+    legacy_exists = legacy_root.is_dir() and legacy_root != destination.parent
+    if (destination.exists() or legacy_exists) and not force:
+        existing = destination if destination.exists() else legacy_root
+        raise RuntimeError(
+            f"an existing Relay installation was found at {existing} "
+            "(pass --force to create a recoverable backup)"
+        )
     destination.parent.mkdir(parents=True, exist_ok=True)
     state_root = Path.home() / ".codex-mux"
     token = load_or_create_control_token(state_root)
@@ -684,13 +1022,21 @@ def patch(
         staged = Path(temp) / "app"
         proxy = Path(temp) / "codex.exe"
         routerctl = Path(temp) / "routerctl.exe"
+        updater = Path(temp) / "router-updater.exe"
         print("Building Windows mux and control CLI…")
         build(proxy, "./cmd/codex-mux")
         build(routerctl, "./cmd/routerctl")
+        build(updater, "./cmd/router-updater")
         print("Copying the official app to an independent location…")
-        shutil.copytree(source, staged)
+        copy_store_app(source, staged)
         staged_resources = staged / "resources"
-        patch_windows_renderer(staged_resources, Path(temp), token)
+        patch_windows_renderer(
+            staged_resources,
+            Path(temp),
+            token,
+            renderer_profile=renderer_profile,
+            router_version=VERSION,
+        )
         real_codex = staged_resources / "codex.real.exe"
         if real_codex.exists():
             raise RuntimeError("source already contains codex.real.exe")
@@ -702,27 +1048,47 @@ def patch(
             "platform": "windows",
             "source": str(source),
             "sourceAsarSha256": actual_hash,
-            "rendererUi": "windows-renderer-patches-v1",
+            "rendererUi": "windows-renderer-patches-v2-private-login",
             "profile": str(router_profile_directory()),
         }
-        (staged / "codex-subscription-router.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        (staged / "codex-relay.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        # The helper is outside the replaceable app tree, so an update can
+        # remain alive while the Router UI exits. Install it before stopping
+        # any Router process; a currently running older helper may simply be
+        # retained by install_updater_helper().
+        helper = install_updater_helper(updater)
         backup = None
+        legacy_backup = None
         # Build and patch the new copy before stopping anything. If an
         # upstream update or a renderer-anchor check fails, all current Router
         # copies stay open and untouched. Once staging is ready, stop only
         # Router executables in the managed install root. This also prevents a
         # pre-stable app-ui-v2/app-ui-v3 copy from retaining the control port.
         stop_router_processes(destination)
+        if legacy_exists:
+            # Stop only the previous managed product root. The Store app has
+            # a distinct WindowsApps path and is never in either allow-list.
+            stop_router_processes(legacy_destination())
         if destination.exists():
             backup = next_backup_path(state_root)
             backup.parent.mkdir(parents=True, exist_ok=False)
             destination.rename(backup)
             print(f"Existing copy moved to {backup}")
+        if legacy_exists and legacy_root.exists():
+            legacy_backup = next_backup_path(state_root).parent / LEGACY_ROUTER_APP_NAME
+            backups_root = (state_root / "backups").resolve()
+            if not is_within(legacy_backup, backups_root):
+                raise RuntimeError("refusing an unsafe legacy Router migration target")
+            legacy_backup.parent.mkdir(parents=True, exist_ok=False)
+            legacy_root.rename(legacy_backup)
+            print(f"Legacy Codex Subscription Router copy moved to {legacy_backup}")
         try:
             staged.rename(destination)
         except OSError:
             if backup is not None and backup.exists():
                 backup.rename(destination)
+            if legacy_backup is not None and legacy_backup.exists():
+                legacy_backup.rename(legacy_root)
             raise
     launcher = write_launcher(destination)
     shortcut = create_desktop_shortcut(destination) if desktop_shortcut else None
@@ -732,7 +1098,8 @@ def patch(
         f"Installed app: {destination}\n"
         f"Launcher: {launcher}\n"
         f"Desktop shortcut: {shortcut or 'not requested'}\n"
-        f"Control CLI: {destination / 'routerctl.exe'}"
+        f"Control CLI: {destination / 'routerctl.exe'}\n"
+        f"Update helper: {helper}"
     )
 
 

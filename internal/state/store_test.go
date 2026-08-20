@@ -3,6 +3,7 @@ package state
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -27,6 +28,9 @@ func TestStoreBootstrapsPrimaryAndPersistsThreadAffinity(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantConfig := "cli_auth_credentials_store = \"file\"\nmcp_oauth_credentials_store = \"file\"\n"
+	if runtime.GOOS == "windows" {
+		wantConfig += "\n[windows]\nsandbox = \"unelevated\"\n"
+	}
 	if string(config) != wantConfig {
 		t.Fatalf("unexpected isolated config: %q", config)
 	}
@@ -223,5 +227,68 @@ func TestDiscardProvisionalAccountRejectsPrimaryAndThreadOwner(t *testing.T) {
 	}
 	if _, ok := store.Account(secondary.ID); !ok {
 		t.Fatal("rejected discard removed the assigned account")
+	}
+}
+
+func TestSetControllerPersistsIndependentPrimary(t *testing.T) {
+	root := t.TempDir()
+	store, err := Open(filepath.Join(root, "mux"), filepath.Join(root, "primary"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondary, err := store.AddAccount("Subscription 2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err := store.SetController(secondary.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.ID != secondary.ID || !selected.Controller {
+		t.Fatalf("unexpected selected controller: %#v", selected)
+	}
+	if primary, ok := store.Account("primary"); !ok || primary.Controller {
+		t.Fatalf("original account remained controller: %#v ok=%v", primary, ok)
+	}
+	reopened, err := Open(filepath.Join(root, "mux"), filepath.Join(root, "primary"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if primary, ok := reopened.Controller(); !ok || primary.ID != secondary.ID {
+		t.Fatalf("independent Primary choice did not persist: %#v ok=%v", primary, ok)
+	}
+}
+
+func TestRemoveAccountProtectsPrimaryAndThreadOwnership(t *testing.T) {
+	root := t.TempDir()
+	store, err := Open(filepath.Join(root, "mux"), filepath.Join(root, "primary"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondary, err := store.AddAccount("Subscription 2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RemoveAccount("primary", true); err == nil {
+		t.Fatal("removing the active Primary should fail")
+	}
+	if err := store.SetThreadOwner("old-chat", secondary.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RemoveAccount(secondary.ID, false); err == nil {
+		t.Fatal("removing an account that owns a chat should require force")
+	}
+	removed, err := store.RemoveAccount(secondary.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed.ID != secondary.ID {
+		t.Fatalf("removed unexpected account: %#v", removed)
+	}
+	if _, ok := store.Account(secondary.ID); ok {
+		t.Fatal("forced removal left account metadata")
+	}
+	if _, ok := store.ThreadOwner("old-chat"); ok {
+		t.Fatal("forced removal left stale thread ownership")
 	}
 }

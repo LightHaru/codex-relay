@@ -19,10 +19,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/LightHaru/codex-subscription-router/internal/control"
-	"github.com/LightHaru/codex-subscription-router/internal/mux"
-	"github.com/LightHaru/codex-subscription-router/internal/protocol"
-	"github.com/LightHaru/codex-subscription-router/internal/state"
+	"github.com/LightHaru/codex-relay/internal/control"
+	"github.com/LightHaru/codex-relay/internal/mux"
+	"github.com/LightHaru/codex-relay/internal/protocol"
+	"github.com/LightHaru/codex-relay/internal/state"
 )
 
 const defaultControlPort = 48123
@@ -39,7 +39,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	args := os.Args[1:]
+	// The Router is intentionally isolated from the official Store app. On
+	// Windows we force only Router-owned CLI/app-server invocations onto the
+	// reliable unelevated sandbox path; normalizeRouterArgs never edits the
+	// user's native ~/.codex/config.toml.
+	args := normalizeRouterArgs(os.Args[1:], runtime.GOOS == "windows")
 	if !isInteractiveAppServer(args) {
 		return passthrough(realExecutable, args)
 	}

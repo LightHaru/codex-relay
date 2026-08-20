@@ -15,9 +15,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/LightHaru/codex-subscription-router/internal/backend"
-	"github.com/LightHaru/codex-subscription-router/internal/protocol"
-	"github.com/LightHaru/codex-subscription-router/internal/state"
+	"github.com/LightHaru/codex-relay/internal/backend"
+	"github.com/LightHaru/codex-relay/internal/protocol"
+	"github.com/LightHaru/codex-relay/internal/state"
 )
 
 const requestTimeout = 30 * time.Second
@@ -60,9 +60,13 @@ type Multiplexer struct {
 
 	childrenMu sync.RWMutex
 	children   map[string]*backend.Child
-	inbound    chan backend.Inbound
-	cancelMu   sync.Mutex
-	cancelling map[string]struct{}
+	// accountMutationMu serializes destructive/account-controller transitions
+	// so a simultaneous Primary switch, cancellation, or removal cannot leave
+	// the child map and persisted state describing different worlds.
+	accountMutationMu sync.Mutex
+	inbound           chan backend.Inbound
+	cancelMu          sync.Mutex
+	cancelling        map[string]struct{}
 
 	initializationMu sync.RWMutex
 	initializeParams json.RawMessage
@@ -152,6 +156,53 @@ func (m *Multiplexer) Close() {
 	for _, entry := range m.childEntries() {
 		_ = entry.child.Close()
 	}
+}
+
+// restartChildrenLocked restarts every Router-owned Codex app-server child
+// while keeping the parent mux process (and its local control API) alive.
+// Callers must hold accountMutationMu. The native Store Codex process is never
+// part of m.children and therefore cannot be touched by this operation.
+func (m *Multiplexer) restartChildrenLocked(ctx context.Context) (int, error) {
+	entries := m.childEntries()
+	if len(entries) == 0 {
+		return 0, nil
+	}
+
+	var restartErrors []error
+	for _, entry := range entries {
+		if err := entry.child.Close(); err != nil {
+			restartErrors = append(restartErrors, fmt.Errorf("stop %s: %w", entry.account.ID, err))
+		}
+	}
+
+	waitCtx, cancelWait := context.WithTimeout(ctx, 25*time.Second)
+	defer cancelWait()
+	for _, entry := range entries {
+		if err := entry.child.Wait(waitCtx); err != nil {
+			restartErrors = append(restartErrors, fmt.Errorf("wait for %s: %w", entry.account.ID, err))
+			continue
+		}
+		m.removeChild(entry.account.ID, entry.child)
+	}
+	if len(restartErrors) > 0 {
+		return 0, errors.Join(restartErrors...)
+	}
+
+	accounts := m.store.Accounts()
+	started := 0
+	startCtx, cancelStart := context.WithTimeout(ctx, 25*time.Second)
+	defer cancelStart()
+	for _, account := range accounts {
+		if _, err := m.startChild(startCtx, account); err != nil {
+			restartErrors = append(restartErrors, fmt.Errorf("start %s: %w", account.ID, err))
+			continue
+		}
+		started++
+	}
+	if len(restartErrors) > 0 {
+		return started, errors.Join(restartErrors...)
+	}
+	return started, nil
 }
 
 func (m *Multiplexer) HandleClient(message protocol.Message) {
@@ -397,10 +448,23 @@ func (m *Multiplexer) resumeThreadOnAccount(ctx context.Context, threadID, sourc
 	if readResult.Thread.ID == "" || readResult.Thread.Path == "" {
 		return errors.New("existing chat has no resumable history path")
 	}
+	sourceAccount, ok := m.store.Account(sourceAccountID)
+	if !ok {
+		return fmt.Errorf("source subscription %q is unavailable", sourceAccountID)
+	}
+	targetAccount, ok := m.store.Account(targetAccountID)
+	if !ok {
+		return fmt.Errorf("target subscription %q is unavailable", targetAccountID)
+	}
+	if err := copyThreadHistory(sourceAccount.CodexHome, targetAccount.CodexHome, readResult.Thread.Path); err != nil {
+		return fmt.Errorf("copy existing chat history: %w", err)
+	}
+	// The bundled Windows app-server accepts threadId, but not the newer
+	// path/history resume parameters. The exact source rollout was copied into
+	// the isolated target CODEX_HOME above, so resume by ID is both compatible
+	// and keeps future turns owned by the fallback subscription.
 	resumeParams, _ := json.Marshal(map[string]any{
 		"threadId":      threadID,
-		"history":       nil,
-		"path":          readResult.Thread.Path,
 		"cwd":           readResult.Thread.CWD,
 		"model":         nil,
 		"modelProvider": readResult.Thread.ModelProvider,
@@ -602,10 +666,14 @@ func (m *Multiplexer) removeChild(accountID string, expected *backend.Child) {
 // removeIsolatedAccountHome performs a deliberately narrow cleanup after the
 // state entry was safely removed. It never derives a deletion target from a
 // caller-provided path: the account home must be the exact child home created
-// by state.Store underneath CODEX_MUX_HOME/accounts/<id>.
+// by state.Store underneath CODEX_MUX_HOME/accounts/<id>. The native Codex
+// home is preserved even when its Router metadata is removed.
 func (m *Multiplexer) removeIsolatedAccountHome(account state.Account) error {
-	if account.Controller || account.ID == "" || filepath.Base(account.ID) != account.ID {
+	if account.ID == "" || filepath.Base(account.ID) != account.ID {
 		return errors.New("refusing to remove a non-secondary account home")
+	}
+	if sameFilesystemPath(account.CodexHome, m.store.PrimaryCodexHome()) {
+		return nil
 	}
 	expected, err := filepath.Abs(filepath.Join(m.store.Root(), "accounts", account.ID, "codex-home"))
 	if err != nil {
@@ -619,6 +687,18 @@ func (m *Multiplexer) removeIsolatedAccountHome(account state.Account) error {
 		return errors.New("refusing to remove an unexpected account home")
 	}
 	return os.RemoveAll(filepath.Dir(actual))
+}
+
+func sameFilesystemPath(left, right string) bool {
+	if left == "" || right == "" {
+		return false
+	}
+	leftAbsolute, leftErr := filepath.Abs(left)
+	rightAbsolute, rightErr := filepath.Abs(right)
+	if leftErr != nil || rightErr != nil {
+		return filepath.Clean(left) == filepath.Clean(right)
+	}
+	return filepath.Clean(leftAbsolute) == filepath.Clean(rightAbsolute)
 }
 
 // purgeAccountReferences removes only transient router data for a secondary

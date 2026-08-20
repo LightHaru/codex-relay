@@ -1,5 +1,5 @@
 /*
- * Windows renderer bridge for Codex Subscription Router.
+ * Windows renderer bridge for Codex Relay.
  *
  * This deliberately uses DOM insertion instead of renderer-private React
  * symbols. Windows builds rename/minify those symbols independently of macOS,
@@ -32,6 +32,8 @@
   let scheduled = false;
   let activeLogin = null;
   let activeToast = null;
+  let activeUpdateToast = null;
+  let updateWatcherStarted = false;
   let latestAccounts = [];
   const resetSubscribers = new Set();
 
@@ -176,12 +178,18 @@
   function usageWindows(rateLimits) {
     return [rateLimits?.primary, rateLimits?.secondary]
       .filter(Boolean)
-      .map((window) => ({
-        usedPercent: Number(window.usedPercent || 0),
-        remainingPercent: Math.max(0, 100 - Number(window.usedPercent || 0)),
-        windowMinutes: Number(window.windowDurationMins || 0),
-        resetsAt: window.resetsAt ?? null,
-      }));
+      .map((window) => {
+        const usedPercent = Number(window.usedPercent);
+        if (!Number.isFinite(usedPercent)) return null;
+        const duration = Number(window.windowDurationMins);
+        return {
+          usedPercent: Math.max(0, Math.min(100, usedPercent)),
+          remainingPercent: Math.max(0, Math.min(100, 100 - usedPercent)),
+          windowMinutes: Number.isFinite(duration) && duration > 0 ? duration : 0,
+          resetsAt: window.resetsAt ?? null,
+        };
+      })
+      .filter(Boolean);
   }
 
   function selectedResetUsageWindows() {
@@ -192,19 +200,92 @@
   }
 
   function longestUsageWindow(account) {
-    const windows = [account?.rateLimits?.primary, account?.rateLimits?.secondary]
-      .filter(Boolean)
-      .sort((left, right) => (left.windowDurationMins || 0) - (right.windowDurationMins || 0));
+    const windows = usageWindows(account?.rateLimits)
+      .sort((left, right) => left.windowMinutes - right.windowMinutes);
     return windows.at(-1) || null;
   }
 
   function remainingUsage(account) {
     const usage = longestUsageWindow(account);
-    return usage ? Math.max(0, 100 - Number(usage.usedPercent || 0)) : null;
+    return usage ? usage.remainingPercent : null;
+  }
+
+  function usageLabel(account) {
+    const remaining = remainingUsage(account);
+    if (remaining != null) return `${Math.round(remaining)}% left`;
+    if (account?.rateLimitError) return "Quota unavailable";
+    return "Updating quota…";
+  }
+
+  function formatWindowDuration(minutes) {
+    const value = Number(minutes);
+    if (!Number.isFinite(value) || value <= 0) return "quota";
+    if (value % 10080 === 0) return `${value / 10080}w`;
+    if (value % 1440 === 0) return `${value / 1440}d`;
+    if (value % 60 === 0) return `${value / 60}h`;
+    return `${value}m`;
+  }
+
+  function formatResetCountdown(resetsAt, now = Date.now()) {
+    const seconds = Number(resetsAt);
+    if (!Number.isFinite(seconds) || seconds <= 0) return null;
+    const remainingMinutes = Math.ceil((seconds * 1000 - now) / 60000);
+    if (remainingMinutes <= 0) return "now";
+    if (remainingMinutes < 60) return `${remainingMinutes}m`;
+    const hours = Math.floor(remainingMinutes / 60);
+    const minutes = remainingMinutes % 60;
+    if (hours < 48) return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
+    const days = Math.floor(hours / 24);
+    const leftoverHours = hours % 24;
+    return leftoverHours ? `${days}d ${leftoverHours}h` : `${days}d`;
+  }
+
+  function quotaResetSummary(account) {
+    const windows = usageWindows(account?.rateLimits)
+      .filter((window) => Number.isFinite(Number(window.resetsAt)) && Number(window.resetsAt) > 0)
+      .sort((left, right) => Number(left.resetsAt) - Number(right.resetsAt));
+    if (windows.length === 0) {
+      return account?.rateLimitError ? "Reset time unavailable" : "Reset time not reported";
+    }
+    return `Reset ${windows.map((window) => `${formatWindowDuration(window.windowMinutes)}: ${formatResetCountdown(window.resetsAt)}`).join(" · ")}`;
+  }
+
+  function quotaResetTitle(account) {
+    const windows = usageWindows(account?.rateLimits)
+      .filter((window) => Number.isFinite(Number(window.resetsAt)) && Number(window.resetsAt) > 0)
+      .sort((left, right) => Number(left.resetsAt) - Number(right.resetsAt));
+    if (windows.length === 0) return quotaResetSummary(account);
+    return windows.map((window) => {
+      const date = new Date(Number(window.resetsAt) * 1000);
+      return `${formatWindowDuration(window.windowMinutes)}: ${date.toLocaleString()}`;
+    }).join(" · ");
+  }
+
+  function usageStatus(account) {
+    const windows = usageWindows(account?.rateLimits);
+    const quota = windows.length > 0
+      ? `${Math.round(remainingUsage(account))}% quota left`
+      : account?.rateLimitError ? "Quota data unavailable" : "Quota data is updating";
+    return `${quota} · ${quotaResetSummary(account)}`;
+  }
+
+  function accountDisplayName(account) {
+    return [account?.displayName, account?.username, account?.email, account?.label]
+      .map((value) => String(value || "").trim())
+      .find(Boolean) || "Subscription";
+  }
+
+  function accountIdentityDetail(account) {
+    const displayName = accountDisplayName(account);
+    return [account?.email, account?.username, account?.label]
+      .map((value) => String(value || "").trim())
+      .filter((value, index, values) => value && value !== displayName && values.indexOf(value) === index)
+      .join(" · ");
   }
 
   function accountName(account) {
-    return account.planLabel ? `${account.label} · ${account.planLabel}` : account.label || "Subscription";
+    const name = accountDisplayName(account);
+    return account?.planLabel ? `${name} · ${account.planLabel}` : name;
   }
 
   function initials(label) {
@@ -226,11 +307,11 @@
       image.alt = "";
       image.referrerPolicy = "no-referrer";
       image.addEventListener("error", () => {
-        image.replaceWith(document.createTextNode(initials(account.label)));
+      image.replaceWith(document.createTextNode(initials(accountDisplayName(account))));
       });
       shell.append(image);
     } else {
-      shell.textContent = initials(account.label);
+      shell.textContent = initials(accountDisplayName(account));
     }
     return shell;
   }
@@ -241,13 +322,17 @@
     const identity = make("div", "codex-mux-win-identity");
     const labels = make("div", "codex-mux-win-labels");
     const primary = make("div", "codex-mux-win-name", accountName(account));
+    const identityDetail = accountIdentityDetail(account);
     const secondary = make(
       "div",
       "codex-mux-win-subtext",
-      account.connected ? "••••••••" : "Waiting for sign-in",
+      account.connected
+        ? `${account.controller ? "Primary · " : ""}${usageStatus(account)}`
+        : "Waiting for sign-in",
     );
-    append(labels, primary, secondary);
+    append(labels, primary, identityDetail ? make("div", "codex-mux-win-account-id", identityDetail) : null, secondary);
     append(identity, avatar(account), labels);
+    line.title = quotaResetTitle(account);
     line.append(identity);
     if (!account.connected && !account.controller && typeof onCancelPending === "function") {
       const cancel = make("button", "codex-mux-win-pending-cancel", "Cancel sign-in");
@@ -260,7 +345,7 @@
       });
       line.append(cancel);
     } else {
-      line.append(make("div", "codex-mux-win-percent", usage == null ? "–" : `${Math.round(usage)}%`));
+      line.append(make("div", `codex-mux-win-percent${usage == null ? " codex-mux-win-percent-muted" : ""}`, usageLabel(account)));
     }
     return line;
   }
@@ -279,7 +364,9 @@
       .codex-mux-win-summary-label { flex: 1; min-width: 0; }
       .codex-mux-win-title, .codex-mux-win-name { overflow: hidden; color: inherit; font-size: 14px; font-weight: 500; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; }
       .codex-mux-win-subtext { overflow: hidden; color: var(--text-secondary, var(--token-text-secondary, currentColor)); font-size: 12px; line-height: 16px; text-overflow: ellipsis; white-space: nowrap; opacity: .8; }
+      .codex-mux-win-account-id { overflow: hidden; color: var(--text-secondary, var(--token-text-secondary, currentColor)); font-size: 11px; line-height: 15px; text-overflow: ellipsis; white-space: nowrap; opacity: .68; }
       .codex-mux-win-total, .codex-mux-win-percent { margin-left: auto; color: var(--text-secondary, var(--token-text-secondary, currentColor)); font-size: 14px; font-variant-numeric: tabular-nums; opacity: .82; }
+      .codex-mux-win-percent-muted { max-width: 112px; color: var(--text-secondary, var(--token-text-secondary, currentColor)); font-size: 11px; line-height: 15px; text-align: right; white-space: normal; }
       .codex-mux-win-row { cursor: default; }
       .codex-mux-win-identity { display: flex; min-width: 0; flex: 1; align-items: center; gap: 10px; }
       .codex-mux-win-labels { min-width: 0; }
@@ -292,9 +379,29 @@
       .codex-mux-win-add:hover, .codex-mux-win-add:focus-visible { background: color-mix(in srgb, currentColor 9%, transparent); outline: none; }
       .codex-mux-win-add:disabled { cursor: wait; opacity: .55; }
       .codex-mux-win-plus { display: inline-grid; width: 21px; height: 21px; place-items: center; color: var(--text-secondary, var(--token-text-secondary, currentColor)); font-size: 23px; font-weight: 300; line-height: 1; }
+      .codex-mux-win-settings { width: calc(100% - 6px); border: 0; background: transparent; cursor: pointer; font: inherit; text-align: left; }
+      .codex-mux-win-settings:hover, .codex-mux-win-settings:focus-visible { background: color-mix(in srgb, currentColor 9%, transparent); outline: none; }
+      .codex-mux-win-settings-icon { display: inline-grid; width: 21px; height: 21px; place-items: center; color: var(--text-secondary, var(--token-text-secondary, currentColor)); font-size: 17px; }
+      .codex-mux-win-modal-manager { width: min(560px, 100%); max-height: min(720px, calc(100vh - 48px)); overflow: auto; }
+      .codex-mux-win-account-list { display: grid; gap: 8px; margin-top: 16px; }
+      .codex-mux-win-account-card { display: flex; min-width: 0; align-items: center; gap: 10px; border: 1px solid color-mix(in srgb, currentColor 14%, transparent); border-radius: 12px; background: color-mix(in srgb, currentColor 4%, transparent); padding: 10px; }
+      .codex-mux-win-account-card .codex-mux-win-identity { min-width: 0; }
+      .codex-mux-win-account-card-actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+      .codex-mux-win-account-action { min-height: 30px; border: 0; border-radius: 7px; background: rgb(255 255 255 / .12); color: inherit; cursor: pointer; font: inherit; font-size: 12px; padding: 6px 9px; }
+      .codex-mux-win-account-action:hover, .codex-mux-win-account-action:focus-visible { background: rgb(255 255 255 / .2); outline: none; }
+      .codex-mux-win-account-action-primary { background: #4f6bed; color: white; }
+      .codex-mux-win-account-action-danger { background: color-mix(in srgb, #d95757 38%, transparent); }
+      .codex-mux-win-account-action:disabled { cursor: wait; opacity: .55; }
+      .codex-mux-win-account-badge { display: inline-flex; align-items: center; margin-left: 5px; border-radius: 999px; background: color-mix(in srgb, #6e86f7 32%, transparent); color: inherit; font-size: 10px; line-height: 16px; padding: 0 6px; vertical-align: 1px; }
+      .codex-mux-win-account-meta { min-width: 0; flex: 1; }
+      .codex-mux-win-account-meta .codex-mux-win-name { white-space: normal; }
+      .codex-mux-win-account-hint { margin-top: 3px; color: var(--text-secondary, var(--token-text-secondary, currentColor)); font-size: 11px; line-height: 15px; opacity: .82; }
+      .codex-mux-win-close-button { margin-left: auto; }
       .codex-mux-win-error { margin: 4px 11px 8px; color: #e05a65; font-size: 12px; line-height: 16px; }
       .codex-mux-win-modal-backdrop { position: fixed; z-index: 2147483647; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(0 0 0 / .48); }
       .codex-mux-win-modal { width: min(420px, 100%); border: 1px solid color-mix(in srgb, currentColor 18%, transparent); border-radius: 16px; background: var(--main-surface-background, var(--token-main-surface-background, #292929)); box-shadow: 0 20px 60px rgb(0 0 0 / .42); color: var(--text-primary, var(--token-text-primary, #f7f7f7)); padding: 20px; }
+      .codex-mux-win-manager-header { display: flex; align-items: flex-start; gap: 8px; }
+      .codex-mux-win-manager-header h2 { flex: 1; }
       .codex-mux-win-modal h2 { margin: 0; font-size: 17px; line-height: 24px; }
       .codex-mux-win-modal p { margin: 8px 0 0; color: var(--text-secondary, var(--token-text-secondary, #c7c7c7)); font-size: 14px; line-height: 20px; }
       .codex-mux-win-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
@@ -311,6 +418,12 @@
       .codex-mux-win-toast-close:hover, .codex-mux-win-toast-close:focus-visible { background: rgb(255 255 255 / .12); opacity: 1; outline: none; }
       .codex-mux-win-toast-neutral { border-color: color-mix(in srgb, #8ea0b8 50%, transparent); background: color-mix(in srgb, var(--main-surface-background, #292929) 94%, #273445); }
       .codex-mux-win-toast-neutral .codex-mux-win-toast-icon { background: #64748b; }
+      .codex-mux-win-update-toast { border-color: color-mix(in srgb, #6e86f7 70%, transparent); background: color-mix(in srgb, var(--main-surface-background, #292929) 94%, #28375f); }
+      .codex-mux-win-update-toast .codex-mux-win-toast-icon { background: #5873e8; }
+      .codex-mux-win-update-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
+      .codex-mux-win-update-button { min-height: 30px; border: 0; border-radius: 7px; background: #5873e8; color: white; cursor: pointer; font: inherit; font-size: 12px; font-weight: 600; padding: 6px 10px; }
+      .codex-mux-win-update-button:hover, .codex-mux-win-update-button:focus-visible { background: #6e86f7; outline: none; }
+      .codex-mux-win-update-button:disabled { cursor: wait; opacity: .65; }
       codex-mux-profile-picker, codex-mux-plugin-picker, codex-mux-reset-picker { display: block; }
       .codex-mux-win-surface { margin: 0 0 16px; border: 1px solid color-mix(in srgb, currentColor 16%, transparent); border-radius: 14px; background: color-mix(in srgb, currentColor 3%, transparent); color: var(--text-primary, var(--token-text-primary, inherit)); padding: 12px; }
       .codex-mux-win-surface-title { font-size: 14px; font-weight: 650; line-height: 19px; }
@@ -606,14 +719,275 @@
     status.textContent = message;
   }
 
+  let activeAccountManager = null;
+
+  function closeAccountManager(expected = null) {
+    if (expected && activeAccountManager !== expected) return false;
+    const current = activeAccountManager;
+    current?.backdrop?.remove();
+    if (!expected || activeAccountManager === expected) activeAccountManager = null;
+    return Boolean(current);
+  }
+
+  function showActionToast(title, detail, neutral = false) {
+    dismissToast();
+    const toast = make("section", `codex-mux-win-toast${neutral ? " codex-mux-win-toast-neutral" : ""}`);
+    toast.setAttribute("role", "status");
+    toast.setAttribute("aria-live", "polite");
+    const close = make("button", "codex-mux-win-toast-close", "×");
+    close.type = "button";
+    close.setAttribute("aria-label", "Dismiss notification");
+    append(
+      toast,
+      make("div", "codex-mux-win-toast-icon", neutral ? "i" : "✓"),
+      append(
+        make("div", "codex-mux-win-toast-copy"),
+        make("div", "codex-mux-win-toast-title", title),
+        make("div", "codex-mux-win-toast-detail", detail),
+      ),
+      close,
+    );
+    document.body.append(toast);
+    const notice = { element: toast, timer: null };
+    activeToast = notice;
+    close.addEventListener("click", () => dismissToast(notice));
+    notice.timer = window.setTimeout(() => dismissToast(notice), 5000);
+  }
+
+  function dismissUpdateToast() {
+    const current = activeUpdateToast;
+    if (!current) return false;
+    current.element?.remove();
+    activeUpdateToast = null;
+    return true;
+  }
+
+  function showUpdateToast(update) {
+    if (update?.available !== true || update?.installing === true) return;
+    const version = String(update.version || "").trim();
+    if (!version) return;
+    if (activeUpdateToast?.version === version) return;
+    dismissUpdateToast();
+    const toast = make("section", "codex-mux-win-toast codex-mux-win-update-toast");
+    toast.setAttribute("role", "status");
+    toast.setAttribute("aria-live", "polite");
+    const close = make("button", "codex-mux-win-toast-close", "×");
+    close.type = "button";
+    close.setAttribute("aria-label", "Dismiss update notification");
+    const copy = make("div", "codex-mux-win-toast-copy");
+    append(
+      copy,
+      make("div", "codex-mux-win-toast-title", `Codex Relay ${version} is available`),
+      make("div", "codex-mux-win-toast-detail", update.notes || "Update now to download, restart, and reopen the Router automatically."),
+    );
+    const actions = make("div", "codex-mux-win-update-actions");
+    const install = make("button", "codex-mux-win-update-button", "Update now");
+    install.type = "button";
+    install.addEventListener("click", async () => {
+      const bridge = globalThis.codexMuxUpdater;
+      if (bridge == null || typeof bridge.install !== "function" || install.disabled) return;
+      install.disabled = true;
+      install.textContent = "Preparing update…";
+      const detail = copy.querySelector?.(".codex-mux-win-toast-detail");
+      if (detail) detail.textContent = "The Router will close, install the verified release, and reopen automatically.";
+      try {
+        const result = await bridge.install();
+        if (result?.installing !== true) {
+          install.disabled = false;
+          install.textContent = "Try again";
+          if (detail) detail.textContent = result?.error || "The update could not be started. The current Router is still running.";
+        }
+      } catch (error) {
+        install.disabled = false;
+        install.textContent = "Try again";
+        if (detail) detail.textContent = `The update could not be started: ${error.message}`;
+      }
+    });
+    append(actions, install);
+    copy.append(actions);
+    append(toast, make("div", "codex-mux-win-toast-icon", "↑"), copy, close);
+    document.body.append(toast);
+    const notice = { element: toast, version };
+    activeUpdateToast = notice;
+    close.addEventListener("click", dismissUpdateToast);
+  }
+
+  function startUpdateWatcher() {
+    if (updateWatcherStarted) return;
+    updateWatcherStarted = true;
+    const bridge = globalThis.codexMuxUpdater;
+    if (bridge == null) return;
+    const apply = (value) => {
+      if (value?.available === true && value?.installing !== true) showUpdateToast(value);
+    };
+    if (typeof bridge.subscribe === "function") bridge.subscribe(apply);
+    if (typeof bridge.getState === "function") void bridge.getState().then(apply).catch(() => {});
+  }
+
+  function accountRemovalConfirmed(account) {
+    if (typeof window.confirm !== "function") return false;
+    const chats = Number(account?.threadCount || 0);
+    const historyWarning = chats > 0
+      ? `\n\nThis subscription owns ${chats} chat${chats === 1 ? "" : "s"}. Removing it will clear Router's assignment for those chats; their local files are not deleted.`
+      : "";
+    return window.confirm(
+      `Remove ${accountName(account)} from Codex Relay?${historyWarning}\n\nYou can add it again later by signing in.`
+    );
+  }
+
+  function accountManagerStatus(state, message = "") {
+    state.status.textContent = message;
+    state.status.hidden = !message;
+  }
+
+  async function setPrimaryAccount(state, account, button) {
+    if (button?.disabled || account?.controller) return;
+    if (button) button.disabled = true;
+    accountManagerStatus(state, `Switching Primary to ${accountName(account)} and restarting Router sessions…`);
+    try {
+      const result = await request(`/accounts/${encodeURIComponent(account.id)}/primary`, { method: "POST" });
+      const selected = result.account || account;
+      const restarted = Number(result.restartedChildren);
+      const restartText = Number.isFinite(restarted)
+        ? `Restarted ${restarted} Router Codex session${restarted === 1 ? "" : "s"}.`
+        : "Router Codex sessions were restarted.";
+      showActionToast("Primary account changed", `${accountName(selected)} is now the Router Primary. ${restartText}`);
+      const accounts = await loadAccounts();
+      state.accounts = accounts;
+      renderAccountManager(state);
+      if (state.menu) await refreshMenu(state.menu);
+    } catch (error) {
+      accountManagerStatus(state, `Could not change Primary: ${error.message}`);
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
+  async function removeManagedAccount(state, account, button) {
+    if (button?.disabled || account?.controller || !account?.id) return;
+    if (!accountRemovalConfirmed(account)) return;
+    if (button) button.disabled = true;
+    accountManagerStatus(state, `Removing ${accountName(account)}…`);
+    try {
+      await request(`/accounts/${encodeURIComponent(account.id)}`, {
+        method: "DELETE",
+        body: JSON.stringify({ force: true }),
+      });
+      showActionToast("Subscription removed", `${accountName(account)} was removed from Router. The native Codex app was not changed.`);
+      const accounts = await loadAccounts();
+      state.accounts = accounts;
+      renderAccountManager(state);
+      if (state.menu) await refreshMenu(state.menu);
+    } catch (error) {
+      accountManagerStatus(state, `Could not remove subscription: ${error.message}`);
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
+  async function cancelManagedPending(state, account, button) {
+    if (button?.disabled || !account?.id) return;
+    if (button) button.disabled = true;
+    accountManagerStatus(state, `Cancelling ${account.label || "subscription"} sign-in…`);
+    try {
+      const result = await cancelPendingAccount(account.id);
+      if (result.connected) showLoginSuccess(result.account || account);
+      else showLoginCancelled(account);
+      state.accounts = await loadAccounts();
+      renderAccountManager(state);
+      if (state.menu) await refreshMenu(state.menu);
+    } catch (error) {
+      accountManagerStatus(state, `Could not cancel sign-in: ${error.message}`);
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
+  function renderAccountManager(state) {
+    const accounts = Array.isArray(state.accounts) ? state.accounts : [];
+    state.list.replaceChildren();
+    if (accounts.length === 0) {
+      state.list.append(make("div", "codex-mux-win-picker-empty", "No subscriptions are configured."));
+      return;
+    }
+    accounts.forEach((account) => {
+      const card = make("div", "codex-mux-win-account-card");
+      const identity = make("div", "codex-mux-win-identity");
+      const meta = make("div", "codex-mux-win-account-meta");
+      const name = make("div", "codex-mux-win-name", accountName(account));
+      if (account.controller) name.append(make("span", "codex-mux-win-account-badge", "Primary"));
+      const identityDetail = accountIdentityDetail(account);
+      const status = account.connected
+        ? usageStatus(account)
+        : "Waiting for sign-in";
+      append(meta, name, identityDetail ? make("div", "codex-mux-win-account-id", identityDetail) : null, make("div", "codex-mux-win-account-hint", status));
+      append(identity, avatar(account), meta);
+      const actions = make("div", "codex-mux-win-account-card-actions");
+      if (account.controller) {
+        const primary = make("button", "codex-mux-win-account-action codex-mux-win-account-action-primary", "Primary");
+        primary.type = "button";
+        primary.disabled = true;
+        primary.title = "Choose another Primary before removing this account";
+        actions.append(primary);
+      } else if (account.connected) {
+        const select = make("button", "codex-mux-win-account-action codex-mux-win-account-action-primary", "Set as Primary");
+        select.type = "button";
+        select.addEventListener("click", () => { void setPrimaryAccount(state, account, select); });
+        actions.append(select);
+        const remove = make("button", "codex-mux-win-account-action codex-mux-win-account-action-danger", "Remove");
+        remove.type = "button";
+        remove.addEventListener("click", () => { void removeManagedAccount(state, account, remove); });
+        actions.append(remove);
+      } else {
+        const cancel = make("button", "codex-mux-win-account-action", "Cancel sign-in");
+        cancel.type = "button";
+        cancel.addEventListener("click", () => { void cancelManagedPending(state, account, cancel); });
+        actions.append(cancel);
+      }
+      append(card, identity, actions);
+      state.list.append(card);
+    });
+    accountManagerStatus(state, "");
+  }
+
+  function openAccountSettings(menu, accounts) {
+    closeAccountManager();
+    const backdrop = make("div", "codex-mux-win-modal-backdrop");
+    const dialog = make("section", "codex-mux-win-modal codex-mux-win-modal-manager");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    const header = make("div", "codex-mux-win-manager-header");
+    append(header, make("h2", "", "Account settings"));
+    const close = make("button", "codex-mux-win-toast-close codex-mux-win-close-button", "×");
+    close.type = "button";
+    close.setAttribute("aria-label", "Close account settings");
+    close.addEventListener("click", () => closeAccountManager(state));
+    header.append(close);
+    const description = make("p", "", "Choose which connected subscription is Primary for Router, or remove a subscription. Changing Primary restarts Router sessions automatically and does not change the native Codex app.");
+    const list = make("div", "codex-mux-win-account-list");
+    const status = make("div", "codex-mux-win-status");
+    status.hidden = true;
+    const state = { accounts: Array.isArray(accounts) ? accounts.slice() : [], backdrop, dialog, list, menu, status };
+    append(dialog, header, description, list, status);
+    backdrop.append(dialog);
+    backdrop.addEventListener("click", (event) => {
+      if (event.target === backdrop) closeAccountManager(state);
+    });
+    document.body.append(backdrop);
+    activeAccountManager = state;
+    renderAccountManager(state);
+    return state;
+  }
+
   function renderMenu(menu, accounts) {
     const priorError = menu.querySelector(".codex-mux-win-error")?.textContent || "";
     menu.replaceChildren();
     const connected = accounts.filter((account) => account.enabled && account.connected);
     const knownUsage = connected.map(remainingUsage).filter((value) => value != null);
-    const total = knownUsage.length === connected.length && connected.length > 0
+    const total = knownUsage.length > 0
       ? knownUsage.reduce((sum, value) => sum + value, 0)
       : null;
+    const missing = Math.max(0, connected.length - knownUsage.length);
 
     const summary = make("div", "codex-mux-win-summary");
     const icon = make("div", "codex-mux-win-summary-icon", "◔");
@@ -621,9 +995,11 @@
     append(
       label,
       make("div", "codex-mux-win-title", "Usage remaining"),
-      make("div", "codex-mux-win-subtext", `${connected.length} connected subscription${connected.length === 1 ? "" : "s"}`),
+      make("div", "codex-mux-win-subtext", missing > 0
+        ? `${knownUsage.length}/${connected.length} quota${knownUsage.length === 1 ? "" : "s"} available · updating ${missing}`
+        : `${connected.length} connected subscription${connected.length === 1 ? "" : "s"}`),
     );
-    append(summary, icon, label, make("div", "codex-mux-win-total", total == null ? "–" : `${Math.round(total)}%`));
+    append(summary, icon, label, make("div", `codex-mux-win-total${total == null ? " codex-mux-win-percent-muted" : ""}`, total == null ? "Updating…" : `${Math.round(total)}% left`));
     menu.append(summary);
 
     if (accounts.length) menu.append(make("div", "codex-mux-win-divider"));
@@ -640,6 +1016,15 @@
       startSubscription(menu, add, accounts).catch((error) => setMenuStatus(menu, error.message));
     });
     menu.append(make("div", "codex-mux-win-divider"), add);
+    const settings = make("button", "codex-mux-win-add codex-mux-win-settings");
+    settings.type = "button";
+    append(settings, make("span", "codex-mux-win-settings-icon", "⚙"), make("span", "", "Account settings"));
+    settings.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openAccountSettings(menu, accounts);
+    });
+    menu.append(settings);
     if (priorError) setMenuStatus(menu, priorError);
   }
 
@@ -661,10 +1046,32 @@
     }
   }
 
+  function privateLoginBridge() {
+    const bridge = globalThis.codexMuxLoginWindow;
+    if (
+      bridge == null ||
+      typeof bridge.open !== "function" ||
+      typeof bridge.close !== "function"
+    ) {
+      return null;
+    }
+    return bridge;
+  }
+
+  function closePrivateLoginWindow(id) {
+    const bridge = privateLoginBridge();
+    if (!id || bridge == null) return;
+    void Promise.resolve(bridge.close(id)).catch(() => {
+      // The child window can already be gone when login completion races close.
+    });
+  }
+
   function closeLogin(expected = null) {
     if (expected && activeLogin !== expected) return false;
     const current = activeLogin;
     current?.timer && clearTimeout(current.timer);
+    current?.unsubscribeNativeClose?.();
+    closePrivateLoginWindow(current?.nativeLoginId);
     current?.backdrop?.remove();
     if (!expected || activeLogin === expected) activeLogin = null;
     return Boolean(current);
@@ -690,7 +1097,7 @@
     const message = append(
       make("div", "codex-mux-win-toast-copy"),
       make("div", "codex-mux-win-toast-title", `${account.label || "Subscription"} connected successfully`),
-      make("div", "codex-mux-win-toast-detail", "This subscription is ready to use. Browser sign-in is complete."),
+      make("div", "codex-mux-win-toast-detail", "This subscription is ready to use. Private Router sign-in is complete."),
     );
     append(toast, make("div", "codex-mux-win-toast-icon", "✓"), message, close);
     document.body.append(toast);
@@ -781,22 +1188,65 @@
     }
   }
 
-  function showBrowserLogin(menu, account, login) {
+  async function openPrivateLoginWindow(session, status, button) {
+    if (activeLogin !== session || session.completed || session.cancelling) return false;
+    if (session.nativeLoginId) {
+      status.textContent = "The private Router sign-in window is already open.";
+      return true;
+    }
+    const bridge = session.privateLoginBridge;
+    if (bridge == null) {
+      throw new Error("The private Router sign-in window is unavailable. Run the Router installer again before adding an account.");
+    }
+    session.opening = true;
+    if (button) button.disabled = true;
+    status.textContent = "Opening a private Router sign-in window…";
+    try {
+      const opened = await bridge.open(session.authorizationURL);
+      if (!opened?.id) throw new Error("The private Router sign-in window did not return a valid session.");
+      if (activeLogin !== session || session.completed || session.cancelling) {
+        closePrivateLoginWindow(opened.id);
+        return false;
+      }
+      session.nativeLoginId = opened.id;
+      status.textContent = "Complete the official ChatGPT sign-in in the private Router window. This confirmation closes automatically when the account connects.";
+      return true;
+    } catch (error) {
+      if (activeLogin === session) {
+        status.textContent = `Could not open the private Router sign-in window: ${error.message}`;
+      }
+      throw error;
+    } finally {
+      session.opening = false;
+      if (button) button.disabled = false;
+    }
+  }
+
+  async function showBrowserLogin(menu, account, login) {
     closeLogin();
     const authorizationURL = trustedVerificationURL(readLoginValue(login, "authUrl"));
     const loginId = readLoginValue(login, "loginId", "login_id");
     if (!authorizationURL || !loginId) {
-      throw new Error("The official browser sign-in link was not available. The unfinished subscription will be removed.");
+      throw new Error("The official ChatGPT sign-in link was not available. The unfinished subscription will be removed.");
+    }
+    const bridge = privateLoginBridge();
+    if (bridge == null) {
+      throw new Error("The private Router sign-in window is unavailable. Run the Router installer again before adding an account.");
     }
     const backdrop = make("div", "codex-mux-win-modal-backdrop");
     const session = {
       account,
+      authorizationURL,
       backdrop,
       cancelling: false,
       completed: false,
       loginId,
       menu,
+      nativeLoginId: null,
+      opening: false,
+      privateLoginBridge: bridge,
       timer: null,
+      unsubscribeNativeClose: null,
     };
     const dialog = make("section", "codex-mux-win-modal");
     dialog.setAttribute("role", "dialog");
@@ -804,17 +1254,17 @@
     append(
       dialog,
       make("h2", "", `Sign in to ${account.label || "subscription"}`),
-      make("p", "", "Continue with the official ChatGPT sign-in page in your browser. This app never asks for your password and keeps this subscription isolated."),
+      make("p", "", "Continue with the official ChatGPT sign-in page in a private Router window. This app never asks for your password and keeps this subscription isolated."),
     );
-    dialog.append(make("p", "", "Keep this window open while sign-in finishes. It will close automatically when the account is connected."));
-    const status = make("div", "codex-mux-win-status", "Opening the official ChatGPT sign-in page…");
+    dialog.append(make("p", "", "Each launch starts with a fresh temporary browser session, without cookies or local data from another sign-in. Keep this confirmation open while sign-in finishes; it closes automatically when the account is connected."));
+    const status = make("div", "codex-mux-win-status", "Preparing the private Router sign-in window…");
     const actions = make("div", "codex-mux-win-actions");
-    const open = make("a", "codex-mux-win-primary", "Continue to ChatGPT");
-    open.href = authorizationURL;
-    open.target = "_blank";
-    open.rel = "noopener noreferrer";
+    const open = make("button", "codex-mux-win-primary", "Open secure sign-in");
+    open.type = "button";
     open.addEventListener("click", () => {
-      if (!session.cancelling) status.textContent = "Waiting for the browser sign-in to finish…";
+      void openPrivateLoginWindow(session, status, open).catch(() => {
+        // The status message already explains why the native window failed.
+      });
     });
     const cancel = make("button", "", "Cancel sign-in");
     cancel.type = "button";
@@ -827,6 +1277,15 @@
     backdrop.append(dialog);
     document.body.append(backdrop);
     activeLogin = session;
+    if (typeof bridge.subscribeClosed === "function") {
+      session.unsubscribeNativeClose = bridge.subscribeClosed((closed) => {
+        if (activeLogin !== session || closed?.id !== session.nativeLoginId) return;
+        session.nativeLoginId = null;
+        if (!session.completed && !session.cancelling) {
+          status.textContent = "The private Router sign-in window was closed. Open it again to continue, or cancel this unfinished subscription.";
+        }
+      });
+    }
 
     const poll = async () => {
       if (activeLogin !== session || session.completed || session.cancelling) return;
@@ -847,14 +1306,10 @@
     };
     void poll();
     try {
-      const opened = typeof window.open === "function"
-        ? window.open(authorizationURL, "_blank", "noopener,noreferrer")
-        : null;
-      status.textContent = opened
-        ? "Waiting for the browser sign-in to finish…"
-        : "Choose Continue to ChatGPT if your browser did not open automatically.";
-    } catch {
-      status.textContent = "Choose Continue to ChatGPT to open the official sign-in page.";
+      await openPrivateLoginWindow(session, status, open);
+    } catch (error) {
+      closeLogin(session);
+      throw error;
     }
   }
 
@@ -884,7 +1339,7 @@
         throw error;
       }
       try {
-        showBrowserLogin(menu, account, result.login || {});
+        await showBrowserLogin(menu, account, result.login || {});
       } catch (error) {
         await cancelPendingAccount(account.id, readLoginValue(result.login, "loginId", "login_id")).catch(() => {});
         throw error;
@@ -915,7 +1370,7 @@
       menu?.remove();
       menu = make("section", "", "");
       menu.id = MENU_ID;
-      menu.setAttribute("aria-label", "Codex Subscription Router");
+      menu.setAttribute("aria-label", "Codex Relay");
       menu.addEventListener("pointerdown", (event) => event.stopPropagation());
       menu.addEventListener("click", (event) => event.stopPropagation());
       placement.parent.insertBefore(menu, placement.before);
@@ -933,6 +1388,7 @@
 
   function start() {
     addStyles();
+    startUpdateWatcher();
     new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true });
     window.setInterval(schedule, 1000);
     schedule();

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/LightHaru/codex-subscription-router/internal/protocol"
+	"github.com/LightHaru/codex-relay/internal/protocol"
 )
 
 func TestIsUsageLimitResponseRecognizesStructuredError(t *testing.T) {

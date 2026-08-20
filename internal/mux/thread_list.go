@@ -3,16 +3,23 @@ package mux
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"sync"
 
-	"github.com/LightHaru/codex-subscription-router/internal/protocol"
+	"github.com/LightHaru/codex-relay/internal/protocol"
+	"github.com/LightHaru/codex-relay/internal/state"
 )
+
+type threadCandidate struct {
+	account state.Account
+	thread  map[string]any
+}
 
 func (m *Multiplexer) aggregateThreadList(request protocol.Message) {
 	entries := m.childEntries()
 	type result struct {
-		accountID string
-		threads   []map[string]any
+		account state.Account
+		threads []map[string]any
 	}
 	results := make(chan result, len(entries))
 	var wait sync.WaitGroup
@@ -20,21 +27,36 @@ func (m *Multiplexer) aggregateThreadList(request protocol.Message) {
 		wait.Add(1)
 		go func(entry childEntry) {
 			defer wait.Done()
-			results <- result{accountID: entry.account.ID, threads: m.listAllThreads(entry, request.Params)}
+			results <- result{account: entry.account, threads: m.listAllThreads(entry, request.Params)}
 		}(entry)
 	}
 	wait.Wait()
 	close(results)
 
-	threads := make([]map[string]any, 0)
+	candidates := make(map[string][]threadCandidate)
+	withoutID := make([]map[string]any, 0)
 	for accountResult := range results {
 		for _, thread := range accountResult.threads {
 			if threadID, ok := thread["id"].(string); ok {
-				_ = m.store.SetThreadOwner(threadID, accountResult.accountID)
+				candidates[threadID] = append(candidates[threadID], threadCandidate{
+					account: accountResult.account,
+					thread:  thread,
+				})
+			} else {
+				withoutID = append(withoutID, thread)
 			}
-			threads = append(threads, thread)
 		}
 	}
+	threads := make([]map[string]any, 0, len(candidates)+len(withoutID))
+	for threadID, threadCandidates := range candidates {
+		selected := chooseThreadCandidate(m.store, threadID, threadCandidates)
+		threads = append(threads, selected.thread)
+		// The persisted assignment is authoritative when both the source and
+		// the migrated copy are visible. This prevents the concurrent account
+		// list responses from moving a failed-over chat back to Primary.
+		_ = m.store.SetThreadOwner(threadID, selected.account.ID)
+	}
+	threads = append(threads, withoutID...)
 	sortThreads(threads)
 	encoded, err := json.Marshal(map[string]any{"data": threads, "nextCursor": nil})
 	if err != nil {
@@ -42,6 +64,25 @@ func (m *Multiplexer) aggregateThreadList(request protocol.Message) {
 		return
 	}
 	m.write(protocol.Success(request.ID, encoded))
+}
+
+func chooseThreadCandidate(store *state.Store, threadID string, candidates []threadCandidate) threadCandidate {
+	if owner, ok := store.ThreadOwner(threadID); ok {
+		for _, candidate := range candidates {
+			if candidate.account.ID == owner {
+				return candidate
+			}
+		}
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].account.ID < candidates[j].account.ID
+	})
+	for _, candidate := range candidates {
+		if candidate.account.Controller {
+			return candidate
+		}
+	}
+	return candidates[0]
 }
 
 func (m *Multiplexer) listAllThreads(entry childEntry, originalParams json.RawMessage) []map[string]any {
