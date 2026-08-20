@@ -30,6 +30,7 @@ func New(address, token string, multiplexer *mux.Multiplexer, uiTests bool) *Ser
 	router.HandleFunc("/v1/thread-account", server.threadAccount)
 	router.HandleFunc("/v1/profile/combined", server.combinedProfile)
 	router.HandleFunc("/v1/usage", server.usage)
+	router.HandleFunc("/v1/usage/all", server.usageAll)
 	router.HandleFunc("/v1/events", server.events)
 	if uiTests {
 		router.HandleFunc("/v1/test/rate-limits", server.rateLimitPreview)
@@ -91,6 +92,28 @@ func (s *Server) usage(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	writeJSON(response, http.StatusOK, map[string]json.RawMessage{"usage": usage})
+}
+
+// usageAll serves the explicit multi-subscription Usage & billing dashboard.
+// It is separate from /v1/usage because the native billing page expects one
+// account-shaped payload and its buy/reload/cancel actions are account scoped.
+func (s *Server) usageAll(response http.ResponseWriter, request *http.Request) {
+	if !s.authorized(request) {
+		writeJSON(response, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if request.Method != http.MethodGet {
+		methodNotAllowed(response)
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 30*time.Second)
+	defer cancel()
+	usage, err := s.mux.UsageStatusAll(ctx)
+	if err != nil {
+		writeJSON(response, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(response, http.StatusOK, usage)
 }
 
 func (s *Server) resetCreditsPreview(response http.ResponseWriter, request *http.Request) {

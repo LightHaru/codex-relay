@@ -51,10 +51,13 @@ Each isolated account forces file-backed CLI and MCP OAuth credentials.
 The patcher extracts `app.asar`, verifies exact upstream anchors, inserts the
 account UI, disables the copied app's native self-update, and repacks the
 archive with an updated integrity hash. On Windows, its version-pinned renderer
-rewrite sends Settings → Usage through `CodexMuxWindows.usageStatus()`: the
-loopback service fetches the native usage payload with an isolated account
-credential while OAuth tokens remain outside the renderer. Windows also injects
-a small, version-neutral update bridge. It checks the Router's source-only
+rewrite sends the native single-account Settings → Usage request through
+`CodexMuxWindows.usageStatus()` and injects a version-neutral **All connected
+subscriptions** panel. The panel calls the token-protected `/v1/usage/all`
+route, which fetches one native Usage payload with each isolated account
+credential and keeps partial failures per account; native billing actions remain
+account scoped. OAuth tokens stay outside the renderer. Windows also injects a
+small, version-neutral update bridge. It checks the Router's source-only
 GitHub release manifest, then hands a hash-verified archive to an updater
 executable stored outside the managed app so the app can quit and restart
 safely. The official Store package is never replaced. The app receives a
@@ -78,8 +81,9 @@ routes require a random 256-bit token. CORS is limited to the copied app's
 known packaged renderer origins (`app://-` and the opaque `null`/`file://`
 origin emitted when Windows loads `webview/index.html` from a file URL). The
 trusted renderer responses also authorize Chromium Private Network Access for
-the loopback target. The service exposes account metadata, aggregated usage,
-controller-scoped native Usage payloads, profile data, thread ownership,
+the loopback target. The service exposes account metadata, per-subscription
+Usage payloads with an explicit collection summary, controller-scoped native
+Usage payloads, profile data, thread ownership,
 login/logout actions, a narrow pending-login cancellation action, and an
 authenticated SSE event stream; it never returns OAuth tokens. Browser sign-in
 is initiated by the official child app-server, which owns the localhost

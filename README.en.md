@@ -387,13 +387,23 @@ reset applies only to that account.
 
 ### Settings → Usage
 
-The native Settings Usage page remains an account-scoped billing surface.
-Relay proxies the native payload for the controller account through its
-token-protected loopback service (with an enabled-account fallback only when
-that credential is unavailable), so the renderer does not rely on the Microsoft
-Store app browser session and avoids the generic **“Oops, an error has
-occurred”** page. OAuth tokens never reach the renderer. Use the Relay profile
-menu's **Usage remaining** summary for the aggregate subscription pool.
+The native Settings → Usage & billing page now starts with an **All connected
+subscriptions** panel. Relay fetches one native Usage payload per connected
+account and renders each account separately: plan, credits balance, short and
+long rate-limit windows, reset times, spend controls, reset-credit counts, Code
+Review limits, additional limits, and every new field returned by ChatGPT. If a
+credential or upstream Usage request fails, that account is marked
+**Unavailable** while the other cards remain visible.
+
+The native cards below are intentionally kept for account-scoped billing
+actions. **Buy credits**, automatic reload, plan changes, and cancellation
+continue to use the account selected by the native Codex app; Relay does not
+invent a combined balance or send a billing action to the wrong subscription.
+The single-account native payload still travels through Relay's token-protected
+loopback service, so the renderer does not rely on the Microsoft Store browser
+session and avoids the generic **“Oops, an error has occurred”** page. OAuth
+tokens never reach the renderer. Use the Relay profile menu's **Usage
+remaining** summary for a quick pool-level view.
 
 ## Local data and safety
 

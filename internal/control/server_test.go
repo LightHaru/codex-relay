@@ -68,6 +68,22 @@ func TestUsageRouteRequiresRouterTokenAndGET(t *testing.T) {
 	}
 }
 
+func TestUsageAllRouteRequiresRouterTokenAndGET(t *testing.T) {
+	server := testServer(t)
+
+	unauthorized := httptest.NewRecorder()
+	server.usageAll(unauthorized, httptest.NewRequest(http.MethodGet, "/v1/usage/all", nil))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized usage/all returned %d, want 401: %s", unauthorized.Code, unauthorized.Body.String())
+	}
+
+	wrongMethod := httptest.NewRecorder()
+	server.usageAll(wrongMethod, requestWithToken(http.MethodPost, "/v1/usage/all", nil))
+	if wrongMethod.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST usage/all returned %d, want 405: %s", wrongMethod.Code, wrongMethod.Body.String())
+	}
+}
+
 func TestSecurityHeadersAllowPackagedRendererOrigins(t *testing.T) {
 	server := testServer(t)
 

@@ -66,6 +66,14 @@ class FakeElement {
   get isConnected() { return !this.removed; }
 
   get lastElementChild() { return this.children.at(-1) || null; }
+
+  get childElementCount() { return this.children.filter((child) => child && typeof child === "object").length; }
+
+  get firstElementChild() { return this.children.find((child) => child && typeof child === "object") || null; }
+
+  getBoundingClientRect() { return this.rect || { width: 0, height: 0 }; }
+
+  getClientRects() { return [this.getBoundingClientRect()]; }
 }
 
 function loadBridge({ fetchImpl, privateLoginImpl, updaterImpl } = {}) {
@@ -96,6 +104,9 @@ function loadBridge({ fetchImpl, privateLoginImpl, updaterImpl } = {}) {
       "    usageWindows,",
       "    setPrimaryAccount,",
       "    showBrowserLogin,",
+      "    renderUsageBilling,",
+      "    renderUsageAccount,",
+      "    usageBillingPlacement,",
       "  };",
       "",
       startupAnchor,
@@ -136,6 +147,7 @@ function loadBridge({ fetchImpl, privateLoginImpl, updaterImpl } = {}) {
     URL,
     fetch: fetchImpl || (async () => ({ ok: true, json: async () => ({ accounts: [] }) })),
     HTMLElement: FakeElement,
+    getComputedStyle() { return { display: "block", visibility: "visible" }; },
     clearTimeout: fakeClearTimeout,
     customElements: {
       define(name, implementation) {
@@ -348,6 +360,83 @@ test("native Usage bridge reads the token-protected local payload and degrades t
     fetchImpl: async () => ({ ok: false, json: async () => ({ error: "unavailable" }) }),
   });
   assert.equal(await failed.bridge.usageStatus(), null);
+});
+
+test("Usage & billing renders every account payload and preserves new fields", () => {
+  const { hooks } = loadBridge();
+  const host = new FakeElement("codex-mux-usage-billing");
+  hooks.renderUsageBilling(host, {
+    collection: { availableCount: 2 },
+    displayAccounts: [
+      {
+        account: {
+          id: "primary",
+          label: "Primary",
+          displayName: "Bennett",
+          email: "bennett@example.invalid",
+          planLabel: "Plus",
+          planType: "plus",
+          enabled: true,
+          connected: true,
+          controller: true,
+        },
+        usage: {
+          connected: true,
+          usage: {
+            plan_type: "plus",
+            rate_limit: {
+              primary_window: { used_percent: 12, limit_window_seconds: 3600, reset_at: 1900000000 },
+              secondary_window: { used_percent: 4, limit_window_seconds: 604800, reset_at: 1900100000 },
+            },
+            credits: { balance: "12", unlimited: false, approx_local_messages: 20 },
+            spend_control: { reached: false, individual_limit: "25" },
+            rate_limit_reset_credits: { available_count: 2, applicable_available_count: 1 },
+            future_usage_field: { enabled: true },
+          },
+        },
+      },
+      {
+        account: {
+          id: "secondary",
+          label: "Subscription 2",
+          planLabel: "Plus",
+          enabled: true,
+          connected: true,
+          controller: false,
+        },
+        usage: { connected: true, error: "fetch usage: status 401" },
+      },
+    ],
+  });
+  const text = collectText(host);
+  assert.match(text, /All connected subscriptions/);
+  assert.match(text, /Bennett/);
+  assert.match(text, /Subscription 2/);
+  assert.match(text, /Credits balance/);
+  assert.match(text, /Reset credits available/);
+  assert.match(text, /future_usage_field/);
+  assert.match(text, /fetch usage: status 401/);
+});
+
+test("Usage panel chooses the native content column instead of the outer shell", () => {
+  const loaded = loadBridge();
+  const heading = new FakeElement("h2");
+  heading.textContent = "Usage & billing";
+  const content = new FakeElement("main");
+  content.rect = { width: 680, height: 900 };
+  content.append(heading, new FakeElement("section"));
+  const outerShell = new FakeElement("div");
+  outerShell.rect = { width: 1000, height: 900 };
+  outerShell.append(new FakeElement("aside"), content);
+  loaded.document.querySelectorAll = () => [heading];
+  const placement = loaded.hooks.usageBillingPlacement();
+  assert.equal(placement.container, content);
+});
+
+test("Usage panel is inserted after the native Usage heading block", () => {
+  const source = fs.readFileSync(path.join(__dirname, "windows-router-menu.js"), "utf8");
+  assert.match(source, /headingBlock\.nextElementSibling/);
+  assert.doesNotMatch(source, /placement\.container\.firstElementChild/);
 });
 
 test("usage summary keeps known quota visible when another account has no quota data", () => {

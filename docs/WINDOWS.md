@@ -255,18 +255,21 @@ macOS build for the following surfaces:
 | **Settings → Profile** | Starts with combined statistics and overlapping connected-account photos. Select a photo to reload that subscription's identity/statistics; select it again to return to the combined view. |
 | **Settings → Plugins** | Shows a subscription picker. Plugin definitions and managed MCP configuration remain shared, while Apps, connection status, and OAuth RPCs are sent with the selected account scope. |
 | **Usage / rate-limit resets** | Adds a subscription picker to the native reset sheet. It changes the displayed reset windows and fetches/consumes credits only for that account. |
-| **Settings → Usage** | Reads the normal native Usage payload through Relay's token-protected local proxy for the controller account, with a connected-account fallback if that credential is unavailable. This avoids an unrelated Store browser session producing the generic “Oops” page. |
+| **Settings → Usage & billing** | Injects an **All connected subscriptions** panel. Each account keeps its own plan, credits, short/long rate-limit windows, reset times, spend-control fields, reset-credit counts, code-review/additional limits, and any future fields returned by ChatGPT. The native billing controls below remain scoped to the account selected by the app. |
 
 The menu's **Usage remaining** number is the sum of valid windows returned by
 connected accounts. If one account's quota endpoint is temporarily unavailable,
 the known total remains visible and the affected account is marked as updating;
 Router never invents a zero/100% value from missing data.
 
-The Settings Usage proxy returns only the normal Usage JSON that the native
-page expects. It reads an isolated `auth.json` only in the Router process; no
-OAuth access token or local control token is exposed to renderer JavaScript.
-If the local request cannot complete, the version-pinned patch falls back to
-the native request instead of replacing the entire page with an error.
+The Settings Usage proxy still returns the normal single-account Usage JSON
+that the native page expects. The new `/v1/usage/all` route is a separate,
+token-protected dashboard endpoint: it fetches one payload per enabled
+subscription concurrently, keeps partial failures visible, and never merges
+account-scoped billing actions into a fabricated total. It reads isolated
+`auth.json` files only in the Router process; no OAuth access token or local
+control token is exposed to renderer JavaScript. If one account's Usage request
+fails, its card says **Unavailable** while the other accounts remain visible.
 
 Every Router account row uses the ChatGPT profile display name (then username
 or email as a fallback), the Router label, and the plan label so subscriptions

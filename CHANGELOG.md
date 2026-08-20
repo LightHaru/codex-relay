@@ -3,6 +3,33 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/) and
 this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.7] - 2026-08-21
+
+### Added
+
+- Windows Settings → Usage & billing now shows an **All connected
+  subscriptions** panel. Every account is fetched through its isolated Relay
+  credential and displayed with its own plan, credits, rate-limit windows,
+  reset metadata, spend controls, reset-credit counts, Code Review limits, and
+  future Usage fields returned by ChatGPT.
+- Added the token-protected `/v1/usage/all` control route. It fetches accounts
+  independently, keeps partial failures visible, and never fabricates a
+  combined billing balance or redirects account-specific billing actions.
+- Added Go and Windows renderer tests for multi-account Usage rendering,
+  partial credential failures, unconnected subscriptions, and preservation of
+  new upstream Usage fields.
+- The Usage panel now selects the smallest content-column ancestor, keeping it
+  inside the native Codex settings page instead of inserting it beside the
+  sidebar.
+
+### Documentation
+
+- Updated the English and Vietnamese Usage & billing instructions, Windows
+  deployment notes, and architecture documentation for the multi-account
+  dashboard and its account-scoped billing safety rules.
+
+Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.7
+
 ## [0.3.6] - 2026-08-20
 
 ### Fixed
@@ -148,7 +175,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 - Loopback-only, token-authenticated diagnostic UI states.
 - Source-only CI, draft release automation, security documentation, and smoke tests.
 
-[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.3.6...HEAD
+[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.3.7...HEAD
+[0.3.7]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.7
 [0.3.6]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.6
 [0.3.5]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.5
 [0.3.4]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.4

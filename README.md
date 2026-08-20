@@ -209,11 +209,21 @@ khoản đó cũng hiển thị thời gian hồi của từng cửa sổ hạn 
 1h 20m`. Di chuột lên dòng để xem mốc giờ đầy đủ theo máy đang sử dụng. Nếu ChatGPT chưa
 trả thời gian reset, Router ghi rõ là chưa có dữ liệu thay vì tự đoán.
 
-Mở `Settings` → `Usage` vẫn là màn Usage native theo **một** account (ưu tiên
-Primary, chỉ dự phòng sang account còn đăng nhập nếu token Primary lỗi). Relay
-lấy payload đó qua API cục bộ đã xác thực để tránh trang **Oops** do session
-Store không khớp; token OAuth không bao giờ được gửi vào renderer. Muốn xem
-tổng pool, dùng phần **Usage remaining** trong menu Relay.
+Mở `Settings` → `Usage & billing`, phía trên màn native sẽ có bảng
+**All connected subscriptions**. Bảng này tải riêng Usage của từng tài khoản
+đã kết nối và hiển thị theo từng thẻ, gồm: gói đang dùng, số dư credits, cửa sổ
+hạn mức ngắn/dài và thời gian reset, giới hạn chi tiêu, số lượt reset credits,
+giới hạn Code Review, các giới hạn bổ sung và toàn bộ trường mới mà ChatGPT
+trả về. Nếu một tài khoản lỗi hoặc hết phiên, thẻ đó ghi **Unavailable** còn
+các tài khoản khác vẫn hiển thị bình thường; dữ liệu thiếu không bị đổi thành
+`0%`.
+
+Màn native bên dưới vẫn được giữ nguyên để dùng các thao tác có tác động tài
+chính. Các nút như **Buy credits**, tự động nạp, đổi gói hoặc hủy gói luôn
+thuộc tài khoản mà Codex native đang chọn, không bị cộng dồn hoặc gửi nhầm sang
+tài khoản khác. Relay lấy payload qua API cục bộ đã xác thực; token OAuth không
+bao giờ được gửi vào renderer. Phần **Usage remaining** trong menu Relay vẫn
+là tóm tắt nhanh quota của cả pool.
 
 ### Dùng chat cũ với Router
 

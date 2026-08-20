@@ -14,6 +14,17 @@ Relay app with the existing three-subscription profile; all local bridge
 requests returned 200 and the native Usage page rendered without its generic
 error screen.
 
+## Release 0.3.7
+
+This feature release keeps the reviewed Windows `26.818.2441.0` renderer
+profiles and adds a version-neutral Usage & billing dashboard asset. The new
+panel calls the Router's token-protected `/v1/usage/all` endpoint and renders
+one native Usage payload per connected subscription, including partial
+failures. The existing single-account native Usage hook and the exact renderer
+anchors are unchanged, so both the older `26.810.7004.0` and current
+`26.818.2441.0` Store profiles remain supported. Unit, bridge, patcher, and
+release checks must pass before publishing the tag.
+
 ## Release 0.3.6
 
 This release repairs Windows **Add another subscription** sign-in for current

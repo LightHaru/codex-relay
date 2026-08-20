@@ -12,6 +12,7 @@
   const TOKEN = "__CODEX_MUX_CONTROL_TOKEN__";
   const MENU_ID = "codex-mux-windows-menu";
   const STYLE_ID = "codex-mux-windows-menu-style";
+  const USAGE_BILLING_ID = "codex-mux-windows-usage-billing";
   const PROFILE_ACCOUNT_KEY = "codex-mux.windows.profile-account";
   const PLUGIN_ACCOUNT_KEY = "codex-mux.windows.plugin-account";
   const RESET_ACCOUNT_KEY = "codex-mux.windows.reset-account";
@@ -28,6 +29,7 @@
   // deliberately also tolerant of the Vietnamese labels used by the app.
   const PROFILE_SETTINGS_LABELS = ["Settings", "Cài đặt"];
   const PROFILE_LOGOUT_LABELS = ["Log out", "Sign out", "Đăng xuất"];
+  const USAGE_BILLING_LABELS = ["Usage & billing", "Usage & Billing", "Sử dụng & thanh toán"];
   let refreshTimer = null;
   let scheduled = false;
   let activeLogin = null;
@@ -458,6 +460,34 @@
       .codex-mux-win-picker-empty { margin-top: 10px; color: var(--text-secondary, var(--token-text-secondary, currentColor)); font-size: 12px; line-height: 17px; opacity: .85; }
       .codex-mux-win-reset-surface { margin-top: 10px; }
       .codex-mux-win-reset-surface .codex-mux-win-surface-title { font-size: 12px; }
+      codex-mux-usage-billing { display: block; }
+      .codex-mux-win-usage-panel { margin-bottom: 18px; }
+      .codex-mux-win-usage-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+      .codex-mux-win-usage-stat { min-width: 0; border: 1px solid color-mix(in srgb, currentColor 14%, transparent); border-radius: 10px; background: color-mix(in srgb, currentColor 4%, transparent); padding: 9px 10px; }
+      .codex-mux-win-usage-stat-label { color: var(--text-secondary, var(--token-text-secondary, currentColor)); font-size: 11px; line-height: 15px; opacity: .85; }
+      .codex-mux-win-usage-stat-value { margin-top: 2px; font-size: 15px; font-weight: 650; line-height: 20px; font-variant-numeric: tabular-nums; }
+      .codex-mux-win-usage-account-list { display: grid; gap: 10px; margin-top: 13px; }
+      .codex-mux-win-usage-account { min-width: 0; border: 1px solid color-mix(in srgb, currentColor 16%, transparent); border-radius: 12px; background: color-mix(in srgb, currentColor 3%, transparent); padding: 11px; }
+      .codex-mux-win-usage-account-header { display: flex; min-width: 0; align-items: center; gap: 9px; }
+      .codex-mux-win-usage-account-copy { min-width: 0; flex: 1; }
+      .codex-mux-win-usage-account-name { overflow: hidden; font-size: 13px; font-weight: 650; line-height: 18px; text-overflow: ellipsis; white-space: nowrap; }
+      .codex-mux-win-usage-account-meta { overflow: hidden; color: var(--text-secondary, var(--token-text-secondary, currentColor)); font-size: 11px; line-height: 15px; text-overflow: ellipsis; white-space: nowrap; opacity: .82; }
+      .codex-mux-win-usage-account-status { flex: 0 0 auto; border-radius: 999px; background: color-mix(in srgb, #51c878 24%, transparent); color: inherit; font-size: 10px; line-height: 18px; padding: 0 7px; }
+      .codex-mux-win-usage-account-status-error { background: color-mix(in srgb, #e05a65 28%, transparent); }
+      .codex-mux-win-usage-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
+      .codex-mux-win-usage-section { min-width: 0; border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent); padding-top: 8px; }
+      .codex-mux-win-usage-section-title { color: var(--text-secondary, var(--token-text-secondary, currentColor)); font-size: 11px; font-weight: 650; line-height: 15px; }
+      .codex-mux-win-usage-line { display: flex; min-width: 0; justify-content: space-between; gap: 8px; margin-top: 4px; font-size: 12px; line-height: 17px; }
+      .codex-mux-win-usage-line-label { min-width: 0; color: var(--text-secondary, var(--token-text-secondary, currentColor)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .codex-mux-win-usage-line-value { min-width: 0; overflow: hidden; text-align: right; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+      .codex-mux-win-usage-bar { height: 5px; margin-top: 5px; overflow: hidden; border-radius: 999px; background: color-mix(in srgb, currentColor 14%, transparent); }
+      .codex-mux-win-usage-bar-fill { height: 100%; border-radius: inherit; background: #5b7cfa; }
+      .codex-mux-win-usage-error { margin-top: 9px; color: #e05a65; font-size: 12px; line-height: 17px; }
+      .codex-mux-win-usage-details { margin-top: 9px; border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent); padding-top: 7px; }
+      .codex-mux-win-usage-details summary { color: var(--text-secondary, var(--token-text-secondary, currentColor)); cursor: pointer; font-size: 11px; line-height: 16px; }
+      .codex-mux-win-usage-json { max-height: 230px; margin: 7px 0 0; overflow: auto; border-radius: 8px; background: rgb(0 0 0 / .16); color: var(--text-secondary, var(--token-text-secondary, currentColor)); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 10px; line-height: 14px; padding: 8px; white-space: pre-wrap; word-break: break-word; }
+      .codex-mux-win-usage-empty { color: var(--text-secondary, var(--token-text-secondary, currentColor)); font-size: 12px; line-height: 17px; }
+      @media (max-width: 600px) { .codex-mux-win-usage-summary, .codex-mux-win-usage-grid { grid-template-columns: 1fr; } }
     `;
     document.head.append(style);
   }
@@ -514,6 +544,257 @@
     const result = await request("/accounts");
     latestAccounts = Array.isArray(result.accounts) ? result.accounts : [];
     return latestAccounts;
+  }
+
+  async function loadUsageBilling() {
+    const [accountsResult, usageResult] = await Promise.all([
+      request("/accounts"),
+      request("/usage/all"),
+    ]);
+    const accounts = Array.isArray(accountsResult.accounts) ? accountsResult.accounts : [];
+    const collection = usageResult && typeof usageResult === "object" ? usageResult : {};
+    const entries = Array.isArray(collection.accounts) ? collection.accounts : [];
+    const byId = new Map(entries.map((entry) => [String(entry?.accountId || ""), entry]));
+    const connected = accounts.filter((account) => account?.enabled && account?.connected);
+    // The account list is authoritative for identity and plan labels. Usage
+    // entries remain authoritative for the native billing payload, including
+    // an account whose quota endpoint is temporarily unavailable.
+    const displayAccounts = connected.map((account) => ({
+      account,
+      usage: byId.get(String(account.id)) || null,
+    }));
+    for (const entry of entries) {
+      if (!entry?.accountId || displayAccounts.some((item) => item.account?.id === entry.accountId)) continue;
+      if (entry.connected) displayAccounts.push({ account: {
+        id: entry.accountId,
+        label: entry.label || "Subscription",
+        controller: entry.controller === true,
+        enabled: entry.enabled !== false,
+        connected: true,
+      }, usage: entry });
+    }
+    return { accounts, collection, displayAccounts };
+  }
+
+  function usageValue(value) {
+    if (value == null || value === "") return "Unavailable";
+    if (typeof value === "boolean") return value ? "Yes" : "No";
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) return "Unavailable";
+      return Number.isInteger(value) ? String(value) : String(Math.round(value * 100) / 100);
+    }
+    if (typeof value === "string") return value;
+    try { return JSON.stringify(value); } catch { return "Unavailable"; }
+  }
+
+  function usageObjectValue(object, ...keys) {
+    if (!object || typeof object !== "object") return null;
+    for (const key of keys) {
+      if (Object.prototype.hasOwnProperty.call(object, key) && object[key] != null) return object[key];
+    }
+    return null;
+  }
+
+  function usageResetTime(value) {
+    const seconds = Number(value);
+    if (!Number.isFinite(seconds) || seconds <= 0) return "Unavailable";
+    const date = new Date(seconds * 1000);
+    return Number.isNaN(date.getTime()) ? "Unavailable" : date.toLocaleString();
+  }
+
+  function usageWindow(host, label, value) {
+    if (!value || typeof value !== "object") return;
+    const used = Number(usageObjectValue(value, "used_percent", "usedPercent"));
+    const duration = Number(usageObjectValue(value, "limit_window_seconds", "windowDurationSeconds"));
+    const reset = usageObjectValue(value, "reset_at", "resetsAt");
+    const line = make("div", "codex-mux-win-usage-line");
+    const labelElement = make("span", "codex-mux-win-usage-line-label", label);
+    const valueElement = make("span", "codex-mux-win-usage-line-value", Number.isFinite(used)
+      ? `${Math.round(Math.max(0, Math.min(100, 100 - used)))}% left`
+      : "Unavailable");
+    append(line, labelElement, valueElement);
+    host.append(line);
+    if (Number.isFinite(used)) {
+      const bar = make("div", "codex-mux-win-usage-bar");
+      const fill = make("div", "codex-mux-win-usage-bar-fill");
+      fill.style.width = `${Math.max(0, Math.min(100, used))}%`;
+      bar.append(fill);
+      host.append(bar);
+    }
+    const resetLine = make("div", "codex-mux-win-usage-line");
+    append(
+      resetLine,
+      make("span", "codex-mux-win-usage-line-label", Number.isFinite(duration) && duration > 0
+        ? `Window (${Math.round(duration / 60)}m)`
+        : "Reset"),
+      make("span", "codex-mux-win-usage-line-value", usageResetTime(reset)),
+    );
+    host.append(resetLine);
+  }
+
+  function usageSection(title, rows) {
+    const section = make("div", "codex-mux-win-usage-section");
+    section.append(make("div", "codex-mux-win-usage-section-title", title));
+    for (const [label, value] of rows) {
+      const line = make("div", "codex-mux-win-usage-line");
+      append(line, make("span", "codex-mux-win-usage-line-label", label), make("span", "codex-mux-win-usage-line-value", usageValue(value)));
+      section.append(line);
+    }
+    return section;
+  }
+
+  function safeUsageJSON(usage) {
+    try {
+      return JSON.stringify(usage, (key, value) => {
+        if (/token|secret|password|authorization/i.test(key)) return "[redacted]";
+        return value;
+      }, 2);
+    } catch {
+      return "Usage payload could not be formatted.";
+    }
+  }
+
+  function renderUsageAccount(item) {
+    const account = item.account || {};
+    const entry = item.usage || {};
+    const usage = entry.usage && typeof entry.usage === "object" ? entry.usage : null;
+    const card = make("section", "codex-mux-win-usage-account");
+    const header = make("div", "codex-mux-win-usage-account-header");
+    const copy = make("div", "codex-mux-win-usage-account-copy");
+    const identity = accountIdentityDetail(account);
+    const name = `${accountName(account)}${account.controller ? " · Primary" : ""}`;
+    append(copy, make("div", "codex-mux-win-usage-account-name", name), make("div", "codex-mux-win-usage-account-meta", identity || account.id || "Subscription"));
+    const status = make("span", `codex-mux-win-usage-account-status${entry.error ? " codex-mux-win-usage-account-status-error" : ""}`, entry.error ? "Unavailable" : "Connected");
+    append(header, avatar(account), copy, status);
+    card.append(header);
+    if (entry.error) {
+      card.append(make("div", "codex-mux-win-usage-error", entry.error));
+      return card;
+    }
+    if (!usage) {
+      card.append(make("div", "codex-mux-win-usage-empty", "This account did not return a Usage payload."));
+      return card;
+    }
+    const limits = usageObjectValue(usage, "rate_limit", "rateLimit");
+    const credits = usageObjectValue(usage, "credits");
+    const spend = usageObjectValue(usage, "spend_control", "spendControl");
+    const resetCredits = usageObjectValue(usage, "rate_limit_reset_credits", "rateLimitResetCredits");
+    const grid = make("div", "codex-mux-win-usage-grid");
+    const limitSection = make("div", "codex-mux-win-usage-section");
+    limitSection.append(make("div", "codex-mux-win-usage-section-title", "General usage limits"));
+    usageWindow(limitSection, "Primary", usageObjectValue(limits, "primary_window", "primaryWindow"));
+    usageWindow(limitSection, "Secondary", usageObjectValue(limits, "secondary_window", "secondaryWindow"));
+    if (!usageObjectValue(limits, "primary_window", "primaryWindow") && !usageObjectValue(limits, "secondary_window", "secondaryWindow")) {
+      limitSection.append(make("div", "codex-mux-win-usage-empty", "No rate-limit windows reported."));
+    }
+    grid.append(limitSection);
+    grid.append(usageSection("Credits balance", [
+      ["Balance", usageObjectValue(credits, "balance")],
+      ["Has credits", usageObjectValue(credits, "has_credits", "hasCredits")],
+      ["Unlimited", usageObjectValue(credits, "unlimited")],
+      ["Approx. local messages", usageObjectValue(credits, "approx_local_messages", "approxLocalMessages")],
+      ["Approx. cloud messages", usageObjectValue(credits, "approx_cloud_messages", "approxCloudMessages")],
+    ]));
+    grid.append(usageSection("Billing controls", [
+      ["Plan", usageObjectValue(usage, "plan_type", "planType") ?? account.planType ?? account.planLabel],
+      ["Spend limit reached", usageObjectValue(spend, "reached")],
+      ["Individual limit", usageObjectValue(spend, "individual_limit", "individualLimit")],
+      ["Reset credits available", usageObjectValue(resetCredits, "available_count", "availableCount")],
+      ["Applicable reset credits", usageObjectValue(resetCredits, "applicable_available_count", "applicableAvailableCount")],
+    ]));
+    const optional = [
+      ["Rate-limit reached type", usageObjectValue(usage, "rate_limit_reached_type", "rateLimitReachedType")],
+      ["Overage limit reached", usageObjectValue(credits, "overage_limit_reached", "overageLimitReached")],
+      ["Code review limits", usageObjectValue(usage, "code_review_rate_limit", "codeReviewRateLimit")],
+      ["Additional limits", usageObjectValue(usage, "additional_rate_limits", "additionalRateLimits")],
+    ].filter(([, value]) => value != null);
+    if (optional.length) grid.append(usageSection("Additional Usage details", optional));
+    card.append(grid);
+    const details = make("details", "codex-mux-win-usage-details");
+    details.append(make("summary", "All Usage fields returned by ChatGPT"));
+    details.append(make("pre", "codex-mux-win-usage-json", safeUsageJSON(usage)));
+    card.append(details);
+    return card;
+  }
+
+  function renderUsageBilling(host, data) {
+    const connected = data.displayAccounts || [];
+    const collection = data.collection || {};
+    const panel = surface(
+      "All connected subscriptions",
+      "Every account is shown separately. Billing actions below the Relay panel stay scoped to the account selected by the native Codex app.",
+      "codex-mux-win-usage-panel",
+    );
+    const summary = make("div", "codex-mux-win-usage-summary");
+    append(
+      summary,
+      append(make("div", "codex-mux-win-usage-stat"), make("div", "codex-mux-win-usage-stat-label", "Connected"), make("div", "codex-mux-win-usage-stat-value", String(connected.length))),
+      append(make("div", "codex-mux-win-usage-stat"), make("div", "codex-mux-win-usage-stat-label", "Usage available"), make("div", "codex-mux-win-usage-stat-value", String(Number(collection.availableCount || 0)))),
+      append(make("div", "codex-mux-win-usage-stat"), make("div", "codex-mux-win-usage-stat-label", "Needs attention"), make("div", "codex-mux-win-usage-stat-value", String(connected.filter((item) => item.usage?.error).length))),
+    );
+    panel.append(summary);
+    const list = make("div", "codex-mux-win-usage-account-list");
+    if (!connected.length) list.append(make("div", "codex-mux-win-usage-empty", "No connected subscriptions are available yet."));
+    else connected.forEach((item) => list.append(renderUsageAccount(item)));
+    panel.append(list);
+    host.replaceChildren(panel);
+  }
+
+  async function mountUsageBilling(host) {
+    if (host.dataset.loading === "true") return;
+    host.dataset.loading = "true";
+    host.replaceChildren(make("div", "codex-mux-win-usage-empty", "Loading usage for all subscriptions…"));
+    try {
+      renderUsageBilling(host, await loadUsageBilling());
+      host.dataset.loadedAt = String(Date.now());
+    } catch (error) {
+      if (host.isConnected) {
+        host.replaceChildren(make("div", "codex-mux-win-usage-error", `Relay could not load all subscriptions: ${error.message}`));
+      }
+    } finally {
+      host.dataset.loading = "false";
+    }
+  }
+
+  function usageBillingPlacement() {
+    const elements = [...document.querySelectorAll("h1, h2, h3, [role='heading'], body *")].filter(isVisible);
+    const heading = elements.find((element) => labelMatches(element.textContent, USAGE_BILLING_LABELS));
+    if (!heading) return null;
+    // Walk upward from the visible heading and choose the *smallest* sizeable
+    // ancestor. The app's outer shell also contains the sidebar; selecting a
+    // broad <main> or role=main node would place the panel in that sidebar
+    // instead of inside the Usage content column.
+    let container = heading.parentElement;
+    for (let depth = 0; container && depth < 10; depth += 1, container = container.parentElement) {
+      if (container === document.body) break;
+      const rect = container.getBoundingClientRect();
+      if (rect.width >= 420 && rect.height >= 220 && container.childElementCount > 1) {
+        return { container, heading };
+      }
+    }
+    return null;
+  }
+
+  function installUsageBillingSurface() {
+    const placement = usageBillingPlacement();
+    if (!placement) return;
+    let host = placement.container.querySelector(`#${USAGE_BILLING_ID}`);
+    if (!host) {
+      host = make("codex-mux-usage-billing", "", "");
+      host.id = USAGE_BILLING_ID;
+      // Insert after the smallest direct child that contains the native
+      // heading/subtitle. This keeps the Relay cards in the Usage & billing
+      // content flow, below the native title, instead of turning them into a
+      // sidebar or a sibling column beside Settings navigation.
+      let headingBlock = placement.heading;
+      while (headingBlock.parentElement && headingBlock.parentElement !== placement.container) {
+        headingBlock = headingBlock.parentElement;
+      }
+      const parent = headingBlock.parentElement || placement.container;
+      parent.insertBefore(host, headingBlock.nextElementSibling || null);
+    }
+    const lastRefresh = Number(host.dataset.loadedAt || 0);
+    if (host.dataset.loading !== "true" && Date.now() - lastRefresh > 30000) void mountUsageBilling(host);
   }
 
   function surface(title, description, className = "") {
@@ -718,6 +999,7 @@
     defineSurfaceElement("codex-mux-profile-picker", mountProfilePicker);
     defineSurfaceElement("codex-mux-plugin-picker", mountPluginPicker);
     defineSurfaceElement("codex-mux-reset-picker", mountResetPicker);
+    defineSurfaceElement("codex-mux-usage-billing", mountUsageBilling);
   }
 
   function setMenuStatus(menu, message) {
@@ -1407,7 +1689,10 @@
   function schedule() {
     if (scheduled) return;
     scheduled = true;
-    window.setTimeout(installIntoProfileMenu, 50);
+    window.setTimeout(() => {
+      installIntoProfileMenu();
+      installUsageBillingSurface();
+    }, 50);
   }
 
   function start() {
