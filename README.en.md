@@ -225,7 +225,7 @@ py -3 scripts/patch_windows.py --force --launch
 | `%USERPROFILE%\.codex-mux` | Router state, account homes, local token, and recoverable backups |
 | `%LOCALAPPDATA%\Codex Relay Updater\router-updater.exe` | External helper used by the in-app update button |
 
-### Migration from Codex Subscription Router 0.2.x
+### Migration from an earlier 0.2.x installation
 
 No account needs to be added again. A Relay install stages the new copy first,
 stops only the former managed Router directory, and moves that old app copy to
@@ -404,7 +404,6 @@ menu's **Usage remaining** summary for the aggregate subscription pool.
 | `~/.codex-mux/accounts/<id>/codex-home` | Isolated secondary account homes |
 | `~/.codex-mux/control-token` | Random token for the loopback-only control service |
 | `~/.codex-mux/backups` | Recoverable Router application backups |
-| `~/Library/Application Support/Codex Subscription Router` | Legacy-compatible macOS Electron profile retained across the product rename |
 | `%APPDATA%\Codex Relay` | Independent Windows desktop profile for a new Relay install |
 
 - The control service binds only to `127.0.0.1` and uses a random 256-bit
@@ -476,10 +475,10 @@ checks. The optional current-renderer fixture runs only when
 
 ## Attribution
 
-The original project and its copyright notice are credited to **Bennett
-Blackham (b-nnett)**. This LightHaru-maintained repository retains the original
-MIT license and notices; contributions should preserve applicable attribution
-and license text.
+Thanks to **Bennett Blackham (b-nnett)** for the original project and its
+copyright notice. This LightHaru-maintained repository retains the original MIT
+license and notices; contributions should preserve applicable attribution and
+license text.
 
 ## Contributing, security, and license
 

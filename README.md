@@ -2,14 +2,13 @@
 
 > Tài liệu tiếng Anh: [README.en.md](README.en.md)
 
-Codex Relay cho phép dùng nhiều gói ChatGPT/Codex hợp lệ trong
-một ứng dụng Router riêng. Khi cài lần đầu, tài khoản đang có trong Codex gốc
-được chọn làm **Primary** mặc định. Sau đó anh có thể đổi Primary ngay trong
-Router; lựa chọn này được lưu riêng và không chạy theo tài khoản đang chọn ở
-Codex gốc. **Primary là tài khoản điều khiển/cấu hình mặc định, không phải khóa
-định tuyến:** chat mới được chia công bằng theo quota thực tế giữa mọi tài
-khoản còn dùng được; chat cũ vẫn bám tài khoản đã xử lý cho đến khi cần
-failover.
+Codex Relay cho phép sử dụng nhiều gói ChatGPT/Codex hợp lệ trong một ứng dụng
+Router độc lập. Khi cài lần đầu, tài khoản đang có trong Codex gốc được chọn
+làm **Primary** mặc định. Primary có thể được thay đổi ngay trong Relay; lựa
+chọn này được lưu riêng và không phụ thuộc vào tài khoản đang chọn ở Codex gốc.
+**Primary là tài khoản điều khiển/cấu hình mặc định, không phải khóa định
+tuyến:** chat mới được chia công bằng theo quota thực tế giữa mọi tài khoản còn
+dùng được; chat cũ vẫn bám tài khoản đã xử lý cho đến khi cần failover.
 
 > [!IMPORTANT]
 > Router tạo một bản sao độc lập của ứng dụng chính thức. Nó **không sửa, thay
@@ -38,7 +37,7 @@ Lệnh tải script bootstrap từ **GitHub Release**, đọc manifest phát hà
 tra đúng URL gói mã nguồn và SHA-256 rồi mới giải nén/chạy bộ cài. Không cần
 `git clone`; khi xong shortcut **Codex Relay** xuất hiện trên Desktop và Router
 tự mở. Mã nguồn đã kiểm tra được giữ tại
-`%LOCALAPPDATA%\Codex Relay Bootstrap\...` để anh có thể xem lại khi cần.
+`%LOCALAPPDATA%\Codex Relay Bootstrap\...` để có thể xem lại khi cần.
 
 > Chỉ chạy lệnh này từ README/release chính thức của
 > [LightHaru/codex-relay](https://github.com/LightHaru/codex-relay). Đây vẫn là
@@ -48,15 +47,14 @@ tự mở. Mã nguồn đã kiểm tra được giữ tại
 
 Windows hiện có bộ cài bằng **nhấp đúp từ thư mục mã nguồn đã clone**, chưa phải
 file `Setup.exe` tự chứa mọi thứ. Sau khi đã có mã nguồn và đủ điều kiện bên dưới,
-anh chỉ cần mở thư mục bằng Explorer rồi nhấp đúp:
+chỉ cần mở thư mục bằng Explorer rồi nhấp đúp:
 
 ```text
 Install Codex Relay.cmd
 ```
 
-Ứng dụng cài đặt sẽ tự tạo shortcut **Codex Relay** trên Desktop và mở
-Router sau khi cài xong. Anh không cần gõ lệnh để thêm tài khoản hoặc mở Router
-hằng ngày.
+Ứng dụng cài đặt sẽ tự tạo shortcut **Codex Relay** trên Desktop và mở Router
+sau khi cài xong. Không cần gõ lệnh để thêm tài khoản hoặc mở Router hằng ngày.
 
 ### Điều kiện cần có
 
@@ -77,7 +75,7 @@ cd codex-relay
 Sau đó mở thư mục vừa clone trong Explorer và nhấp đúp `Install Codex Relay.cmd`.
 
 Nếu thiếu Python, Go hoặc Node, bootstrap sẽ dừng trước khi thay đổi Router.
-Cài các công cụ đó theo cách anh tin cậy (ví dụ `winget` hoặc trang chính thức),
+Cài các công cụ đó từ nguồn tin cậy (ví dụ `winget` hoặc trang chính thức),
 sau đó chạy lại đúng một lệnh ở trên. Bootstrap không tự âm thầm cài phần mềm
 hay tự bỏ qua một phiên bản ChatGPT/Codex chưa được kiểm tra.
 
@@ -105,7 +103,7 @@ Các đường dẫn chính:
 | `%USERPROFILE%\.codex-mux` | Trạng thái Router, dữ liệu tài khoản phụ và backup |
 | `%LOCALAPPDATA%\Codex Relay Updater\router-updater.exe` | Trình cập nhật dùng cho nút **Cập nhật ngay** trong Relay |
 
-### Nếu anh đang dùng bản tên cũ `Codex Subscription Router`
+### Nâng cấp từ bản cài đặt trước đây
 
 Không cần đăng nhập lại. Khi cài hoặc cập nhật lên Relay, Relay tạo bản mới
 ở `%LOCALAPPDATA%\Codex Relay\app`, chỉ dừng đúng tiến trình nằm trong thư mục
@@ -113,19 +111,19 @@ Router cũ, rồi chuyển bản cũ vào `%USERPROFILE%\.codex-mux\backups\...`
 Tài khoản, quota, chat đã gán, dữ liệu các tài khoản phụ và profile Electron
 được giữ nguyên. Trong lần chuyển đổi đầu, Relay tiếp tục dùng profile cũ nếu
 profile mới chưa tồn tại; đây là chủ ý để không đánh mất lịch sử/thiết lập
-desktop. Sau khi xác nhận Relay chạy ổn, anh có thể xóa shortcut hoặc thư mục
-bản cũ trong backup theo cách thủ công nếu muốn dọn dung lượng.
+desktop. Sau khi xác nhận Relay chạy ổn, có thể xóa shortcut hoặc thư mục bản
+cũ trong backup theo cách thủ công nếu muốn dọn dung lượng.
 
 Hướng dẫn kỹ thuật chi tiết hơn nằm ở [docs/WINDOWS.md](docs/WINDOWS.md).
 
 ### Cập nhật Router ngay trong ứng dụng
 
-Sau lần cài đầu tiên, anh không cần gõ lệnh để nâng cấp Router. Mỗi bản phát
+Sau lần cài đầu tiên, không cần gõ lệnh để nâng cấp Router. Mỗi bản phát
 hành có một tệp thông báo nhỏ trên GitHub và một gói mã nguồn kèm mã băm
 SHA-256. Khi có phiên bản Router mới, trong cửa sổ Router sẽ hiện thông báo
 **Cập nhật ngay**.
 
-Khi anh bấm nút đó, Router sẽ tự động:
+Khi chọn nút đó, Router sẽ tự động:
 
 1. tải đúng gói phát hành từ GitHub;
 2. kiểm tra mã băm và kiểm tra đường dẫn bên trong gói để tránh gói lỗi;
@@ -208,7 +206,7 @@ tài khoản chưa trả quota, giao diện vẫn hiển thị tổng phần đ�
 Mỗi dòng tài khoản hiển thị tên hồ sơ ChatGPT (`display name`, rồi đến username
 hoặc email khi cần), gói đang dùng và nhãn Router. Dòng quota của chính tài
 khoản đó cũng hiển thị thời gian hồi của từng cửa sổ hạn mức, ví dụ `Reset 5h:
-1h 20m`. Di chuột lên dòng để xem mốc giờ đầy đủ theo máy anh. Nếu ChatGPT chưa
+1h 20m`. Di chuột lên dòng để xem mốc giờ đầy đủ theo máy đang sử dụng. Nếu ChatGPT chưa
 trả thời gian reset, Router ghi rõ là chưa có dữ liệu thay vì tự đoán.
 
 Mở `Settings` → `Usage` vẫn là màn Usage native theo **một** account (ưu tiên
@@ -219,7 +217,7 @@ tổng pool, dùng phần **Usage remaining** trong menu Relay.
 
 ### Dùng chat cũ với Router
 
-Anh có thể tiếp tục **chat cũ** bằng Router, không chỉ chat mới. Mở chat đó từ
+Có thể tiếp tục **chat cũ** bằng Router, không chỉ chat mới. Mở chat đó từ
 thanh bên của **Codex Relay** rồi gửi tin nhắn tiếp theo tại cửa sổ Router. Nếu
 tài khoản đang sở hữu chat cũ đã hết hạn mức — kể cả chat được tạo trước khi
 cài Relay và chưa có gán Router — Relay sao chép history cục bộ cần thiết sang
@@ -227,7 +225,7 @@ kho tách biệt của tài khoản còn quota, sau đó tiếp tục đúng cu�
 tài khoản này.
 
 Router không thể chặn một lượt đã gửi từ cửa sổ **Codex gốc** vì app gốc không
-kết nối với Router. Anh không cần tắt Codex gốc, nhưng hãy mở lại chính chat đó
+kết nối với Router. Không cần tắt Codex gốc, nhưng hãy mở lại chính chat đó
 trong **Codex Relay** trước khi gửi lượt muốn Relay chuyển quota.
 
 ### Thêm tài khoản phụ trên Windows
@@ -236,7 +234,7 @@ trong **Codex Relay** trước khi gửi lượt muốn Relay chuyển quota.
 2. Mở menu tài khoản ở cuối thanh bên.
 3. Bấm **Add another subscription**.
 4. Router mở trang đăng nhập ChatGPT chính thức trong trình duyệt mặc định
-   (Chrome, Edge hoặc trình duyệt anh đang dùng). Đây là luồng OAuth chuẩn của
+   (Chrome, Edge hoặc trình duyệt mặc định). Đây là luồng OAuth chuẩn của
    Codex; callback localhost vẫn do app-server riêng của từng subscription
    nhận, không đi qua Codex gốc.
 5. Đăng nhập trên trang chính thức. Nếu trình duyệt đang nhớ tài khoản khác,
@@ -244,7 +242,7 @@ trong **Codex Relay** trước khi gửi lượt muốn Relay chuyển quota.
 6. Nếu đã đóng trang đăng nhập, bấm **Open secure sign-in** để mở lại; nếu
    không muốn tiếp tục, bấm **Cancel sign-in** để hủy tài khoản đang chờ.
 7. Khi callback thành công, hộp xác nhận tự đóng và Router hiện thông báo kết
-   nối thành công. Nếu OAuth báo lỗi, tài khoản chờ vẫn còn để anh thử lại;
+   nối thành công. Nếu OAuth báo lỗi, tài khoản chờ vẫn còn để thử lại;
    Router không tự xóa tài khoản chỉ vì trang web báo lỗi.
 
 Router Windows không hiển thị device code và không hỏi mật khẩu. Nó chỉ chuyển
@@ -414,11 +412,10 @@ bộ cài Windows, các điểm tương thích giao diện và thông tin phát 
 
 ## Ghi công, giấy phép và đóng góp
 
-Dự án gốc cùng thông báo bản quyền được ghi công cho
-[Bennett Blackham (b-nnett)](https://github.com/b-nnett/codex-subscription-router).
-Fork LightHaru giữ nguyên giấy phép MIT và các thông báo cần thiết, đồng thời
-bổ sung phần Windows, bộ cài, định tuyến fair-share theo quota và tài liệu liên
-quan.
+Xin cảm ơn [Bennett Blackham (b-nnett)](https://github.com/b-nnett/codex-subscription-router),
+tác giả dự án nền tảng. Repository này giữ nguyên giấy phép MIT và các thông
+báo cần thiết, đồng thời bổ sung phần Windows, bộ cài, định tuyến fair-share
+theo quota và tài liệu liên quan.
 
 - Đọc [NOTICE.md](NOTICE.md) để xem đầy đủ ghi công và giới hạn phân phối
   OpenAI binaries.
