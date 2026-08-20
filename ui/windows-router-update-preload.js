@@ -2,6 +2,11 @@
 (() => {
   "use strict";
 
+  // Sandboxed Electron preloads do not expose Electron APIs as globals. Keep
+  // the updater bridge explicit, just like the isolated-login preload, so the
+  // renderer can load the update surface without a `ipcRenderer is not
+  // defined` preload failure.
+  const { contextBridge, ipcRenderer } = require("electron");
   const STATE_CHANNEL = "codex-mux:update-state";
   const INSTALL_CHANNEL = "codex-mux:install-update";
   const EVENT_CHANNEL = "codex-mux:update-available";

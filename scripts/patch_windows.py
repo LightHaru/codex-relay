@@ -146,7 +146,11 @@ CURRENT_RENDERER_PROFILE = {
         "staleTime:Mp.FIVE_SECONDS},e[0]=t):t=e[0],It(t)}"
     ),
     "reset_query_replacement": (
-        "function Oxa(){let e=(0,n$s.useSyncExternalStore)("
+        # In the 26.818 Windows renderer this module's React namespace is
+        # `rxa`; `n$s` is an MCP schema declared elsewhere in app-initial.
+        # Keeping the alias tied to this exact anchor prevents the Usage page
+        # from crashing while the reset-account picker subscribes to state.
+        "function Oxa(){let e=(0,rxa.useSyncExternalStore)("
         "e=>globalThis.CodexMuxWindows?.subscribeReset?.(e)??(()=>{}),"
         "()=>globalThis.CodexMuxWindows?.getResetAccountId?.()??null,()=>null),"
         "t={queryKey:[`rate-limit-reset-credits`,e??`primary`],"

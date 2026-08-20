@@ -4,6 +4,16 @@ The patcher is intentionally tied to known ChatGPT desktop bundle structures.
 It verifies every modified renderer, main-process, and native binary anchor and
 stops instead of applying a partial patch.
 
+## Release 0.3.5
+
+This hotfix keeps the reviewed Windows `26.818.2441.0` renderer profile but
+corrects the React namespace used by the account-scoped reset picker. It also
+fixes the sandboxed updater preload so the in-app update bridge is available to
+the renderer. The full Settings → Usage flow was exercised against the live
+Relay app with the existing three-subscription profile; all local bridge
+requests returned 200 and the native Usage page rendered without its generic
+error screen.
+
 ## Release 0.3.4
 
 This hotfix completes the Windows Settings → Usage loopback fix by returning

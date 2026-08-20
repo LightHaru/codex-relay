@@ -184,6 +184,11 @@ class WindowsRendererPatchTests(unittest.TestCase):
             patch_windows_feature_bundles(root, CURRENT_RENDERER_PROFILE)
             self.assert_replacements(assets, CURRENT_RENDERER_PROFILE)
 
+    def test_current_usage_reset_hook_uses_the_renderer_react_namespace(self) -> None:
+        replacement = CURRENT_RENDERER_PROFILE["reset_query_replacement"]
+        self.assertIn("rxa.useSyncExternalStore", replacement)
+        self.assertNotIn("n$s.useSyncExternalStore", replacement)
+
     def test_rejects_duplicate_private_login_preload_anchor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

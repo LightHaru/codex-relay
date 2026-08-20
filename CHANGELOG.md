@@ -3,6 +3,18 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/) and
 this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.5] - 2026-08-20
+
+### Fixed
+
+- Windows Settings → Usage no longer crashes when the reset-account picker
+  subscribes to quota state. The renderer patch now calls the React namespace
+  belonging to the reviewed `26.818.2441.0` bundle instead of an unrelated
+  MCP schema symbol.
+- The Windows updater preload now imports Electron's `contextBridge` and
+  `ipcRenderer` explicitly, so the in-app update bridge loads in Electron's
+  sandboxed preload environment.
+
 ## [0.3.4] - 2026-08-20
 
 ### Fixed
@@ -122,7 +134,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 - Loopback-only, token-authenticated diagnostic UI states.
 - Source-only CI, draft release automation, security documentation, and smoke tests.
 
-[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.3.5...HEAD
+[0.3.5]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.5
 [0.3.4]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.4
 [0.3.3]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.3
 [0.3.2]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.2
