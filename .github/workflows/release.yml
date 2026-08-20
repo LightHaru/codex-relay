@@ -71,6 +71,7 @@ jobs:
           with open("windows-update.json", "a", encoding="utf-8") as handle:
               handle.write("\n")
           PY
+          cp scripts/bootstrap_windows.ps1 install-codex-relay.ps1
 
       - name: Create source-only GitHub release
         env:
@@ -84,4 +85,4 @@ jobs:
             --verify-tag \
             "codex-relay-source-${version}.zip" \
             windows-update.json \
-            "scripts/bootstrap_windows.ps1#install-codex-relay.ps1"
+            install-codex-relay.ps1
