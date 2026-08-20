@@ -337,6 +337,8 @@ class WindowsRendererPatchTests(unittest.TestCase):
         self.assertIn("'--force', '--launch'", powershell)
         self.assertIn("Get-Command py.exe", powershell)
         self.assertIn("never targets", powershell)
+        self.assertIn("sourceIsCheckout", powershell)
+        self.assertIn("Older 0.3.1 updater helpers", powershell)
 
     def test_one_line_bootstrap_verifies_the_release_before_installing(self) -> None:
         bootstrap = (ROOT / "scripts" / "bootstrap_windows.ps1").read_text(
@@ -348,6 +350,8 @@ class WindowsRendererPatchTests(unittest.TestCase):
         self.assertIn("Assert-SafeArchive", bootstrap)
         self.assertIn("scripts\\install_windows.ps1", bootstrap)
         self.assertIn("Codex Relay Bootstrap", bootstrap)
+        self.assertIn("reserved for an explicit official Store app directory", bootstrap)
+        self.assertNotIn("-File $installer -Source", bootstrap)
         self.assertNotIn("Start-Process", bootstrap)
         powershell = shutil.which("powershell.exe") or shutil.which("pwsh")
         if powershell is None:

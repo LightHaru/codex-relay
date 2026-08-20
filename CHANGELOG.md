@@ -3,6 +3,17 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/) and
 this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] - 2026-08-20
+
+### Fixed
+
+- Windows source-release updates now pass the extracted checkout correctly to
+  the local installer. The installer recognizes the old 0.3.1 updater's
+  checkout-shaped `-Source` argument instead of treating the repository as the
+  official ChatGPT app, so **Update now** can complete without a manual repair.
+- The one-command bootstrap and future updater helpers no longer pass an
+  extracted source checkout as an official Store app path.
+
 ## [0.3.1] - 2026-08-20
 
 ### Added
@@ -92,7 +103,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 - Loopback-only, token-authenticated diagnostic UI states.
 - Source-only CI, draft release automation, security documentation, and smoke tests.
 
-[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.2
 [0.3.1]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.1
 [0.3.0]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.0
 [0.2.0]: https://github.com/LightHaru/codex-relay/releases/tag/v0.2.0

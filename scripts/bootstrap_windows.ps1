@@ -149,7 +149,11 @@ try {
     }
     $installer = Join-Path $roots[0].FullName 'scripts\install_windows.ps1'
     Write-Host 'Building an independent Codex Relay copy from the verified source...'
-    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer -Source $roots[0].FullName
+    # The installer derives its repository root from this script's location.
+    # Do not pass the extracted checkout as `-Source`: that parameter is
+    # reserved for an explicit official Store app directory and would make
+    # the patcher treat the source checkout as ChatGPT itself.
+    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $installer
     if ($LASTEXITCODE -ne 0) {
         Fail "the verified Windows installer exited with code $LASTEXITCODE."
     }

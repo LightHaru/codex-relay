@@ -381,7 +381,6 @@ func runInstaller(sourceRoot, installRoot, profile string) error {
 	args := []string{
 		"-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
 		"-ExecutionPolicy", "Bypass", "-File", filepath.Join(sourceRoot, "scripts", "install_windows.ps1"),
-		"-Source", sourceRoot,
 	}
 	command := exec.Command("powershell.exe", args...)
 	command.Dir = sourceRoot

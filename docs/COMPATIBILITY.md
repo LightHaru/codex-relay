@@ -19,6 +19,13 @@ the selected-model capacity response for an exact-model same-account retry.
 These mux changes are independent of the upstream renderer profile and are
 covered by deterministic local JSON-RPC integration tests.
 
+## Release 0.3.2
+
+This is a Windows updater hotfix. The installer accepts the checkout-shaped
+`-Source` argument emitted by the 0.3.1 updater for backward compatibility,
+while new bootstrap and updater code omit that ambiguous argument. No
+renderer/profile compatibility changes are included.
+
 ## Release 0.3.0
 
 This release changes the public product name to **Codex Relay**. It retains the

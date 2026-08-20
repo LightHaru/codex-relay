@@ -62,7 +62,14 @@ try {
     # copy first, then backs up the prior managed Router copy. It never targets
     # the Microsoft Store package and preserves .codex-mux/account state.
     $pythonArguments += @('--force', '--launch')
-    if (![string]::IsNullOrWhiteSpace($Source)) {
+    # Older 0.3.1 updater helpers passed the extracted *checkout* through the
+    # parameter named -Source. Treat that shape as the repository location,
+    # not as the official Store app, so a user can update in place without
+    # first repairing the old helper manually. A real explicit Store source
+    # still passes through to patch_windows.py.
+    $sourceIsCheckout = ![string]::IsNullOrWhiteSpace($Source) -and
+        (Test-Path -LiteralPath (Join-Path $Source 'scripts\patch_windows.py') -PathType Leaf)
+    if (![string]::IsNullOrWhiteSpace($Source) -and !$sourceIsCheckout) {
         $pythonArguments += @('--source', $Source)
     }
     if ($AllowUntestedSource) {
