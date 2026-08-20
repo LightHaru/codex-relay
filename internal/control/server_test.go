@@ -96,6 +96,11 @@ func TestSecurityHeadersAllowPackagedRendererOrigins(t *testing.T) {
 			if got := recorder.Header().Get("Access-Control-Allow-Origin"); got != test.wantAllowOrigin {
 				t.Fatalf("Access-Control-Allow-Origin = %q, want %q", got, test.wantAllowOrigin)
 			}
+			if test.wantAllowOrigin != "" {
+				if got := recorder.Header().Get("Access-Control-Allow-Private-Network"); got != "true" {
+					t.Fatalf("Access-Control-Allow-Private-Network = %q, want %q", got, "true")
+				}
+			}
 		})
 	}
 }
@@ -114,5 +119,8 @@ func TestSecurityHeadersHandleRendererPreflight(t *testing.T) {
 	}
 	if got := recorder.Header().Get("Access-Control-Allow-Origin"); got != "null" {
 		t.Fatalf("preflight Access-Control-Allow-Origin = %q, want %q", got, "null")
+	}
+	if got := recorder.Header().Get("Access-Control-Allow-Private-Network"); got != "true" {
+		t.Fatalf("preflight Access-Control-Allow-Private-Network = %q, want %q", got, "true")
 	}
 }

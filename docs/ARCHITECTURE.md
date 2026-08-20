@@ -77,7 +77,8 @@ The renderer talks to a loopback-only HTTP service on port 48123. All private
 routes require a random 256-bit token. CORS is limited to the copied app's
 known packaged renderer origins (`app://-` and the opaque `null`/`file://`
 origin emitted when Windows loads `webview/index.html` from a file URL). The
-service exposes account metadata, aggregated usage,
+trusted renderer responses also authorize Chromium Private Network Access for
+the loopback target. The service exposes account metadata, aggregated usage,
 controller-scoped native Usage payloads, profile data, thread ownership,
 login/logout actions, a narrow pending-login cancellation action, and an
 authenticated SSE event stream; it never returns OAuth tokens. Browser sign-in

@@ -4,6 +4,13 @@ The patcher is intentionally tied to known ChatGPT desktop bundle structures.
 It verifies every modified renderer, main-process, and native binary anchor and
 stops instead of applying a partial patch.
 
+## Release 0.3.4
+
+This hotfix completes the Windows Settings → Usage loopback fix by returning
+`Access-Control-Allow-Private-Network: true` for the explicit packaged
+renderer allowlist. Chromium's Private Network Access check can otherwise
+reject a secure `app://-` renderer before the normal CORS response is read.
+
 ## Release 0.3.3
 
 This hotfix keeps the reviewed Windows renderer profiles unchanged and fixes

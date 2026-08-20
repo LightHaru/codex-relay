@@ -399,8 +399,11 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 			// The packaged Windows renderer is loaded from a file URL, whose
 			// serialized Origin is "null".  Keep the allowlist explicit: this
 			// endpoint carries a per-install token and must not become a general
-			// cross-origin API.
+			// cross-origin API. Chromium also applies Private Network Access to
+			// secure custom schemes when they call the loopback service, so the
+			// preflight must explicitly authorize the local address space.
 			response.Header().Set("Access-Control-Allow-Origin", origin)
+			response.Header().Set("Access-Control-Allow-Private-Network", "true")
 			response.Header().Set("Vary", "Origin")
 		}
 		response.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Codex-Mux-Token")

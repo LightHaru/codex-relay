@@ -3,6 +3,15 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/) and
 this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.4] - 2026-08-20
+
+### Fixed
+
+- Windows Settings → Usage now authorizes Chromium's Private Network Access
+  preflight for the trusted packaged renderer. This completes the loopback
+  bridge fix for secure `app://-` builds, which could still show the generic
+  **“Oops, an error has occurred”** page after the 0.3.3 CORS fix.
+
 ## [0.3.3] - 2026-08-20
 
 ### Fixed
@@ -113,7 +122,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 - Loopback-only, token-authenticated diagnostic UI states.
 - Source-only CI, draft release automation, security documentation, and smoke tests.
 
-[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.4
 [0.3.3]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.3
 [0.3.2]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.2
 [0.3.1]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.1
