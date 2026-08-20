@@ -31,8 +31,10 @@ must:
 4. Keep control services on loopback with token authentication.
 5. Add focused tests for backend behavior and a curated screenshot for a new
    user-visible state when appropriate.
-6. Preserve the Primary-first policy, safe pending-login cancellation, and the
-   rule that the official installed app is never modified.
+6. Preserve fair-share routing for new chats, sticky ownership/failover for
+   existing chats, exact-model capacity retry behavior, safe pending-login
+   cancellation, and the rule that the official installed app is never
+   modified.
 
 Test against the upstream build recorded in `docs/COMPATIBILITY.md`. If a new
 official build requires anchor changes, update that file in the same pull

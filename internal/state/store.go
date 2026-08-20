@@ -294,10 +294,10 @@ func (s *Store) DiscardProvisionalAccount(id string) (Account, error) {
 	return Account{}, fmt.Errorf("account %q not found", id)
 }
 
-// RemoveAccount removes an account from persistent routing state. Removing a
-// Primary account is intentionally forbidden; callers must select another
-// Primary first so a concurrent new chat can never be routed through an
-// ambiguous controller. Thread ownership is also protected by default and
+// RemoveAccount removes an account from persistent routing state. Removing
+// the controller account is intentionally forbidden; callers must select
+// another controller first so configuration and old-chat history never point
+// at an ambiguous account. Thread ownership is also protected by default and
 // may only be discarded when the caller explicitly passes force=true.
 func (s *Store) RemoveAccount(id string, force bool) (Account, error) {
 	id = strings.TrimSpace(id)

@@ -17,6 +17,7 @@ class FakeElement {
     this.hidden = false;
     this.disabled = false;
     this.textContent = "";
+    this.listeners = new Map();
   }
 
   append(...children) {
@@ -46,7 +47,17 @@ class FakeElement {
     return this.attributes.get(name) || null;
   }
 
-  addEventListener() {}
+  addEventListener(type, listener) {
+    if (typeof listener !== "function") return;
+    const handlers = this.listeners.get(type) || [];
+    handlers.push(listener);
+    this.listeners.set(type, handlers);
+  }
+
+  async click() {
+    const handlers = this.listeners.get("click") || [];
+    for (const handler of handlers) await handler({ type: "click", target: this, currentTarget: this });
+  }
 
   querySelector() { return null; }
 
@@ -57,7 +68,7 @@ class FakeElement {
   get lastElementChild() { return this.children.at(-1) || null; }
 }
 
-function loadBridge({ fetchImpl, privateLoginImpl } = {}) {
+function loadBridge({ fetchImpl, privateLoginImpl, updaterImpl } = {}) {
   const filename = path.join(__dirname, "windows-router-menu.js");
   const source = fs.readFileSync(filename, "utf8");
   const startupAnchor = '  if (document.readyState === "loading") {';
@@ -71,7 +82,9 @@ function loadBridge({ fetchImpl, privateLoginImpl } = {}) {
        "    cancelLogin,",
        "    dismissToast,",
        "    getActiveLogin: () => activeLogin,",
-       "    getActiveToast: () => activeToast,",
+      "    getActiveToast: () => activeToast,",
+      "    showUpdateToast,",
+      "    dismissUpdateToast,",
       "    openPrivateLoginWindow,",
       "    openAccountSettings,",
       "    renderMenu,",
@@ -146,6 +159,11 @@ function loadBridge({ fetchImpl, privateLoginImpl } = {}) {
     },
     setTimeout: fakeSetTimeout,
     codexMuxLoginWindow: privateLogin,
+    codexMuxUpdater: updaterImpl || {
+      async getState() { return { available: false }; },
+      async install() { return { installing: false }; },
+      subscribe() { return () => {}; },
+    },
   };
   context.window = context;
   context.window.open = () => {
@@ -265,6 +283,41 @@ test("Windows bridge uses official private login rather than a device code or de
   assert.doesNotMatch(source, /window\.open\(/);
 });
 
+test("Update now invokes the verified updater bridge and locks the button", async () => {
+  let installCalls = 0;
+  const { document, hooks } = loadBridge({
+    updaterImpl: {
+      async getState() { return { available: false }; },
+      async install() {
+        installCalls += 1;
+        return { installing: true };
+      },
+      subscribe() { return () => {}; },
+    },
+  });
+  hooks.showUpdateToast({
+    available: true,
+    version: "0.3.1",
+    notes: "Verified source release",
+  });
+  const find = (element, predicate) => {
+    if (predicate(element)) return element;
+    for (const child of element.children) {
+      if (!child || typeof child !== "object") continue;
+      const match = find(child, predicate);
+      if (match) return match;
+    }
+    return null;
+  };
+  const updateButton = find(document.body, (element) => element.className === "codex-mux-win-update-button");
+  assert.ok(updateButton, "the update toast must contain an Update now button");
+  await updateButton.click();
+  assert.equal(installCalls, 1);
+  assert.equal(updateButton.disabled, true);
+  assert.equal(updateButton.textContent, "Preparing update…");
+  hooks.dismissUpdateToast();
+});
+
 test("Plugins RPC routing adds the selected account marker without touching unrelated requests", () => {
   const { bridge, storage } = loadBridge();
   storage.set("codex-mux.windows.plugin-account", "subscription-2");
@@ -274,6 +327,26 @@ test("Plugins RPC routing adds the selected account marker without touching unre
   assert.deepEqual({ ...scoped }, { codexMuxAccountId: "subscription-2", forceRefresh: true });
   assert.deepEqual(original, { forceRefresh: true }, "the native request object must not be mutated");
   assert.equal(bridge.scopePluginRequest("thread/list", original), original);
+});
+
+test("native Usage bridge reads the token-protected local payload and degrades to null", async () => {
+  const requests = [];
+  const { bridge } = loadBridge({
+    fetchImpl: async (url, options = {}) => {
+      requests.push({ url, options });
+      return { ok: true, json: async () => ({ usage: { rate_limit: { limit_reached: false } } }) };
+    },
+  });
+  const usage = await bridge.usageStatus();
+  assert.deepEqual({ ...usage }, { rate_limit: { limit_reached: false } });
+  assert.equal(requests.length, 1);
+  assert.match(requests[0].url, /\/v1\/usage$/);
+  assert.equal(requests[0].options.headers["X-Codex-Mux-Token"], "__CODEX_MUX_CONTROL_TOKEN__");
+
+  const failed = loadBridge({
+    fetchImpl: async () => ({ ok: false, json: async () => ({ error: "unavailable" }) }),
+  });
+  assert.equal(await failed.bridge.usageStatus(), null);
 });
 
 test("usage summary keeps known quota visible when another account has no quota data", () => {

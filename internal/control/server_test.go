@@ -51,3 +51,19 @@ func TestAccountManagementRoutesProtectPrimaryAndUnknownAccounts(t *testing.T) {
 		t.Fatalf("selecting unknown Primary returned %d, want 400: %s", primary.Code, primary.Body.String())
 	}
 }
+
+func TestUsageRouteRequiresRouterTokenAndGET(t *testing.T) {
+	server := testServer(t)
+
+	unauthorized := httptest.NewRecorder()
+	server.usage(unauthorized, httptest.NewRequest(http.MethodGet, "/v1/usage", nil))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized usage returned %d, want 401: %s", unauthorized.Code, unauthorized.Body.String())
+	}
+
+	wrongMethod := httptest.NewRecorder()
+	server.usage(wrongMethod, requestWithToken(http.MethodPost, "/v1/usage", nil))
+	if wrongMethod.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST usage returned %d, want 405: %s", wrongMethod.Code, wrongMethod.Body.String())
+	}
+}

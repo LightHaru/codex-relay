@@ -170,61 +170,6 @@ func TestRouteUrgencyFallsBackToWeeklyUtilization(t *testing.T) {
 	}
 }
 
-func TestControllerRouteReasonPrefersUsablePrimaryOverSecondaryQuota(t *testing.T) {
-	shortMinutes := int64(300)
-	weeklyMinutes := int64(10_080)
-	controller := state.Account{ID: "primary", Controller: true}
-	reason, ok := controllerRouteReason(controller, []AccountSnapshot{
-		{
-			ID: "primary", Controller: true, Enabled: true, Connected: true, AuthType: "chatgpt",
-			RateLimits: &RateLimits{
-				Primary:   &RateLimitWindow{UsedPercent: 85, WindowDurationMins: &shortMinutes},
-				Secondary: &RateLimitWindow{UsedPercent: 95, WindowDurationMins: &weeklyMinutes},
-			},
-		},
-		{
-			ID: "secondary", Enabled: true, Connected: true, AuthType: "chatgpt",
-			RateLimits: &RateLimits{
-				Primary:   &RateLimitWindow{UsedPercent: 1, WindowDurationMins: &shortMinutes},
-				Secondary: &RateLimitWindow{UsedPercent: 1, WindowDurationMins: &weeklyMinutes},
-			},
-		},
-	})
-	if !ok {
-		t.Fatal("usable primary was not selected")
-	}
-	if reason.WeeklyUsedPercent == nil || *reason.WeeklyUsedPercent != 95 {
-		t.Fatalf("controller route reason did not describe primary: %#v", reason)
-	}
-}
-
-func TestControllerRouteReasonFallsBackWhenPrimaryWindowIsDepleted(t *testing.T) {
-	shortMinutes := int64(300)
-	weeklyMinutes := int64(10_080)
-	controller := state.Account{ID: "primary", Controller: true}
-	for _, exhausted := range []struct {
-		name    string
-		primary float64
-		weekly  float64
-	}{
-		{name: "short window", primary: 100, weekly: 40},
-		{name: "weekly window", primary: 40, weekly: 100},
-	} {
-		t.Run(exhausted.name, func(t *testing.T) {
-			_, ok := controllerRouteReason(controller, []AccountSnapshot{{
-				ID: "primary", Controller: true, Enabled: true, Connected: true, AuthType: "chatgpt",
-				RateLimits: &RateLimits{
-					Primary:   &RateLimitWindow{UsedPercent: exhausted.primary, WindowDurationMins: &shortMinutes},
-					Secondary: &RateLimitWindow{UsedPercent: exhausted.weekly, WindowDurationMins: &weeklyMinutes},
-				},
-			}})
-			if ok {
-				t.Fatal("depleted primary was still considered routable")
-			}
-		})
-	}
-}
-
 func TestQuotaFallbackSelectsSecondaryWhenPrimaryHasNoCapacity(t *testing.T) {
 	root := t.TempDir()
 	store, err := state.Open(filepath.Join(root, "mux"), filepath.Join(root, "primary"))
@@ -267,5 +212,42 @@ func TestQuotaFallbackSelectsSecondaryWhenPrimaryHasNoCapacity(t *testing.T) {
 	}
 	if account.ID != secondary.ID {
 		t.Fatalf("fallback selected %q, want %q", account.ID, secondary.ID)
+	}
+}
+
+func TestFairShareDoesNotPreferUnknownQuotaOverKnownCapacity(t *testing.T) {
+	root := t.TempDir()
+	store, err := state.Open(filepath.Join(root, "mux"), filepath.Join(root, "primary"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondary, err := store.AddAccount("Subscription 2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	windowMinutes := int64(300)
+	multiplexer := &Multiplexer{
+		store:             store,
+		newThreadDispatch: make(map[string]uint64),
+	}
+	selected, _, err := multiplexer.chooseFairShareFromSnapshots([]AccountSnapshot{
+		{
+			ID: "primary", Controller: true, Enabled: true, Connected: true, AuthType: "chatgpt",
+			RateLimits: &RateLimits{
+				Primary: &RateLimitWindow{UsedPercent: 95, WindowDurationMins: &windowMinutes},
+			},
+		},
+		{
+			ID: secondary.ID, Enabled: true, Connected: true, AuthType: "chatgpt",
+			// A child that could not read its rate limits may still become a
+			// last-resort fallback, but it must not bypass known capacity.
+			RateLimitAvailable: false,
+		},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.ID != "primary" {
+		t.Fatalf("selected %q, want known-capacity primary", selected.ID)
 	}
 }

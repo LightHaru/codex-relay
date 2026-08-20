@@ -31,6 +31,7 @@ REQUIRED_FILES = (
     "docs/SMOKE-TEST.md",
     "cmd/router-updater/main.go",
     "cmd/router-updater/main_test.go",
+    "scripts/bootstrap_windows.ps1",
     "ui/windows-router-update-main.js",
     "ui/windows-router-update-preload.js",
     "ui/test-windows-router-update-main.cjs",
@@ -59,7 +60,7 @@ FORBIDDEN_TRACKED_SUFFIXES = {
     ".zip",
 }
 FORBIDDEN_TRACKED_NAMES = {".env", "auth.json", "control-token", "state.json"}
-TEXT_SUFFIXES = {"", ".c", ".go", ".json", ".js", ".cjs", ".md", ".py", ".toml", ".yml", ".yaml"}
+TEXT_SUFFIXES = {"", ".c", ".go", ".json", ".js", ".cjs", ".md", ".ps1", ".py", ".toml", ".yml", ".yaml"}
 MACOS_USER_PREFIX = "/" + "Users" + "/"
 
 
@@ -113,8 +114,12 @@ def main() -> int:
         fail(f"docs/COMPATIBILITY.md has no entry for {version}")
 
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
-    if "windows-update.json" not in workflow or "sourceSha256" not in workflow:
-        fail("release workflow does not publish the Windows update manifest")
+    if (
+        "windows-update.json" not in workflow
+        or "sourceSha256" not in workflow
+        or "install-codex-relay.ps1" not in workflow
+    ):
+        fail("release workflow does not publish the Windows update manifest and bootstrap")
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     if MACOS_USER_PREFIX in readme:

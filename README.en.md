@@ -8,8 +8,10 @@ Run eligible ChatGPT/Codex subscriptions through one independently patched
 desktop copy. The account found in the original Codex profile is selected as
 **Primary** on first launch, but Router stores that choice independently. You
 can select a different Primary in Router without changing the account selected
-by the original Codex app. Additional subscriptions are isolated and used only
-when Primary cannot accept more work.
+by the original Codex app. **Primary is a configuration/controller identity,
+not a routing lock:** new chats are shared fairly across every eligible account
+with capacity, while existing chats retain their assigned owner until failover
+is necessary.
 
 This repository is maintained at
 [LightHaru/codex-relay](https://github.com/LightHaru/codex-relay).
@@ -28,10 +30,11 @@ binaries or modify the official installed package.
 
 | Capability | Behavior |
 | --- | --- |
-| **Primary-first routing** | New chats use the controller/Primary account while it has usable capacity. |
+| **Fair-share routing** | New chats choose the least-pressured eligible subscription and alternate comparable capacity. |
 | **Isolated secondary subscriptions** | Every additional account has its own Codex home and credentials. |
 | **Sticky thread ownership** | Follow-up turns stay with the assigned account, preserving conversation context. |
 | **Quota-aware failover** | A depleted or unavailable owner can continue a thread through an eligible secondary account. |
+| **Exact-model capacity retry** | A transient selected-model capacity error retries the same turn and model, never silently changes the model. |
 | **Windows account management** | The profile menu can add, inspect, cancel, remove, and change the Primary subscription. |
 | **Account-aware settings** | Profile statistics, supported Plugin surfaces, and rate-limit resets can be selected per subscription. |
 
@@ -55,19 +58,25 @@ Independent Router copy
                               └── persistent thread ID → account owner
 ~~~
 
-### Primary-first and failover behavior
+### Fair-share, sticky threads, and failover
 
-1. **New chat:** Primary is selected whenever both its short and longer usage
-   windows have capacity.
-2. **Fallback:** only after Primary is unavailable or depleted does the Router
-   rank eligible secondary accounts using quota pressure, reset availability,
-   pinned-thread count, and stable ordering.
-3. **Follow-up:** the thread returns to its persisted owner; it is not moved
-   merely to balance load.
-4. **Failover:** the Router copies the local rollout history into the eligible
+1. **New chat:** Relay reads every connected account's short and longer quota
+   windows. It chooses the lower-utilization account; where accounts are
+   comparable, a small dispatch counter alternates new chats instead of always
+   taking the first account in state order.
+2. **Follow-up:** a known thread returns to its persisted owner; it is not
+   moved merely to balance load.
+3. **Old/unassigned chat:** Relay starts from Primary so its local history can
+   be read. If that account is depleted, the chat follows the same failover
+   path instead of surfacing Primary's quota error.
+4. **Failover:** Relay copies the local rollout history into the eligible
    account's isolated Codex home, resumes the same thread there, persists the
    new owner, and forwards the turn there. The source history remains intact.
-5. **All subscriptions depleted:** the app returns one combined quota alert
+5. **Selected model at capacity:** Relay retries the exact original `turn/start`
+   payload — including the selected model — up to three times with short
+   exponential backoff on the same account. It never changes the model or
+   consumes another subscription merely because that model is busy.
+6. **All subscriptions depleted:** the app returns one combined quota alert
    with the next known reset instead of repeatedly retrying an exhausted
    account.
 
@@ -106,7 +115,10 @@ limited to newly created chats. Open the old chat from the Router's sidebar and
 send the next message there. If its former owner is depleted, the Router copies
 that chat's local rollout file into the selected fallback account's isolated
 history store before continuing it. This preserves the original local history
-and makes subsequent turns use the fallback account.
+and makes subsequent turns use the fallback account. The same path covers an
+old chat that predates Relay and has no stored Router assignment: Relay begins
+at Primary so it can read the history, then moves it to an account with capacity
+instead of surfacing Primary's quota error.
 
 An already-sent turn in the separate Microsoft Store app cannot be intercepted:
 that app does not communicate with the Router. Keep it open if you wish, but
@@ -120,7 +132,7 @@ For protocol-level detail, read [Architecture](docs/ARCHITECTURE.md).
 | Platform | Current installation path | Verified upstream input |
 | --- | --- | --- |
 | **macOS, Apple silicon** | Existing signed independent-app workflow | ChatGPT `26.803.61601`, bundle build `6396` |
-| **Windows x64 (preview)** | Local-checkout, double-click installer | Store packages `26.810.7004.0` and `26.818.2441.0` (both have reviewed renderer profiles) |
+| **Windows x64 (preview)** | One-command bootstrap or local checkout | Store packages `26.810.7004.0` and `26.818.2441.0` (both have reviewed renderer profiles) |
 
 The patchers are deliberately fail-closed. They verify the official bundle
 version/hash and exact renderer and binary anchors before activation. An
@@ -128,13 +140,31 @@ unreviewed upstream update stops the build rather than applying a partial
 rewrite. See [Compatibility](docs/COMPATIBILITY.md) for exact hashes and
 reviewed versions.
 
-## Windows x64: local one-click installer
+## Windows x64: one-command installer
 
 ### Scope
 
-The Windows installer is a **double-click installer from this source
-checkout**. It is **not** a standalone `Setup.exe`, does not bundle
-Node/Go/Python, and does not redistribute the official Store application.
+The Windows installer has a **one-command bootstrap** for users who already
+have the prerequisites. It downloads the latest GitHub Release manifest,
+validates the exact expected source-asset URL and SHA-256, then runs the same
+reviewed local installer from that source. It is **not** a standalone
+`Setup.exe`, does not bundle Node/Go/Python, and does not redistribute the
+official Store application.
+
+Run this in a normal PowerShell window after reviewing the linked release:
+
+~~~powershell
+irm https://github.com/LightHaru/codex-relay/releases/latest/download/install-codex-relay.ps1 | iex
+~~~
+
+No `git clone` is required. The verified source is retained under
+`%LOCALAPPDATA%\Codex Relay Bootstrap\...` for inspection, the Desktop
+shortcut is repaired, and Relay opens when installation completes. Only run
+this line from the official
+[LightHaru/codex-relay release](https://github.com/LightHaru/codex-relay/releases).
+
+The checkout/double-click path remains available for contributors or users who
+prefer to inspect and run the source locally:
 
 Once the checkout is available, double-click:
 
@@ -162,13 +192,14 @@ The installer:
 - Python 3;
 - Go 1.26 or newer;
 - Node.js 22.12+ and npm;
-- this source checkout.
+- Internet access to download the locked ASAR tool and, for the bootstrap, the
+  verified release source.
 
 If `node_modules` is absent, the installer obtains the locked ASAR build tool
 using `npm ci --ignore-scripts`. It does not automatically install Python, Go,
 or Node, and it never silently bypasses an unreviewed Store hash.
 
-### Install from a checkout
+### Install from a checkout instead
 
 ~~~powershell
 git clone https://github.com/LightHaru/codex-relay.git
@@ -196,7 +227,7 @@ py -3 scripts/patch_windows.py --force --launch
 
 ### Migration from Codex Subscription Router 0.2.x
 
-No account needs to be added again. A `v0.3.0` install stages Relay first,
+No account needs to be added again. A Relay install stages the new copy first,
 stops only the former managed Router directory, and moves that old app copy to
 `%USERPROFILE%\.codex-mux\backups\...` before starting
 `%LOCALAPPDATA%\Codex Relay\app`. Account state, assigned-thread metadata,
@@ -237,8 +268,8 @@ same setup error can then block both new chats and existing chats.
 The Windows Router forces `unelevated` only for Router-owned processes and
 secondary account homes. It does not edit, delete, or log out the native
 `%USERPROFILE%\.codex` home, so the Microsoft Store Codex app keeps its own
-configuration. After upgrading, close and reopen the **Codex Subscription
-Router** shortcut once. If an old dialog remains, run the checkout installer
+configuration. After upgrading, close and reopen the **Codex Relay** shortcut
+once. If an old dialog remains, run the one-command bootstrap or checkout installer
 again so it replaces the Router wrapper, then launch the Router again.
 
 ## macOS Apple silicon
@@ -357,6 +388,16 @@ The native rate-limit sheet includes an account picker. Selecting a
 subscription changes the displayed usage/reset balance and ensures a consumed
 reset applies only to that account.
 
+### Settings → Usage
+
+The native Settings Usage page remains an account-scoped billing surface.
+Relay proxies the native payload for the controller account through its
+token-protected loopback service (with an enabled-account fallback only when
+that credential is unavailable), so the renderer does not rely on the Microsoft
+Store app browser session and avoids the generic **“Oops, an error has
+occurred”** page. OAuth tokens never reach the renderer. Use the Relay profile
+menu's **Usage remaining** summary for the aggregate subscription pool.
+
 ## Local data and safety
 
 | Location | Purpose |
@@ -395,7 +436,7 @@ checkout:
 
 | Platform | Rebuild action |
 | --- | --- |
-| Windows | Double-click `Install Codex Relay.cmd` again, or run `py -3 scripts/patch_windows.py --force --launch` |
+| Windows | Use the in-app **Update now** banner when present; after an official Store update, rerun the one-command bootstrap or double-click `Install Codex Relay.cmd` |
 | macOS | Run `./install.sh` from the checkout, or `python3 scripts/patch_app.py --force` |
 
 Unknown official bundles and changed renderer anchors fail closed. Preserve the

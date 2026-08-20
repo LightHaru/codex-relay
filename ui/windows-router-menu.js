@@ -161,6 +161,20 @@
     }
   }
 
+  // Settings -> Usage normally reads the Store app's browser session. Relay
+  // subscriptions intentionally use isolated Codex homes instead, so ask the
+  // local Router for the same native usage payload. Returning null on a local
+  // failure lets the version-pinned renderer patch fall back to its normal
+  // request instead of turning the entire Settings page into an error screen.
+  async function nativeUsageStatus() {
+    try {
+      const result = await request("/usage");
+      return result && typeof result.usage === "object" ? result.usage : null;
+    } catch {
+      return null;
+    }
+  }
+
   function rateLimitResets(accountId) {
     return request(`/accounts/${encodeURIComponent(accountId)}/rate-limit-resets`);
   }
@@ -1406,6 +1420,7 @@
     scopePluginRequest,
     selectedResetUsageWindows,
     subscribeReset,
+    usageStatus: nativeUsageStatus,
   };
   registerSurfaceElements();
 

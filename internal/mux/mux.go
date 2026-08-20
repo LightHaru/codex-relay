@@ -31,10 +31,11 @@ type Options struct {
 }
 
 type externalRoute struct {
-	accountID string
-	method    string
-	message   protocol.Message
-	excluded  map[string]struct{}
+	accountID       string
+	method          string
+	message         protocol.Message
+	excluded        map[string]struct{}
+	capacityRetries int
 }
 
 type serverRequestRoute struct {
@@ -77,6 +78,12 @@ type Multiplexer struct {
 	serverMu       sync.Mutex
 	serverRoutes   map[string]serverRequestRoute
 	serverSequence atomic.Uint64
+	// allocationMu protects the per-account dispatch counters used by the
+	// fair-share selector for new chats. A counter is only a tie-breaker: live
+	// quota percentages remain the primary signal, while the counter prevents
+	// equal-quota subscriptions from always receiving the first request.
+	allocationMu      sync.Mutex
+	newThreadDispatch map[string]uint64
 
 	outputMu sync.Mutex
 	eventsMu sync.RWMutex
@@ -85,6 +92,7 @@ type Multiplexer struct {
 	profileMu     sync.Mutex
 	profileClient *http.Client
 	profileCache  map[string]profileCacheEntry
+	usageEndpoint string
 	now           func() time.Time
 
 	resetCreditsMu       sync.Mutex
@@ -113,9 +121,11 @@ func New(options Options) (*Multiplexer, error) {
 		cancelling:           make(map[string]struct{}),
 		externalRoutes:       make(map[string]externalRoute),
 		serverRoutes:         make(map[string]serverRequestRoute),
+		newThreadDispatch:    make(map[string]uint64),
 		events:               make(map[chan Event]struct{}),
 		profileClient:        &http.Client{Timeout: 10 * time.Second},
 		profileCache:         make(map[string]profileCacheEntry),
+		usageEndpoint:        usageStatusURL,
 		now:                  time.Now,
 		resetCreditsCache:    make(map[string]resetCreditsCacheEntry),
 		resetCreditsEndpoint: rateLimitResetCreditsURL,
@@ -336,6 +346,19 @@ func (m *Multiplexer) forward(accountID string, message protocol.Message) error 
 }
 
 func (m *Multiplexer) forwardWithExclusions(accountID string, message protocol.Message, excluded map[string]struct{}) error {
+	return m.forwardRoute(accountID, message, excluded, 0)
+}
+
+// forwardRoute registers an external request before sending it to a child.
+// capacityRetries is carried with the route so a transient model-capacity
+// response can be retried without changing the original request payload or
+// accidentally creating an unbounded retry loop.
+func (m *Multiplexer) forwardRoute(
+	accountID string,
+	message protocol.Message,
+	excluded map[string]struct{},
+	capacityRetries int,
+) error {
 	child, ok := m.child(accountID)
 	if !ok {
 		return fmt.Errorf("account %s is unavailable", accountID)
@@ -343,10 +366,11 @@ func (m *Multiplexer) forwardWithExclusions(accountID string, message protocol.M
 	key := protocol.RequestIDKey(message.ID)
 	m.externalMu.Lock()
 	m.externalRoutes[key] = externalRoute{
-		accountID: accountID,
-		method:    message.Method,
-		message:   message,
-		excluded:  cloneAccountSet(excluded),
+		accountID:       accountID,
+		method:          message.Method,
+		message:         message,
+		excluded:        cloneAccountSet(excluded),
+		capacityRetries: capacityRetries,
 	}
 	m.externalMu.Unlock()
 	if err := child.Send(message); err != nil {
@@ -514,6 +538,14 @@ func (m *Multiplexer) handleInbound(inbound backend.Inbound) {
 		}
 		m.externalMu.Unlock()
 		if ok {
+			// Model capacity is transient and is independent from subscription
+			// quota. Retry the exact same request on the same account first; do
+			// not silently substitute a different model or consume another
+			// subscription while the selected model is merely busy.
+			if route.method == "turn/start" && isModelCapacityResponse(message) {
+				go m.retryTurnAfterModelCapacity(route, route.accountID, inbound.Raw)
+				return
+			}
 			if route.method == "turn/start" && isUsageLimitResponse(message) {
 				go m.retryTurnAfterUsageLimit(route, inbound.AccountID)
 				return
@@ -543,6 +575,33 @@ func (m *Multiplexer) handleInbound(inbound backend.Inbound) {
 	}
 	if m.shouldForwardNotification(inbound.AccountID, message.Method) {
 		m.writeRaw(inbound.Raw)
+	}
+}
+
+const (
+	maxModelCapacityRetries = 3
+	modelCapacityRetryBase  = 750 * time.Millisecond
+)
+
+// retryTurnAfterModelCapacity retries a transient "model at capacity" error
+// with the original turn/start message. The backoff is deliberately short
+// enough for an interactive chat while the cap guarantees that a persistently
+// unavailable model returns the upstream error instead of hanging forever.
+func (m *Multiplexer) retryTurnAfterModelCapacity(
+	route externalRoute,
+	accountID string,
+	failureRaw []byte,
+) {
+	if route.capacityRetries >= maxModelCapacityRetries {
+		m.writeRaw(failureRaw)
+		return
+	}
+	backoff := modelCapacityRetryBase * time.Duration(1<<route.capacityRetries)
+	timer := time.NewTimer(backoff)
+	defer timer.Stop()
+	<-timer.C
+	if err := m.forwardRoute(accountID, route.message, route.excluded, route.capacityRetries+1); err != nil {
+		m.write(protocol.Failure(route.message.ID, -32023, fmt.Sprintf("retry selected model: %v", err)))
 	}
 }
 
@@ -734,6 +793,10 @@ func (m *Multiplexer) purgeAccountReferences(accountID string) {
 	delete(m.resetPreviews, accountID)
 	m.resetPreviewMu.Unlock()
 
+	m.allocationMu.Lock()
+	delete(m.newThreadDispatch, accountID)
+	m.allocationMu.Unlock()
+
 	m.previewMu.Lock()
 	if m.rateLimitPreview != nil && m.rateLimitPreview.AccountID == accountID {
 		m.rateLimitPreview = nil
@@ -889,6 +952,23 @@ func isUsageLimitResponse(message protocol.Message) bool {
 		strings.Contains(text, "rate_limit") ||
 		strings.Contains(text, "rate limit") ||
 		strings.Contains(text, "quota")
+}
+
+// isModelCapacityResponse recognizes the stable upstream wording and its
+// machine-readable variants without treating every generic "capacity" error
+// as a reason to retry. The request's model is never inspected or changed;
+// this predicate only decides whether the same payload should be attempted
+// again.
+func isModelCapacityResponse(message protocol.Message) bool {
+	if message.Error == nil {
+		return false
+	}
+	text := strings.ToLower(message.Error.Message + " " + string(message.Error.Data))
+	normalized := strings.Join(strings.Fields(text), " ")
+	return strings.Contains(normalized, "selected model is at capacity") ||
+		strings.Contains(normalized, "model is at capacity") ||
+		strings.Contains(text, "model_at_capacity") ||
+		strings.Contains(text, "model_capacity")
 }
 
 func (m *Multiplexer) allSubscriptionsDepleted(ctx context.Context, id json.RawMessage) protocol.Message {

@@ -29,6 +29,36 @@ func TestIsUsageLimitResponseIgnoresUnrelatedError(t *testing.T) {
 	}
 }
 
+func TestIsModelCapacityResponseRecognizesSelectedModelMessage(t *testing.T) {
+	message := protocol.Message{Error: &protocol.RPCError{
+		Code:    -32000,
+		Message: "Selected model is at capacity. Please try a different model.",
+	}}
+	if !isModelCapacityResponse(message) {
+		t.Fatal("expected selected-model capacity error to be recognized")
+	}
+}
+
+func TestIsModelCapacityResponseRecognizesStructuredCode(t *testing.T) {
+	message := protocol.Message{Error: &protocol.RPCError{
+		Code: -32000,
+		Data: json.RawMessage(`{"code":"model_at_capacity"}`),
+	}}
+	if !isModelCapacityResponse(message) {
+		t.Fatal("expected model_at_capacity code to be recognized")
+	}
+}
+
+func TestIsModelCapacityResponseIgnoresUnrelatedCapacity(t *testing.T) {
+	message := protocol.Message{Error: &protocol.RPCError{
+		Code:    -32000,
+		Message: "Workspace capacity is unavailable",
+	}}
+	if isModelCapacityResponse(message) {
+		t.Fatal("unrelated capacity error was misclassified")
+	}
+}
+
 func TestAllSubscriptionsDepletedUsesActionableMessage(t *testing.T) {
 	message := allSubscriptionsDepleted(json.RawMessage(`7`), nil)
 	if message.Error == nil || message.Error.Code != -32026 {

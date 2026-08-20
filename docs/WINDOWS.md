@@ -8,14 +8,27 @@ the same per-account Codex app-server multiplexer used by the macOS build.
 
 It injects a small DOM bridge into the copied renderer for the profile menu
 and signs-in, then applies narrowly version-pinned patches to the reviewed
-Windows renderer build for Profile statistics, Plugins account scope, and the
-native rate-limit reset sheet. The patcher checks every renderer anchor exactly
-once; an unfamiliar Microsoft Store update stops instead of applying a rewrite
-to an unknown bundle.
+Windows renderer build for Profile statistics, Plugins account scope, the
+native rate-limit reset sheet, and the native Settings Usage query. The patcher
+checks every renderer anchor exactly once; an unfamiliar Microsoft Store update
+stops instead of applying a rewrite to an unknown bundle.
 
 ## Install
 
-For the local checkout, double-click:
+For a normal user who already has the prerequisites, run this one line in a
+normal PowerShell window after reviewing the official release:
+
+```powershell
+irm https://github.com/LightHaru/codex-relay/releases/latest/download/install-codex-relay.ps1 | iex
+```
+
+The bootstrap downloads the latest GitHub Release manifest, validates the
+expected source asset URL and SHA-256, rejects unsafe archive paths, retains
+the verified source under `%LOCALAPPDATA%\Codex Relay Bootstrap\...`, and then
+runs the same local installer below. It does not require `git clone` and does
+not modify the Microsoft Store app.
+
+For a local checkout instead, double-click:
 
 `Install Codex Relay.cmd`
 
@@ -26,9 +39,11 @@ Router when successful. It does **not** close, modify, or replace the Microsoft
 Store app.
 
 This is a local-source installer, not a standalone redistributable `.exe`.
-Windows x64, the Microsoft Store ChatGPT/Codex package, Python 3, Go, and Node
-are still required. If the checked-out `node_modules` directory is missing, the
-installer runs lockfile-resolved `npm ci --ignore-scripts` before patching.
+Windows x64, the Microsoft Store ChatGPT/Codex package, Python 3, Go 1.26+, and
+Node.js 22.12+/npm are still required. The bootstrap checks these prerequisites
+before making any Router change. If the checked-out `node_modules` directory is
+missing, the installer runs lockfile-resolved `npm ci --ignore-scripts` before
+patching.
 
 It supports every Store build whose exact `app.asar` profile is recorded in
 `scripts/patch_windows.py`. The current profiles include the older
@@ -135,6 +150,30 @@ Relay deliberately uses the existing profile rather than moving it during an
 update. This preserves browser/session history. A user may remove an old
 desktop shortcut or backup only after confirming Relay works normally.
 
+## Quota routing and model-capacity retry
+
+Primary is the stored Router controller and the source of shared configuration;
+it is **not** a "new chats only use Primary" lock. For a new `thread/start`,
+Relay reads the short and longer usage windows from every enabled, connected
+subscription, excludes every depleted account, and selects the least-used
+eligible account. A small per-account dispatch counter breaks ties so accounts
+with comparable quota alternate instead of permanently favoring the first one.
+
+Once a chat has an owner, its follow-up turns remain sticky for context. If the
+owner is depleted, Relay copies only that local rollout history into a target
+account's isolated `sessions` directory, resumes the same thread, persists the
+new owner, and forwards the turn. A chat that existed before Relay has no
+stored owner; it starts at Primary so its history can be read, but follows this
+same failover path when Primary has no quota.
+
+`Selected model is at capacity. Please try a different model.` is treated as a
+transient model-capacity condition, not a quota failure. Relay retries the
+exact original `turn/start` payload — including its selected model — up to
+three times with short exponential backoff on the same account. It never
+silently changes the model or shifts the request to another subscription for
+that error. A true upstream quota/rate-limit response still uses the normal
+thread failover path.
+
 ## Account management in the app
 
 Start the copied app with the Desktop shortcut (or the generated `.cmd`
@@ -199,12 +238,14 @@ is not required to add or sign in to an account.
 ## Continuing existing chats through the Router
 
 The Router includes existing local chats from the Primary account and each
-connected secondary in its sidebar. Select the old chat in the **Codex
-Subscription Router** window and send the next message there. If the current
-owner has exhausted quota, the Router copies that chat's local rollout history
-into the fallback account's isolated `sessions` directory, resumes the same
-thread ID there, and then forwards the turn. The source account's history file
-is left unchanged.
+connected secondary in its sidebar. Select the old chat in the **Codex Relay**
+window and send the next message there. If the current owner has exhausted
+quota, the Router copies that chat's local rollout history into the fallback
+account's isolated `sessions` directory, resumes the same thread ID there, and
+then forwards the turn. The source account's history file is left unchanged.
+This also covers a legacy chat with no stored Router owner: Relay begins at
+Primary to read history, then fails over instead of showing Primary's depleted
+quota error.
 
 This does not intercept messages sent in the separate Microsoft Store app. It
 is safe to keep the Store app open, but the message that should be quota-routed
@@ -219,12 +260,19 @@ macOS build for the following surfaces:
 | --- | --- |
 | **Settings → Profile** | Starts with combined statistics and overlapping connected-account photos. Select a photo to reload that subscription's identity/statistics; select it again to return to the combined view. |
 | **Settings → Plugins** | Shows a subscription picker. Plugin definitions and managed MCP configuration remain shared, while Apps, connection status, and OAuth RPCs are sent with the selected account scope. |
-| **Usage / rate-limit resets** | Adds a subscription picker to the native sheet. It changes the displayed usage windows and fetches/consumes reset credits only for that account. |
+| **Usage / rate-limit resets** | Adds a subscription picker to the native reset sheet. It changes the displayed reset windows and fetches/consumes credits only for that account. |
+| **Settings → Usage** | Reads the normal native Usage payload through Relay's token-protected local proxy for the controller account, with a connected-account fallback if that credential is unavailable. This avoids an unrelated Store browser session producing the generic “Oops” page. |
 
 The menu's **Usage remaining** number is the sum of valid windows returned by
 connected accounts. If one account's quota endpoint is temporarily unavailable,
 the known total remains visible and the affected account is marked as updating;
 Router never invents a zero/100% value from missing data.
+
+The Settings Usage proxy returns only the normal Usage JSON that the native
+page expects. It reads an isolated `auth.json` only in the Router process; no
+OAuth access token or local control token is exposed to renderer JavaScript.
+If the local request cannot complete, the version-pinned patch falls back to
+the native request instead of replacing the entire page with an error.
 
 Every Router account row uses the ChatGPT profile display name (then username
 or email as a fallback), the Router label, and the plan label so subscriptions

@@ -21,6 +21,10 @@ const (
 	routingMinimumWindow       = time.Minute
 	routingResetBonusPerCredit = 0.15
 	routingResetBonusCreditCap = 3
+	// A dispatch count is only a tie-breaker for equal/near-equal live quota.
+	// It keeps a subscription pool balanced while still preferring an account
+	// whose reported usage is materially lower.
+	fairShareDispatchPenalty = 2.0
 )
 
 type RateLimitWindow struct {
@@ -69,6 +73,8 @@ type RouteReason struct {
 	BankedResetCount     *int     `json:"bankedResetCount,omitempty"`
 	ResetCreditExpiresAt *int64   `json:"resetCreditExpiresAt,omitempty"`
 	UrgencyScore         *float64 `json:"urgencyScore,omitempty"`
+	FairShareScore       *float64 `json:"fairShareScore,omitempty"`
+	NewThreadDispatches  uint64   `json:"newThreadDispatches,omitempty"`
 	ThreadCount          int      `json:"threadCount"`
 }
 
@@ -505,20 +511,104 @@ func earliestRateLimitResetAt(limits *RateLimits) *int64 {
 
 func (m *Multiplexer) chooseAccount(ctx context.Context) (state.Account, RouteReason, error) {
 	snapshots := m.accountSnapshots(ctx, false)
-	if controller, ok := m.store.Controller(); ok {
-		if reason, available := controllerRouteReason(controller, snapshots); available {
-			// The controller identity is intentionally the default owner for
-			// new chats. Additional subscriptions remain a quota/failover pool
-			// until Primary is depleted or unavailable.
-			return controller, reason, nil
-		}
-	}
-	return m.chooseAccountFromSnapshots(ctx, snapshots, nil)
+	return m.chooseFairShareFromSnapshots(snapshots, nil)
 }
 
 func (m *Multiplexer) chooseAccountExcluding(ctx context.Context, excluded map[string]struct{}) (state.Account, RouteReason, error) {
 	snapshots := m.accountSnapshots(ctx, false)
 	return m.chooseAccountFromSnapshots(ctx, snapshots, excluded)
+}
+
+// chooseFairShareFromSnapshots selects a new-chat owner from every connected
+// subscription with remaining quota. Live usage is the primary score (the
+// stricter of the reported windows); a small per-account dispatch penalty then
+// breaks ties so equal-quota accounts alternate instead of always selecting
+// the first account in state order. Existing chats do not use this function:
+// their persisted owner remains sticky until an actual quota failure triggers
+// the normal failover path.
+func (m *Multiplexer) chooseFairShareFromSnapshots(
+	snapshots []AccountSnapshot,
+	excluded map[string]struct{},
+) (state.Account, RouteReason, error) {
+	type candidate struct {
+		account       state.Account
+		reason        RouteReason
+		usageScore    float64
+		dispatchCount uint64
+	}
+	candidates := make([]candidate, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		if _, skip := excluded[snapshot.ID]; skip || !accountHasCapacity(snapshot) {
+			continue
+		}
+		account, ok := m.store.Account(snapshot.ID)
+		if !ok {
+			continue
+		}
+		// A subscription whose quota cannot be read remains usable as a
+		// last-resort failover. It must not outrank any account whose known
+		// windows still have capacity, however, because that would turn an
+		// observability gap into an avoidable quota error.
+		usageScore := 100.0
+		if snapshot.RateLimits != nil {
+			usageScore = 0
+			knownWindow := false
+			for _, window := range []*RateLimitWindow{
+				snapshot.RateLimits.Primary,
+				snapshot.RateLimits.Secondary,
+			} {
+				if window == nil {
+					continue
+				}
+				knownWindow = true
+				if value := math.Max(0, math.Min(100, window.UsedPercent)); value > usageScore {
+					usageScore = value
+				}
+			}
+			if !knownWindow {
+				usageScore = 100
+			}
+		}
+		reason := routeReasonForSnapshot(snapshot)
+		candidates = append(candidates, candidate{
+			account: account, reason: reason, usageScore: usageScore,
+		})
+	}
+	if len(candidates) == 0 {
+		return state.Account{}, RouteReason{}, errNoSubscriptionCapacity
+	}
+
+	// Read and increment counters under one lock so two simultaneous new-chat
+	// requests cannot both observe the same tie-break value.
+	m.allocationMu.Lock()
+	defer m.allocationMu.Unlock()
+	for index := range candidates {
+		candidates[index].dispatchCount = m.newThreadDispatch[candidates[index].account.ID]
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left, right := candidates[i], candidates[j]
+		leftScore := left.usageScore + float64(left.dispatchCount)*fairShareDispatchPenalty
+		rightScore := right.usageScore + float64(right.dispatchCount)*fairShareDispatchPenalty
+		if math.Abs(leftScore-rightScore) > 0.001 {
+			return leftScore < rightScore
+		}
+		if math.Abs(left.usageScore-right.usageScore) > 0.001 {
+			return left.usageScore < right.usageScore
+		}
+		if left.dispatchCount != right.dispatchCount {
+			return left.dispatchCount < right.dispatchCount
+		}
+		if left.reason.ThreadCount != right.reason.ThreadCount {
+			return left.reason.ThreadCount < right.reason.ThreadCount
+		}
+		return left.account.CreatedAt < right.account.CreatedAt
+	})
+	selected := &candidates[0]
+	m.newThreadDispatch[selected.account.ID]++
+	score := selected.usageScore + float64(selected.dispatchCount)*fairShareDispatchPenalty
+	selected.reason.FairShareScore = &score
+	selected.reason.NewThreadDispatches = selected.dispatchCount + 1
+	return selected.account, selected.reason, nil
 }
 
 func (m *Multiplexer) chooseAccountFromSnapshots(ctx context.Context, snapshots []AccountSnapshot, excluded map[string]struct{}) (state.Account, RouteReason, error) {
@@ -618,19 +708,6 @@ collectResetCredits:
 		return left.account.CreatedAt < right.account.CreatedAt
 	})
 	return candidates[0].account, candidates[0].reason, nil
-}
-
-// controllerRouteReason selects the configured controller only while its
-// actual account snapshot remains usable. It is kept separate from the
-// quota-aware fallback selector so the primary-first policy is easy to test
-// without changing how secondaries are ranked after a failover.
-func controllerRouteReason(controller state.Account, snapshots []AccountSnapshot) (RouteReason, bool) {
-	for _, snapshot := range snapshots {
-		if snapshot.ID == controller.ID && accountHasCapacity(snapshot) {
-			return routeReasonForSnapshot(snapshot), true
-		}
-	}
-	return RouteReason{}, false
 }
 
 func routeReasonForSnapshot(snapshot AccountSnapshot) RouteReason {

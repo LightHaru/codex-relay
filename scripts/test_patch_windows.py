@@ -38,6 +38,8 @@ from patch_windows import (
     SELECTED_USAGE_ANCHOR,
     SELECTED_USAGE_REPLACEMENT,
     STOP_ROUTER_PROCESSES_SCRIPT,
+    USAGE_STATUS_ANCHOR,
+    USAGE_STATUS_REPLACEMENT,
     WINDOWS_RENDERER_PROFILES,
     default_destination,
     default_source,
@@ -60,6 +62,7 @@ class WindowsRendererPatchTests(unittest.TestCase):
     def make_renderer(self, root: Path, profile=None) -> Path:
         profile = profile or {
             "profile_query_anchor": PROFILE_QUERY_ANCHOR,
+            "usage_status_anchor": USAGE_STATUS_ANCHOR,
             "plugin_request_anchor": PLUGIN_REQUEST_ANCHOR,
             "reset_query_anchor": RESET_QUERY_ANCHOR,
             "reset_mutation_anchor": RESET_MUTATION_ANCHOR,
@@ -74,6 +77,7 @@ class WindowsRendererPatchTests(unittest.TestCase):
             "\n".join(
                 (
                     profile["profile_query_anchor"],
+                    profile["usage_status_anchor"],
                     profile["plugin_request_anchor"],
                     profile["reset_query_anchor"],
                     profile["reset_mutation_anchor"],
@@ -94,6 +98,7 @@ class WindowsRendererPatchTests(unittest.TestCase):
     def assert_replacements(self, assets: Path, profile=None) -> None:
         expected = profile or {
             "profile_query_replacement": PROFILE_QUERY_REPLACEMENT,
+            "usage_status_replacement": USAGE_STATUS_REPLACEMENT,
             "plugin_request_replacement": PLUGIN_REQUEST_REPLACEMENT,
             "reset_query_replacement": RESET_QUERY_REPLACEMENT,
             "reset_mutation_replacement": RESET_MUTATION_REPLACEMENT,
@@ -107,6 +112,7 @@ class WindowsRendererPatchTests(unittest.TestCase):
         plugins = next(assets.glob("plugins-settings-*.js")).read_text(encoding="utf-8")
         for replacement in (
             expected["profile_query_replacement"],
+            expected["usage_status_replacement"],
             expected["plugin_request_replacement"],
             expected["reset_query_replacement"],
             expected["reset_mutation_replacement"],
@@ -193,6 +199,8 @@ class WindowsRendererPatchTests(unittest.TestCase):
         menu = (ROOT / "ui" / "windows-router-menu.js").read_text(encoding="utf-8")
         self.assertIn("codexMuxLoginWindow", menu)
         self.assertIn("codexMuxUpdater", menu)
+        self.assertIn("async function nativeUsageStatus", menu)
+        self.assertIn('request("/usage")', menu)
         self.assertIn("Update now", menu)
         self.assertIn("fresh temporary browser session", menu)
         self.assertIn("await showBrowserLogin", menu)
@@ -329,6 +337,40 @@ class WindowsRendererPatchTests(unittest.TestCase):
         self.assertIn("'--force', '--launch'", powershell)
         self.assertIn("Get-Command py.exe", powershell)
         self.assertIn("never targets", powershell)
+
+    def test_one_line_bootstrap_verifies_the_release_before_installing(self) -> None:
+        bootstrap = (ROOT / "scripts" / "bootstrap_windows.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("windows-update.json", bootstrap)
+        self.assertIn("sourceSha256", bootstrap)
+        self.assertIn("Get-FileHash", bootstrap)
+        self.assertIn("Assert-SafeArchive", bootstrap)
+        self.assertIn("scripts\\install_windows.ps1", bootstrap)
+        self.assertIn("Codex Relay Bootstrap", bootstrap)
+        self.assertNotIn("Start-Process", bootstrap)
+        powershell = shutil.which("powershell.exe") or shutil.which("pwsh")
+        if powershell is None:
+            self.skipTest("PowerShell is not available on this host")
+        bootstrap_path = str(ROOT / "scripts" / "bootstrap_windows.ps1").replace(
+            "'", "''"
+        )
+        completed = subprocess.run(
+            [
+                powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[scriptblock]::Create((Get-Content -Raw -LiteralPath '"
+                + bootstrap_path
+                + "')) | Out-Null",
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_legacy_profile_is_preserved_during_the_brand_migration(self) -> None:
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(

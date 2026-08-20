@@ -29,6 +29,7 @@ func New(address, token string, multiplexer *mux.Multiplexer, uiTests bool) *Ser
 	router.HandleFunc("/v1/accounts/", server.accountAction)
 	router.HandleFunc("/v1/thread-account", server.threadAccount)
 	router.HandleFunc("/v1/profile/combined", server.combinedProfile)
+	router.HandleFunc("/v1/usage", server.usage)
 	router.HandleFunc("/v1/events", server.events)
 	if uiTests {
 		router.HandleFunc("/v1/test/rate-limits", server.rateLimitPreview)
@@ -68,6 +69,28 @@ func (s *Server) combinedProfile(response http.ResponseWriter, request *http.Req
 		return
 	}
 	writeJSON(response, http.StatusOK, profile)
+}
+
+// usage proxies the native account Usage payload through the local Router
+// process. The renderer receives only the normal JSON response; access tokens
+// remain inside each isolated Codex home and never cross this control API.
+func (s *Server) usage(response http.ResponseWriter, request *http.Request) {
+	if !s.authorized(request) {
+		writeJSON(response, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if request.Method != http.MethodGet {
+		methodNotAllowed(response)
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 20*time.Second)
+	defer cancel()
+	usage, err := s.mux.UsageStatus(ctx)
+	if err != nil {
+		writeJSON(response, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]json.RawMessage{"usage": usage})
 }
 
 func (s *Server) resetCreditsPreview(response http.ResponseWriter, request *http.Request) {

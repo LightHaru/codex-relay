@@ -3,6 +3,34 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/) and
 this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-08-20
+
+### Added
+
+- Fair-share selection for new chats across all enabled, connected
+  subscriptions with capacity. The selector favors lower current quota use and
+  alternates comparable accounts instead of locking new work to Primary.
+- Sticky quota failover coverage for chats created before Relay: an unassigned
+  old chat starts at Primary to read history, then migrates to an account with
+  capacity instead of returning Primary's depleted-quota error.
+- Bounded same-account retries for `Selected model is at capacity` that retain
+  the exact original selected model and request payload.
+- A token-protected Settings → Usage proxy that reads the normal native usage
+  payload with isolated account credentials, avoiding a mismatched Store browser
+  session; the renderer falls back safely to its native request if unavailable.
+- A reviewed one-command Windows bootstrap asset. It validates the published
+  source archive URL, SHA-256, and archive paths before running the existing
+  staged local installer.
+
+### Changed
+
+- The Windows renderer patcher now requires one additional exact Usage anchor
+  for each supported Store `app.asar` profile and fails closed if it changes.
+- Updated Vietnamese and English user documentation, Windows deployment notes,
+  release instructions, and contributor policy for fair-share routing, old
+  chat failover, exact-model retry, Usage recovery, and the one-command first
+  install.
+
 ## [0.3.0] - 2026-08-20
 
 ### Changed
@@ -64,7 +92,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 - Loopback-only, token-authenticated diagnostic UI states.
 - Source-only CI, draft release automation, security documentation, and smoke tests.
 
-[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.1
 [0.3.0]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.0
 [0.2.0]: https://github.com/LightHaru/codex-relay/releases/tag/v0.2.0
 [0.1.0]: https://github.com/LightHaru/codex-relay/releases/tag/v0.1.0

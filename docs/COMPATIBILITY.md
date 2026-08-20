@@ -4,6 +4,21 @@ The patcher is intentionally tied to known ChatGPT desktop bundle structures.
 It verifies every modified renderer, main-process, and native binary anchor and
 stops instead of applying a partial patch.
 
+## Release 0.3.1
+
+This release keeps both reviewed Windows Store `app.asar` profiles and adds one
+exact-one renderer anchor per profile for the native Settings → Usage query.
+The patch calls a local, token-protected Relay bridge first and falls back to
+the original renderer request only when that bridge cannot return a payload.
+The Release test suite exercises the exact current Store renderer in a temporary
+extraction before publication.
+
+It also changes new-thread routing from Primary-first to quota fair-share,
+preserves sticky/failover behavior for old and assigned chats, and recognizes
+the selected-model capacity response for an exact-model same-account retry.
+These mux changes are independent of the upstream renderer profile and are
+covered by deterministic local JSON-RPC integration tests.
+
 ## Release 0.3.0
 
 This release changes the public product name to **Codex Relay**. It retains the

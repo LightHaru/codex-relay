@@ -6,8 +6,10 @@ Codex Relay cho phép dùng nhiều gói ChatGPT/Codex hợp lệ trong
 một ứng dụng Router riêng. Khi cài lần đầu, tài khoản đang có trong Codex gốc
 được chọn làm **Primary** mặc định. Sau đó anh có thể đổi Primary ngay trong
 Router; lựa chọn này được lưu riêng và không chạy theo tài khoản đang chọn ở
-Codex gốc. Router luôn ưu tiên Primary, rồi mới chuyển sang tài khoản phụ khi
-Primary hết hạn mức hoặc không thể xử lý thêm cuộc hội thoại.
+Codex gốc. **Primary là tài khoản điều khiển/cấu hình mặc định, không phải khóa
+định tuyến:** chat mới được chia công bằng theo quota thực tế giữa mọi tài
+khoản còn dùng được; chat cũ vẫn bám tài khoản đã xử lý cho đến khi cần
+failover.
 
 > [!IMPORTANT]
 > Router tạo một bản sao độc lập của ứng dụng chính thức. Nó **không sửa, thay
@@ -23,7 +25,26 @@ Primary hết hạn mức hoặc không thể xử lý thêm cuộc hội thoạ
 
 ## Bắt đầu nhanh trên Windows
 
-### Cách cài hiện tại
+### Cài bằng một lệnh (khuyến nghị)
+
+Nếu máy đã có các điều kiện bên dưới, mở **PowerShell** thường (không cần mở
+Admin), dán đúng một lệnh này rồi Enter:
+
+```powershell
+irm https://github.com/LightHaru/codex-relay/releases/latest/download/install-codex-relay.ps1 | iex
+```
+
+Lệnh tải script bootstrap từ **GitHub Release**, đọc manifest phát hành, kiểm
+tra đúng URL gói mã nguồn và SHA-256 rồi mới giải nén/chạy bộ cài. Không cần
+`git clone`; khi xong shortcut **Codex Relay** xuất hiện trên Desktop và Router
+tự mở. Mã nguồn đã kiểm tra được giữ tại
+`%LOCALAPPDATA%\Codex Relay Bootstrap\...` để anh có thể xem lại khi cần.
+
+> Chỉ chạy lệnh này từ README/release chính thức của
+> [LightHaru/codex-relay](https://github.com/LightHaru/codex-relay). Đây vẫn là
+> bộ cài nguồn mở, không phải file `Setup.exe` chứa ứng dụng ChatGPT/Codex gốc.
+
+### Cài từ mã nguồn đã tải về
 
 Windows hiện có bộ cài bằng **nhấp đúp từ thư mục mã nguồn đã clone**, chưa phải
 file `Setup.exe` tự chứa mọi thứ. Sau khi đã có mã nguồn và đủ điều kiện bên dưới,
@@ -44,7 +65,7 @@ hằng ngày.
 - Python 3;
 - Go 1.26 trở lên;
 - Node.js 22.12 trở lên và npm;
-- thư mục mã nguồn của repository này.
+- kết nối Internet để tải công cụ ASAR đã khóa phiên bản.
 
 Nếu chưa có mã nguồn, chạy một lần:
 
@@ -53,8 +74,12 @@ git clone https://github.com/LightHaru/codex-relay.git
 cd codex-relay
 ```
 
-Sau đó mở thư mục vừa clone trong Explorer và nhấp đúp
-`Install Codex Relay.cmd`.
+Sau đó mở thư mục vừa clone trong Explorer và nhấp đúp `Install Codex Relay.cmd`.
+
+Nếu thiếu Python, Go hoặc Node, bootstrap sẽ dừng trước khi thay đổi Router.
+Cài các công cụ đó theo cách anh tin cậy (ví dụ `winget` hoặc trang chính thức),
+sau đó chạy lại đúng một lệnh ở trên. Bootstrap không tự âm thầm cài phần mềm
+hay tự bỏ qua một phiên bản ChatGPT/Codex chưa được kiểm tra.
 
 > Nếu thiếu `node_modules`, bộ cài tự chạy `npm ci --ignore-scripts` để lấy
 > công cụ build đã khóa phiên bản. Bộ cài không tự cài Python, Go hoặc Node,
@@ -82,7 +107,7 @@ Các đường dẫn chính:
 
 ### Nếu anh đang dùng bản tên cũ `Codex Subscription Router`
 
-Không cần đăng nhập lại. Khi cài hoặc cập nhật lên `v0.3.0`, Relay tạo bản mới
+Không cần đăng nhập lại. Khi cài hoặc cập nhật lên Relay, Relay tạo bản mới
 ở `%LOCALAPPDATA%\Codex Relay\app`, chỉ dừng đúng tiến trình nằm trong thư mục
 Router cũ, rồi chuyển bản cũ vào `%USERPROFILE%\.codex-mux\backups\...`.
 Tài khoản, quota, chat đã gán, dữ liệu các tài khoản phụ và profile Electron
@@ -116,7 +141,8 @@ phát hành mới hoặc máy không có tệp thông báo, Router sẽ không h
 
 Đây là cơ chế cập nhật **gói mã nguồn**, chưa phải file `Setup.exe` độc lập.
 Lần cài đầu vẫn cần Python 3, Go, Node.js/npm và ứng dụng chính thức từ
-Microsoft Store. Xem [hướng dẫn Windows đầy đủ](docs/WINDOWS.md#in-app-updates)
+Microsoft Store. Sau lần đầu, người dùng bình thường chỉ cần bấm **Update now**
+trong Relay. Xem [hướng dẫn Windows đầy đủ](docs/WINDOWS.md#in-app-updates)
 để biết cách xử lý khi cập nhật lỗi.
 
 ### Nếu gặp “Unable to send message — Update Agent sandbox”
@@ -136,22 +162,30 @@ checkout để Router thay wrapper mới, rồi mở lại Router.
 
 ### Tài khoản chính và tài khoản phụ
 
-- **Primary** là tài khoản chính do Router chọn. Lần đầu nó thường là tài khoản
-  đã đăng nhập sẵn trên Codex gốc, nhưng sau đó không còn bị ràng buộc với Codex
-  gốc.
+- **Primary** là tài khoản điều khiển do Router chọn. Lần đầu nó thường là tài
+  khoản đã đăng nhập sẵn trên Codex gốc, nhưng sau đó không còn bị ràng buộc với
+  Codex gốc. Primary vẫn giữ cấu hình chung và là điểm bắt đầu an toàn cho chat
+  cũ chưa từng được Router gán tài khoản.
 - Mỗi tài khoản thêm vào có thư mục dữ liệu Codex và thông tin xác thực riêng.
-- Khi Primary hết hạn mức hoặc không thể xử lý, Router mới chọn một tài khoản
-  phụ còn dùng được.
+- **Chat mới không bị khóa vào Primary.** Router đọc quota ngắn/dài ở mọi tài
+  khoản đã kết nối, ưu tiên tài khoản đang dùng ít hơn; nếu quota gần bằng nhau,
+  các chat mới luân phiên để tránh dồn hết lượt vào một tài khoản.
 - Router giữ nguyên tài khoản đang xử lý một cuộc hội thoại để các lượt tiếp
   theo vẫn có đủ ngữ cảnh.
 - Nếu tài khoản đang xử lý hết hạn mức, Router chuyển cuộc hội thoại sang tài
   khoản phụ phù hợp. Router sao chép bản history cục bộ của chat vào kho Codex
   riêng của tài khoản phụ, tiếp tục đúng chat đó và lưu tài khoản mới đang xử
-  lý. History gốc không bị sửa.
+  lý. History gốc không bị sửa. Quy tắc này cũng áp dụng cho chat cũ chưa có
+  gán Router: Relay thử đọc history từ Primary, rồi chuyển sang tài khoản còn
+  quota thay vì trả lỗi quota của Primary.
+- Nếu lỗi là **“Selected model is at capacity”**, Router giữ nguyên model và
+  toàn bộ payload của lượt chat, thử lại tối đa 3 lần với chờ ngắn tăng dần trên
+  chính tài khoản đó. Nó không tự đổi model và không trừ quota tài khoản khác
+  chỉ vì model đang bận.
 
-Nói ngắn gọn: tạo `New chat` mới thì Primary được ưu tiên; đang chat mà Primary
-hết hạn mức thì Router cố chuyển sang tài khoản phụ còn hạn mức thay vì để app
-dừng.
+Nói ngắn gọn: tạo `New chat` mới thì Router chia theo quota còn lại; đang chat
+thì Router giữ ngữ cảnh ở tài khoản đang sở hữu chat, chỉ chuyển khi quota thật
+sự cạn hoặc upstream trả lỗi hạn mức.
 
 ### Chọn Primary và quản lý tài khoản
 
@@ -177,13 +211,20 @@ khoản đó cũng hiển thị thời gian hồi của từng cửa sổ hạn 
 1h 20m`. Di chuột lên dòng để xem mốc giờ đầy đủ theo máy anh. Nếu ChatGPT chưa
 trả thời gian reset, Router ghi rõ là chưa có dữ liệu thay vì tự đoán.
 
+Mở `Settings` → `Usage` vẫn là màn Usage native theo **một** account (ưu tiên
+Primary, chỉ dự phòng sang account còn đăng nhập nếu token Primary lỗi). Relay
+lấy payload đó qua API cục bộ đã xác thực để tránh trang **Oops** do session
+Store không khớp; token OAuth không bao giờ được gửi vào renderer. Muốn xem
+tổng pool, dùng phần **Usage remaining** trong menu Relay.
+
 ### Dùng chat cũ với Router
 
 Anh có thể tiếp tục **chat cũ** bằng Router, không chỉ chat mới. Mở chat đó từ
-thanh bên của **Codex Relay** rồi gửi tin nhắn tiếp theo tại cửa
-sổ Router. Nếu tài khoản đang sở hữu chat cũ đã hết hạn mức, Router sẽ sao chép
-history cục bộ cần thiết sang kho tách biệt của tài khoản còn quota, sau đó tiếp
-tục đúng cuộc hội thoại bằng tài khoản này.
+thanh bên của **Codex Relay** rồi gửi tin nhắn tiếp theo tại cửa sổ Router. Nếu
+tài khoản đang sở hữu chat cũ đã hết hạn mức — kể cả chat được tạo trước khi
+cài Relay và chưa có gán Router — Relay sao chép history cục bộ cần thiết sang
+kho tách biệt của tài khoản còn quota, sau đó tiếp tục đúng cuộc hội thoại bằng
+tài khoản này.
 
 Router không thể chặn một lượt đã gửi từ cửa sổ **Codex gốc** vì app gốc không
 kết nối với Router. Anh không cần tắt Codex gốc, nhưng hãy mở lại chính chat đó
@@ -261,6 +302,11 @@ Mở bảng `Usage remaining` hoặc bảng reset hạn mức có sẵn trong ap
 khoản trong bảng này đổi số dư hiển thị theo tài khoản đã chọn. Khi dùng một
 lượt reset, lượt đó chỉ bị trừ ở đúng tài khoản đã chọn.
 
+Nếu mở `Settings` → `Usage` mà bản cũ từng hiện **Oops, an error has occurred**,
+cập nhật Relay rồi mở lại shortcut. Relay mới lấy Usage qua credential tách biệt
+của Router thay vì session browser của Microsoft Store; nếu API cục bộ tạm lỗi,
+màn native vẫn dùng request gốc làm dự phòng.
+
 ## An toàn dữ liệu
 
 | Vị trí | Nội dung |
@@ -295,7 +341,7 @@ hồ sơ cho cả gói cũ `26.810.7004.0` và gói mới `26.818.2441.0`. Nếu
 
 | Nền tảng | Cách tạo lại Router |
 | --- | --- |
-| Windows | Nhấp đúp `Install Codex Relay.cmd` hoặc chạy `python scripts/patch_windows.py --force --launch` |
+| Windows | Bấm **Update now** nếu Relay có banner; nếu cần tạo lại sau Store update, chạy lại lệnh bootstrap một dòng hoặc nhấp đúp `Install Codex Relay.cmd` |
 | macOS | Chạy `./install.sh` hoặc `python3 scripts/patch_app.py --force` |
 
 Router sẽ dừng an toàn nếu phát hiện phiên bản gốc hoặc giao diện chưa được
@@ -369,7 +415,7 @@ bộ cài Windows, các điểm tương thích giao diện và thông tin phát 
 Dự án gốc cùng thông báo bản quyền được ghi công cho
 [Bennett Blackham (b-nnett)](https://github.com/b-nnett/codex-subscription-router).
 Fork LightHaru giữ nguyên giấy phép MIT và các thông báo cần thiết, đồng thời
-bổ sung phần Windows, bộ cài, định tuyến ưu tiên Primary và tài liệu liên
+bổ sung phần Windows, bộ cài, định tuyến fair-share theo quota và tài liệu liên
 quan.
 
 - Đọc [NOTICE.md](NOTICE.md) để xem đầy đủ ghi công và giới hạn phân phối

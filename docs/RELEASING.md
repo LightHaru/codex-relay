@@ -25,7 +25,12 @@ Relay release. The visible product name and release URLs use Codex Relay.
 
 The release workflow verifies that the tag matches `VERSION`, repeats all
 checks, creates a source archive, calculates its SHA-256, writes
-`windows-update.json`, and attaches both files to a draft GitHub release. The
-Windows Router only checks this manifest after the draft is published. Review
-the archive name, hash, draft, and smoke-test record before publishing it
-manually; never attach the official Store app or a patched ASAR.
+`windows-update.json`, and attaches those files plus the reviewed
+`install-codex-relay.ps1` bootstrap to a draft GitHub release. The Windows
+Router only checks this manifest after the draft is published. The bootstrap
+also validates this manifest's exact release URL and SHA-256 before it invokes
+the source installer for a first-time user.
+
+Review the archive name, hash, bootstrap asset, draft, and smoke-test record
+before publishing manually; never attach the official Store app or a patched
+ASAR.

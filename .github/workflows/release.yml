@@ -83,4 +83,5 @@ jobs:
             --title "${GITHUB_REF_NAME}" \
             --verify-tag \
             "codex-relay-source-${version}.zip" \
-            windows-update.json
+            windows-update.json \
+            "scripts/bootstrap_windows.ps1#install-codex-relay.ps1"

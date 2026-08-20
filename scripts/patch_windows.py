@@ -45,6 +45,11 @@ PROFILE_QUERY_REPLACEMENT = (
     "async function yol(){let e=await(globalThis.CodexMuxWindows?.profileData?.()"
     "??r_.safeGet(`/wham/profiles/me`));"
 )
+USAGE_STATUS_ANCHOR = "try{return await r_.safeGet(`/wham/usage`)}catch(e){"
+USAGE_STATUS_REPLACEMENT = (
+    "try{return(await globalThis.CodexMuxWindows?.usageStatus?.())??"
+    "await r_.safeGet(`/wham/usage`)}catch(e){"
+)
 PLUGIN_REQUEST_ANCHOR = (
     "async sendRequest(e,t,n){if(this.dispatchMessage==null)throw Error("
     "`AppServerRequestClient is missing a message dispatcher`);return e===`config/read`?"
@@ -116,6 +121,13 @@ CURRENT_RENDERER_PROFILE = {
         "async function $Hl(){let e=await(globalThis.CodexMuxWindows?.profileData?.()"
         "??K_.safeGet(`/wham/profiles/me`));"
     ),
+    "usage_status_anchor": (
+        "let e=await K_.safeGet(`/wham/usage`,{additionalHeaders:{\"OAI-App-Brand\":H_}})"
+    ),
+    "usage_status_replacement": (
+        "let e=(await globalThis.CodexMuxWindows?.usageStatus?.())??"
+        "await K_.safeGet(`/wham/usage`,{additionalHeaders:{\"OAI-App-Brand\":H_}})"
+    ),
     "plugin_request_anchor": (
         "async sendRequest(e,t,n){if(this.dispatchMessage==null)throw Error("
         "`AppServerRequestClient is missing a message dispatcher`);return e===`config/read`?"
@@ -180,6 +192,8 @@ CURRENT_RENDERER_PROFILE = {
 LEGACY_RENDERER_PROFILE = {
     "profile_query_anchor": PROFILE_QUERY_ANCHOR,
     "profile_query_replacement": PROFILE_QUERY_REPLACEMENT,
+    "usage_status_anchor": USAGE_STATUS_ANCHOR,
+    "usage_status_replacement": USAGE_STATUS_REPLACEMENT,
     "plugin_request_anchor": PLUGIN_REQUEST_ANCHOR,
     "plugin_request_replacement": PLUGIN_REQUEST_REPLACEMENT,
     "reset_query_anchor": RESET_QUERY_ANCHOR,
@@ -622,6 +636,12 @@ def patch_windows_feature_bundles(
         profile["profile_query_anchor"],
         profile["profile_query_replacement"],
         "profile query",
+    )
+    initial = replace_once(
+        initial,
+        profile["usage_status_anchor"],
+        profile["usage_status_replacement"],
+        "native usage query",
     )
     initial = replace_once(
         initial,
