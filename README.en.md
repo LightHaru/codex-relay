@@ -326,33 +326,30 @@ See [SMOKE-TEST.md](docs/SMOKE-TEST.md) for the signed-app verification flow.
 
 ## Add a subscription
 
-### Windows private in-app sign-in
+### Windows browser sign-in
 
 1. Open the profile menu at the bottom of the Router sidebar.
 2. Select **Add another subscription**.
 3. The Router asks the official Codex child app-server to begin the supported
-   ChatGPT sign-in and opens it in a private child window owned by the Router.
-   It does not launch the user's default browser.
-4. Complete sign-in on the official page in that window. Every launch uses a
-   new temporary, non-persistent Electron session, so it does not reuse a
-   prior login's cookies or web storage.
-5. If the child window is closed, choose **Open secure sign-in** to create a
-   new private sign-in window, or choose **Cancel sign-in** to discard the
-   unfinished secondary subscription.
-6. When the official child reports a connected account, both windows close and
-   the Router shows one success notification.
+   ChatGPT sign-in and opens the returned HTTPS authorization link in your
+   default browser. This is the documented OAuth hand-off; the child process
+   still owns the localhost callback for this subscription.
+4. Complete sign-in on the official page. If the browser is already signed in
+   to another account, choose **Use another account** there.
+5. If the browser page was closed, choose **Open secure sign-in** to open it
+   again, or choose **Cancel sign-in** to discard the unfinished subscription.
+6. When the child reports a connected account, the confirmation closes and the
+   Router shows one success notification. A web OAuth error leaves the pending
+   row available for a retry instead of deleting it immediately.
 
 The Windows Router displays **no device code**, does not collect a password,
-and accepts only HTTPS `chatgpt.com` or `auth.openai.com` authorization URLs.
-The official child owns the callback and credential storage. The private
-window has no Router preload or Node access, uses no main-app cookies, and
-clears its temporary session data when it closes.
+and forwards only HTTPS `chatgpt.com` or `auth.openai.com` authorization URLs.
+The official child owns the localhost callback and credential storage. Relay
+never reads a password, callback code, or OAuth token.
 
-> Note: the Router guarantees fresh cookies, local storage, and cache for this
-> window. It cannot—and should not—erase OS-level SSO, passkeys, or identity
-> state managed by Windows, Google, Microsoft, or Apple. If an official page
-> preselects an account through SSO, choose **Use another account** on that
-> page.
+> Note: the default browser may reuse its existing SSO, passkeys, or identity
+> state. Relay cannot—and should not—erase that OS/browser state. If the
+> official page preselects an account, choose **Use another account** there.
 
 ### Cancel a pending sign-in
 

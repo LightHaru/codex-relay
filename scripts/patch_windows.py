@@ -2,8 +2,8 @@
 """Create an independent Windows copy of ChatGPT with Codex multiplexing.
 
 The Microsoft Store installation is never modified. The copied application has
-a small DOM bridge, a narrowly scoped Electron bridge for private sign-in
-windows, and version-pinned renderer patches for profile, Plugins, and
+a small DOM bridge, a narrowly scoped Electron bridge for the official browser
+sign-in hand-off, and version-pinned renderer patches for profile, Plugins, and
 rate-limit reset account selection. Every renderer anchor is matched exactly
 once so a Store update fails closed instead of applying a possibly incorrect
 rewrite.
@@ -219,7 +219,7 @@ WINDOWS_RENDERER_PROFILES = {
     "71c60b36a782e5597f1ca90abf70dba6a9a6aa4e61f3be69e422be43666a7d70": CURRENT_RENDERER_PROFILE,
 }
 TESTED_ASAR_HASHES = set(WINDOWS_RENDERER_PROFILES)
-# The private-login bridge is injected into the standard main-renderer preload
+# The browser-login bridge is injected into the standard main-renderer preload
 # and main-process bundle of the supported ASAR. The installer checks the ASAR
 # hash before it reaches these anchors, and both replacements must match once.
 LOGIN_PRELOAD_TRAILER_ANCHOR = "\n//# sourceMappingURL=preload.js.map"
@@ -711,10 +711,10 @@ def load_windows_login_asset(filename: str) -> str:
     """Return a reviewed source asset used by the version-pinned ASAR patch."""
     path = ROOT / "ui" / filename
     if not path.is_file():
-        raise RuntimeError(f"could not find Windows private-login asset: {path}")
+        raise RuntimeError(f"could not find Windows browser-login asset: {path}")
     source = path.read_text(encoding="utf-8").strip()
     if not source:
-        raise RuntimeError(f"Windows private-login asset is empty: {path}")
+        raise RuntimeError(f"Windows browser-login asset is empty: {path}")
     return source
 
 
@@ -722,12 +722,12 @@ def patch_windows_login_bundles(
     extracted: Path,
     router_version: str = VERSION,
 ) -> tuple[Path, Path]:
-    """Inject the isolated sign-in bridge into the supported Electron bundle.
+    """Inject the official-browser sign-in bridge into the supported Electron bundle.
 
     The renderer can call only a small preload API. The main-process companion
-    validates the official initial URL and creates an ephemeral per-login
-    Electron partition, so the remote page never receives Node or Router
-    control-service access.
+    validates the official initial URL and opens it through the user's default
+    browser; the isolated app-server owns the localhost callback and token
+    exchange, so the remote page never receives Node or Router access.
     """
     build = extracted / ".vite" / "build"
     if not build.is_dir():
@@ -743,7 +743,7 @@ def patch_windows_login_bundles(
         preload,
         LOGIN_PRELOAD_TRAILER_ANCHOR,
         f"\n{preload_patch}\n{update_preload_patch}{LOGIN_PRELOAD_TRAILER_ANCHOR}",
-        "private login preload",
+        "browser login preload",
     )
     preload_path.write_text(preload, encoding="utf-8")
 
@@ -754,7 +754,7 @@ def patch_windows_login_bundles(
             main_candidates.append((path, source))
     if len(main_candidates) != 1:
         raise RuntimeError(
-            "could not find exactly one Windows private login main-process "
+            "could not find exactly one Windows browser login main-process "
             f"asset (found {len(main_candidates)})"
         )
     main_path, main = main_candidates[0]
@@ -772,7 +772,7 @@ def patch_windows_login_bundles(
     insertion = f"exports.runMainAppStartup={{STARTUP}};\n{main_patch}\n{update_main_patch}\n//# sourceMappingURL="
     match = LOGIN_MAIN_TRAILER_PATTERN.search(main)
     if match is None:
-        raise RuntimeError("could not verify the Windows private login main-process anchor")
+        raise RuntimeError("could not verify the Windows browser login main-process anchor")
     startup = match.group(1)
     # The injected JavaScript contains many object-literal braces, so use a
     # literal placeholder replacement rather than str.format().
@@ -1072,7 +1072,7 @@ def patch(
             "platform": "windows",
             "source": str(source),
             "sourceAsarSha256": actual_hash,
-            "rendererUi": "windows-renderer-patches-v2-private-login",
+            "rendererUi": "windows-renderer-patches-v3-browser-login",
             "profile": str(router_profile_directory()),
         }
         (staged / "codex-relay.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")

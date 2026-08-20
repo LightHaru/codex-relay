@@ -1060,7 +1060,7 @@
     }
   }
 
-  function privateLoginBridge() {
+  function loginBridge() {
     const bridge = globalThis.codexMuxLoginWindow;
     if (
       bridge == null ||
@@ -1072,8 +1072,8 @@
     return bridge;
   }
 
-  function closePrivateLoginWindow(id) {
-    const bridge = privateLoginBridge();
+  function closeLoginBridge(id) {
+    const bridge = loginBridge();
     if (!id || bridge == null) return;
     void Promise.resolve(bridge.close(id)).catch(() => {
       // The child window can already be gone when login completion races close.
@@ -1085,7 +1085,7 @@
     const current = activeLogin;
     current?.timer && clearTimeout(current.timer);
     current?.unsubscribeNativeClose?.();
-    closePrivateLoginWindow(current?.nativeLoginId);
+    closeLoginBridge(current?.nativeLoginId);
     current?.backdrop?.remove();
     if (!expected || activeLogin === expected) activeLogin = null;
     return Boolean(current);
@@ -1111,7 +1111,7 @@
     const message = append(
       make("div", "codex-mux-win-toast-copy"),
       make("div", "codex-mux-win-toast-title", `${account.label || "Subscription"} connected successfully`),
-      make("div", "codex-mux-win-toast-detail", "This subscription is ready to use. Private Router sign-in is complete."),
+      make("div", "codex-mux-win-toast-detail", "This subscription is ready to use. Official browser sign-in is complete."),
     );
     append(toast, make("div", "codex-mux-win-toast-icon", "✓"), message, close);
     document.body.append(toast);
@@ -1202,32 +1202,39 @@
     }
   }
 
-  async function openPrivateLoginWindow(session, status, button) {
+  async function openBrowserLogin(session, status, button) {
     if (activeLogin !== session || session.completed || session.cancelling) return false;
-    if (session.nativeLoginId) {
-      status.textContent = "The private Router sign-in window is already open.";
+    if (session.nativeLoginId && !session.externalBrowser) {
+      status.textContent = "The official ChatGPT sign-in flow is already open.";
       return true;
     }
-    const bridge = session.privateLoginBridge;
+    const bridge = session.loginBridge;
     if (bridge == null) {
-      throw new Error("The private Router sign-in window is unavailable. Run the Router installer again before adding an account.");
+      throw new Error("The official ChatGPT sign-in bridge is unavailable. Run the Router installer again before adding an account.");
     }
     session.opening = true;
     if (button) button.disabled = true;
-    status.textContent = "Opening a private Router sign-in window…";
+    status.textContent = "Opening the official ChatGPT sign-in page in your browser…";
     try {
+      if (session.externalBrowser && session.nativeLoginId) {
+        closeLoginBridge(session.nativeLoginId);
+        session.nativeLoginId = null;
+      }
       const opened = await bridge.open(session.authorizationURL);
-      if (!opened?.id) throw new Error("The private Router sign-in window did not return a valid session.");
+      if (!opened?.id) throw new Error("The official ChatGPT sign-in bridge did not return a valid session.");
       if (activeLogin !== session || session.completed || session.cancelling) {
-        closePrivateLoginWindow(opened.id);
+        closeLoginBridge(opened.id);
         return false;
       }
       session.nativeLoginId = opened.id;
-      status.textContent = "Complete the official ChatGPT sign-in in the private Router window. This confirmation closes automatically when the account connects.";
+      session.externalBrowser = opened.mode === "external";
+      status.textContent = session.externalBrowser
+        ? "The official sign-in page is open in your default browser. Finish there, then return here; Relay will close this confirmation when the account connects."
+        : "Complete the official ChatGPT sign-in flow. This confirmation closes automatically when the account connects.";
       return true;
     } catch (error) {
       if (activeLogin === session) {
-        status.textContent = `Could not open the private Router sign-in window: ${error.message}`;
+        status.textContent = `Could not open the official ChatGPT sign-in page: ${error.message}`;
       }
       throw error;
     } finally {
@@ -1238,14 +1245,14 @@
 
   async function showBrowserLogin(menu, account, login) {
     closeLogin();
-    const authorizationURL = trustedVerificationURL(readLoginValue(login, "authUrl"));
+    const authorizationURL = trustedVerificationURL(readLoginValue(login, "authUrl", "auth_url"));
     const loginId = readLoginValue(login, "loginId", "login_id");
     if (!authorizationURL || !loginId) {
       throw new Error("The official ChatGPT sign-in link was not available. The unfinished subscription will be removed.");
     }
-    const bridge = privateLoginBridge();
+    const bridge = loginBridge();
     if (bridge == null) {
-      throw new Error("The private Router sign-in window is unavailable. Run the Router installer again before adding an account.");
+      throw new Error("The official ChatGPT sign-in bridge is unavailable. Run the Router installer again before adding an account.");
     }
     const backdrop = make("div", "codex-mux-win-modal-backdrop");
     const session = {
@@ -1257,8 +1264,9 @@
       loginId,
       menu,
       nativeLoginId: null,
+      externalBrowser: false,
       opening: false,
-      privateLoginBridge: bridge,
+      loginBridge: bridge,
       timer: null,
       unsubscribeNativeClose: null,
     };
@@ -1268,15 +1276,15 @@
     append(
       dialog,
       make("h2", "", `Sign in to ${account.label || "subscription"}`),
-      make("p", "", "Continue with the official ChatGPT sign-in page in a private Router window. This app never asks for your password and keeps this subscription isolated."),
+      make("p", "", "Continue with the official ChatGPT sign-in page in your normal browser. Relay never asks for your password and the Codex child keeps this subscription isolated."),
     );
-    dialog.append(make("p", "", "Each launch starts with a fresh temporary browser session, without cookies or local data from another sign-in. Keep this confirmation open while sign-in finishes; it closes automatically when the account is connected."));
-    const status = make("div", "codex-mux-win-status", "Preparing the private Router sign-in window…");
+    dialog.append(make("p", "", "If the browser is already signed in to another ChatGPT account, choose the account switch option there. Keep this confirmation open while sign-in finishes; it closes automatically when Relay confirms the account."));
+    const status = make("div", "codex-mux-win-status", "Preparing the official browser sign-in…");
     const actions = make("div", "codex-mux-win-actions");
     const open = make("button", "codex-mux-win-primary", "Open secure sign-in");
     open.type = "button";
     open.addEventListener("click", () => {
-      void openPrivateLoginWindow(session, status, open).catch(() => {
+      void openBrowserLogin(session, status, open).catch(() => {
         // The status message already explains why the native window failed.
       });
     });
@@ -1296,7 +1304,9 @@
         if (activeLogin !== session || closed?.id !== session.nativeLoginId) return;
         session.nativeLoginId = null;
         if (!session.completed && !session.cancelling) {
-          status.textContent = "The private Router sign-in window was closed. Open it again to continue, or cancel this unfinished subscription.";
+          status.textContent = session.externalBrowser
+            ? "The browser sign-in flow was closed by Relay. Open the official sign-in page again to continue, or cancel this unfinished subscription."
+            : "The official ChatGPT sign-in flow was closed. Open it again to continue, or cancel this unfinished subscription.";
         }
       });
     }
@@ -1320,7 +1330,7 @@
     };
     void poll();
     try {
-      await openPrivateLoginWindow(session, status, open);
+      await openBrowserLogin(session, status, open);
     } catch (error) {
       closeLogin(session);
       throw error;

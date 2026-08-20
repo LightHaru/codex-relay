@@ -14,6 +14,18 @@ Relay app with the existing three-subscription profile; all local bridge
 requests returned 200 and the native Usage page rendered without its generic
 error screen.
 
+## Release 0.3.6
+
+This release repairs Windows **Add another subscription** sign-in for current
+and older supported Store bundles. The renderer now validates the official
+ChatGPT authorization URL and hands it to the user's normal browser through
+Electron's `shell.openExternal`. The isolated Codex app-server remains the
+only component that owns the localhost callback, exchanges the authorization
+code, and stores the subscription credentials. No embedded Electron login
+window is created, so Cloudflare, passkeys, and existing browser SSO can use
+their supported flow. The Relay keeps polling the scoped account and closes
+the confirmation with a success toast only after the account is connected.
+
 ## Release 0.3.4
 
 This hotfix completes the Windows Settings → Usage loopback fix by returning

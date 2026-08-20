@@ -1,21 +1,26 @@
 /*
  * Main-process companion for the Windows subscription menu.
  *
- * This file is injected only into the independent Router copy. It deliberately
- * creates a new, non-persistent Electron session for each official ChatGPT
- * sign-in. The external page gets no preload or Node APIs, and this bridge
- * never receives credentials or OAuth tokens.
+ * The official Codex app-server owns the OAuth callback listener and the
+ * credential exchange. OpenAI's documented flow is to open the returned
+ * authUrl in a browser, so Relay deliberately uses the user's normal browser
+ * here instead of embedding auth.openai.com in an Electron child window. An
+ * embedded Electron session can be rejected by the provider's bot protection
+ * and cannot share the user's normal browser session reliably.
+ *
+ * The browser receives only the short-lived, allowlisted authorization URL.
+ * Relay never receives passwords, callback codes, or OAuth tokens.
  */
 (() => {
   "use strict";
 
-  const { BrowserWindow, ipcMain, session } = require("electron");
+  const { BrowserWindow, ipcMain, shell } = require("electron");
   const { randomUUID } = require("node:crypto");
 
   const OPEN_CHANNEL = "codex-mux:open-isolated-login";
   const CLOSE_CHANNEL = "codex-mux:close-isolated-login";
   const CLOSED_CHANNEL = "codex-mux:isolated-login-closed";
-  const LOGIN_TITLE = "Sign in to ChatGPT — Codex Relay";
+  const EXTERNAL_MODE = "external";
   const flows = new Map();
 
   function verifiedInitialURL(value) {
@@ -31,17 +36,12 @@
     }
   }
 
-  function isLoopbackHost(hostname) {
-    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]" || hostname === "::1";
-  }
-
-  function isAllowedLoginNavigation(value) {
-    try {
-      const url = new URL(value);
-      return url.protocol === "https:" || (url.protocol === "http:" && isLoopbackHost(url.hostname));
-    } catch {
-      return false;
-    }
+  // Flow IDs are generated in this trusted main process. Keep validation
+  // opaque-but-strict rather than tying compatibility to one UUID spelling;
+  // this also tolerates older Electron/Node builds that serialize UUIDs
+  // differently while still rejecting arbitrary IPC input.
+  function isFlowID(value) {
+    return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(value);
   }
 
   function trustedOwner(event) {
@@ -50,54 +50,11 @@
     try {
       const source = new URL(event.sender.getURL());
       // The injected menu runs only in the packaged Codex renderer. Remote
-      // pages, including the login page itself, have no access to this bridge.
+      // pages never receive this bridge.
       return source.protocol === "file:" || source.protocol === "app:" ? owner : null;
     } catch {
       return null;
     }
-  }
-
-  function isFlowID(value) {
-    return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
-  }
-
-  function secureWebPreferences(partition) {
-    return {
-      contextIsolation: true,
-      nodeIntegration: false,
-      nodeIntegrationInSubFrames: false,
-      nodeIntegrationInWorker: false,
-      sandbox: true,
-      webSecurity: true,
-      allowRunningInsecureContent: false,
-      webviewTag: false,
-      enableRemoteModule: false,
-      devTools: false,
-      partition,
-    };
-  }
-
-  function clearLoginSession(loginSession) {
-    const settle = (operation) => {
-      try {
-        return Promise.resolve(operation());
-      } catch {
-        return Promise.resolve();
-      }
-    };
-    void Promise.allSettled([
-      settle(() => loginSession.clearStorageData()),
-      settle(() => loginSession.clearCache()),
-      settle(() => loginSession.clearAuthCache()),
-    ]);
-  }
-
-  function configureLoginSession(partition) {
-    const loginSession = session.fromPartition(partition);
-    loginSession.setPermissionCheckHandler(() => false);
-    loginSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
-    loginSession.on("will-download", (event) => event.preventDefault());
-    return loginSession;
   }
 
   function notifyClosed(flow, reason) {
@@ -105,122 +62,37 @@
     try {
       flow.owner.send(CLOSED_CHANNEL, { id: flow.id, reason });
     } catch {
-      // The main Router window can be closing at the same time as this child.
+      // The main Router window can be closing at the same time as this flow.
     }
   }
 
   function closeFlow(flow, reason) {
-    if (flow.closed) return;
+    if (flow == null || flow.closed) return false;
     flow.closed = true;
     flows.delete(flow.id);
-    for (const loginWindow of flow.windows) {
-      if (!loginWindow.isDestroyed()) loginWindow.destroy();
-    }
-    flow.windows.clear();
-    clearLoginSession(flow.loginSession);
     notifyClosed(flow, reason);
+    return true;
   }
 
-  function popupOptions(flow) {
-    return {
-      autoHideMenuBar: true,
-      backgroundColor: "#202124",
-      parent: flow.ownerWindow,
-      title: LOGIN_TITLE,
-      webPreferences: secureWebPreferences(flow.partition),
-    };
-  }
-
-  function protectLoginWindow(flow, loginWindow) {
-    const { webContents } = loginWindow;
-    webContents.setWindowOpenHandler(({ url }) => {
-      // Providers occasionally use a popup. Keep it inside the same isolated
-      // Electron session rather than handing it to the user's default browser.
-      if (url !== "about:blank" && !isAllowedLoginNavigation(url)) return { action: "deny" };
-      return { action: "allow", overrideBrowserWindowOptions: popupOptions(flow) };
-    });
-    webContents.on("will-navigate", (event, url) => {
-      if (!isAllowedLoginNavigation(url)) event.preventDefault();
-    });
-    webContents.on("will-redirect", (event, url) => {
-      if (!isAllowedLoginNavigation(url)) event.preventDefault();
-    });
-    webContents.on("will-attach-webview", (event) => event.preventDefault());
-    webContents.on("did-create-window", (child) => {
-      if (flow.closed) {
-        child.destroy();
-        return;
-      }
-      trackLoginWindow(flow, child);
-    });
-    webContents.on("render-process-gone", () => {
-      if (loginWindow === flow.root) closeFlow(flow, "renderer-gone");
-    });
-  }
-
-  function trackLoginWindow(flow, loginWindow) {
-    if (flow.windows.has(loginWindow)) return;
-    flow.windows.add(loginWindow);
-    loginWindow.setMenuBarVisibility(false);
-    if (typeof loginWindow.removeMenu === "function") loginWindow.removeMenu();
-    protectLoginWindow(flow, loginWindow);
-    loginWindow.on("closed", () => {
-      flow.windows.delete(loginWindow);
-      if (loginWindow === flow.root) closeFlow(flow, "closed");
-    });
-  }
-
-  ipcMain.handle(OPEN_CHANNEL, (event, value) => {
+  ipcMain.handle(OPEN_CHANNEL, async (event, value) => {
     const ownerWindow = trustedOwner(event);
     const authorizationURL = verifiedInitialURL(value);
     if (ownerWindow == null || authorizationURL == null) {
-      throw new Error("The private Router sign-in window could not be opened.");
+      throw new Error("The official ChatGPT sign-in link could not be opened.");
     }
 
-    const id = randomUUID();
-    // No `persist:` prefix: Electron keeps this partition in memory only. A
-    // different random partition is created for every sign-in launch.
-    const partition = `codex-mux-login-${randomUUID()}`;
-    const loginSession = configureLoginSession(partition);
-    const flow = {
-      id,
-      owner: event.sender,
-      ownerWindow,
-      loginSession,
-      partition,
-      root: null,
-      windows: new Set(),
-      closed: false,
-    };
+    const id = String(randomUUID());
+    const flow = { id, owner: event.sender, ownerWindow, closed: false };
     flows.set(id, flow);
-
-    let loginWindow;
     try {
-      loginWindow = new BrowserWindow({
-        ...popupOptions(flow),
-        width: 580,
-        height: 760,
-        minWidth: 460,
-        minHeight: 600,
-        show: false,
-      });
-      flow.root = loginWindow;
-      trackLoginWindow(flow, loginWindow);
-      loginWindow.once("ready-to-show", () => {
-        if (!flow.closed && !loginWindow.isDestroyed()) {
-          loginWindow.show();
-          loginWindow.focus();
-        }
-      });
-      void loginWindow.loadURL(authorizationURL).catch(() => closeFlow(flow, "load-failed"));
-      // Do not leave a blank hidden window behind if the remote page does not
-      // emit ready-to-show (for example, while a provider is redirecting).
-      loginWindow.show();
-      loginWindow.focus();
-      return { id };
+      // shell.openExternal is the supported desktop OAuth hand-off. It lets
+      // Cloudflare/passkeys/SSO use the user's real browser and still returns
+      // to the localhost callback owned by the isolated Codex child process.
+      await shell.openExternal(authorizationURL);
+      return { id, mode: EXTERNAL_MODE };
     } catch {
       closeFlow(flow, "open-failed");
-      throw new Error("The private Router sign-in window could not be opened.");
+      throw new Error("The default browser could not open the official ChatGPT sign-in page.");
     }
   });
 
@@ -228,7 +100,6 @@
     if (!isFlowID(id)) return false;
     const flow = flows.get(id);
     if (flow == null || flow.owner !== event.sender) return false;
-    closeFlow(flow, "closed-by-router");
-    return true;
+    return closeFlow(flow, "closed-by-router");
   });
 })();

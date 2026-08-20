@@ -1,4 +1,4 @@
-/* Exposes only the minimal private-login window controls to the Router UI. */
+/* Exposes only the minimal official-browser login controls to the Router UI. */
 (() => {
   "use strict";
 
@@ -9,7 +9,7 @@
   const listeners = new Set();
 
   function isFlowID(value) {
-    return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+    return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(value);
   }
 
   ipcRenderer.on(CLOSED_CHANNEL, (_event, payload) => {
@@ -30,9 +30,9 @@
         typeof authorizationURL === "string" ? authorizationURL : "",
       );
       if (result == null || !isFlowID(result.id)) {
-        throw new Error("The private Router sign-in window returned an invalid response.");
+        throw new Error("The official ChatGPT sign-in bridge returned an invalid response.");
       }
-      return { id: result.id };
+      return { id: result.id, mode: result.mode === "external" ? "external" : "private" };
     },
     async close(id) {
       if (!isFlowID(id)) return false;

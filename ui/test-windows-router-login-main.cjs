@@ -43,8 +43,8 @@ class FakeWebContents {
 
 function createHarness() {
   const handlers = new Map();
-  const sessions = new Map();
   const windows = [];
+  const externalURLs = [];
   const UUIDS = [
     "11111111-1111-4111-8111-111111111111",
     "22222222-2222-4222-8222-222222222222",
@@ -111,51 +111,24 @@ function createHarness() {
 
   const electron = {
     BrowserWindow: FakeWindow,
+    shell: {
+      async openExternal(url) {
+        externalURLs.push(url);
+      },
+    },
     ipcMain: {
       handle(channel, handler) {
         handlers.set(channel, handler);
-      },
-    },
-    session: {
-      fromPartition(partition) {
-        if (sessions.has(partition)) return sessions.get(partition);
-        const value = {
-          calls: [],
-          on(name, listener) {
-            this.calls.push({ name, type: "on" });
-            this.downloadListener = listener;
-          },
-          setPermissionCheckHandler(listener) {
-            this.permissionCheck = listener;
-          },
-          setPermissionRequestHandler(listener) {
-            this.permissionRequest = listener;
-          },
-          clearStorageData() {
-            this.calls.push({ name: "clearStorageData" });
-            return Promise.resolve();
-          },
-          clearCache() {
-            this.calls.push({ name: "clearCache" });
-            return Promise.resolve();
-          },
-          clearAuthCache() {
-            this.calls.push({ name: "clearAuthCache" });
-            return Promise.resolve();
-          },
-        };
-        sessions.set(partition, value);
-        return value;
       },
     },
   };
 
   const source = fs.readFileSync(path.join(__dirname, "windows-router-login-main.js"), "utf8");
   const instrumented = source.replace(
-    "  ipcMain.handle(OPEN_CHANNEL, (event, value) => {",
-    "  globalThis.__codexMuxPrivateLoginTest = { trustedOwner, verifiedInitialURL };\n\n  ipcMain.handle(OPEN_CHANNEL, (event, value) => {",
+    "  ipcMain.handle(OPEN_CHANNEL, async (event, value) => {",
+    "  globalThis.__codexMuxPrivateLoginTest = { trustedOwner, verifiedInitialURL, isFlowID };\n\n  ipcMain.handle(OPEN_CHANNEL, async (event, value) => {",
   );
-  assert.notEqual(instrumented, source, "could not instrument the private-login main bridge");
+  assert.notEqual(instrumented, source, "could not instrument the browser-login main bridge");
   const context = {
     URL,
     Promise,
@@ -167,7 +140,7 @@ function createHarness() {
     require(name) {
       if (name === "electron") return electron;
       if (name === "node:crypto") return { randomUUID: () => UUIDS[nextUUID++] };
-      throw new Error(`Unexpected module requested by private-login bridge: ${name}`);
+      throw new Error(`Unexpected module requested by browser-login bridge: ${name}`);
     },
   };
   vm.createContext(context);
@@ -186,12 +159,12 @@ function createHarness() {
     open: handlers.get("codex-mux:open-isolated-login"),
     probe: context.__codexMuxPrivateLoginTest,
     sender,
-    sessions,
+    externalURLs,
     windows,
   };
 }
 
-test("private login main bridge creates a fresh locked-down session for every official login", async () => {
+test("login main bridge opens only the official URL in the default browser", async () => {
   const harness = createHarness();
   const event = { sender: harness.sender };
 
@@ -201,60 +174,27 @@ test("private login main bridge creates a fresh locked-down session for every of
     "https://chatgpt.com/codex/desktop-auth?state=first",
   );
 
-  assert.throws(
+  await assert.rejects(
     () => harness.open(event, "https://example.invalid/sign-in"),
-    /private Router sign-in window could not be opened/,
+    /official ChatGPT sign-in link could not be opened/,
   );
   assert.equal(harness.windows.length, 0);
 
   const first = await harness.open(event, "https://chatgpt.com/codex/desktop-auth?state=first");
   assert.match(first.id, /^[0-9a-f-]{36}$/i);
-  assert.equal(harness.windows.length, 1);
-  const firstWindow = harness.windows[0];
-  const preferences = firstWindow.options.webPreferences;
-  assert.match(preferences.partition, /^codex-mux-login-/);
-  assert.doesNotMatch(preferences.partition, /^persist:/);
-  assert.equal(preferences.contextIsolation, true);
-  assert.equal(preferences.nodeIntegration, false);
-  assert.equal(preferences.nodeIntegrationInSubFrames, false);
-  assert.equal(preferences.nodeIntegrationInWorker, false);
-  assert.equal(preferences.sandbox, true);
-  assert.equal(preferences.webSecurity, true);
-  assert.equal(preferences.webviewTag, false);
-  assert.equal(preferences.devTools, false);
-  assert.equal(Object.hasOwn(preferences, "preload"), false);
-
-  const firstSession = harness.sessions.get(preferences.partition);
-  assert.equal(firstSession.permissionCheck(), false);
-  let permissionResult = null;
-  firstSession.permissionRequest(null, "notifications", (value) => { permissionResult = value; });
-  assert.equal(permissionResult, false);
-  assert.ok(firstSession.downloadListener, "downloads must be blocked for the private login session");
-
-  const popup = firstWindow.webContents.windowOpenHandler({ url: "https://accounts.google.com/o/oauth2/auth" });
-  assert.equal(popup.action, "allow");
-  assert.equal(popup.overrideBrowserWindowOptions.webPreferences.partition, preferences.partition);
-  assert.equal(popup.overrideBrowserWindowOptions.webPreferences.nodeIntegration, false);
-  assert.equal(firstWindow.webContents.windowOpenHandler({ url: "mailto:test@example.com" }).action, "deny");
-
-  let unsafeNavigationBlocked = false;
-  firstWindow.webContents.emit("will-navigate", {
-    preventDefault() {
-      unsafeNavigationBlocked = true;
-    },
-  }, "file:///C:/not-an-auth-page.html");
-  assert.equal(unsafeNavigationBlocked, true);
+  assert.equal(first.mode, "external");
+  assert.deepEqual(harness.externalURLs, ["https://chatgpt.com/codex/desktop-auth?state=first"]);
+  assert.equal(harness.windows.length, 0, "OAuth must not create an embedded Electron login window");
+  assert.ok(harness.probe.isFlowID(first.id));
 
   assert.equal(await harness.close(event, first.id), true);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(firstWindow.destroyed, true);
-  assert.deepEqual(
-    firstSession.calls.filter((call) => call.type !== "on").map((call) => call.name).sort(),
-    ["clearAuthCache", "clearCache", "clearStorageData"],
-  );
+  assert.equal(await harness.close(event, first.id), false, "a closed flow cannot be closed twice");
 
   const second = await harness.open(event, "https://auth.openai.com/authorize?state=second");
   assert.notEqual(second.id, first.id);
-  assert.equal(harness.windows.length, 2);
-  assert.notEqual(harness.windows[1].options.webPreferences.partition, preferences.partition);
+  assert.equal(second.mode, "external");
+  assert.deepEqual(harness.externalURLs, [
+    "https://chatgpt.com/codex/desktop-auth?state=first",
+    "https://auth.openai.com/authorize?state=second",
+  ]);
 });

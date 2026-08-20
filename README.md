@@ -235,21 +235,23 @@ trong **Codex Relay** trước khi gửi lượt muốn Relay chuyển quota.
 1. Mở **Codex Relay** từ shortcut Desktop.
 2. Mở menu tài khoản ở cuối thanh bên.
 3. Bấm **Add another subscription**.
-4. Router mở một cửa sổ đăng nhập riêng nằm trong chính ứng dụng Router; không
-   gọi Chrome, Edge hoặc trình duyệt mặc định của anh.
-5. Đăng nhập trên trang ChatGPT chính thức trong cửa sổ đó. Mỗi lần bấm đăng
-   nhập, Router tạo một phiên trình duyệt tạm mới, không mang cookie hoặc dữ
-   liệu web của lần đăng nhập trước.
-6. Nếu lỡ đóng cửa sổ đăng nhập, bấm **Open secure sign-in** để mở lại một
-   cửa sổ riêng mới, hoặc bấm **Cancel sign-in** để hủy tài khoản đang chờ.
-7. Khi xong, cửa sổ đăng nhập và hộp xác nhận tự đóng, sau đó Router hiện thông
-   báo kết nối thành công.
+4. Router mở trang đăng nhập ChatGPT chính thức trong trình duyệt mặc định
+   (Chrome, Edge hoặc trình duyệt anh đang dùng). Đây là luồng OAuth chuẩn của
+   Codex; callback localhost vẫn do app-server riêng của từng subscription
+   nhận, không đi qua Codex gốc.
+5. Đăng nhập trên trang chính thức. Nếu trình duyệt đang nhớ tài khoản khác,
+   chọn **Use another account** hoặc đổi tài khoản ngay trên trang đó.
+6. Nếu đã đóng trang đăng nhập, bấm **Open secure sign-in** để mở lại; nếu
+   không muốn tiếp tục, bấm **Cancel sign-in** để hủy tài khoản đang chờ.
+7. Khi callback thành công, hộp xác nhận tự đóng và Router hiện thông báo kết
+   nối thành công. Nếu OAuth báo lỗi, tài khoản chờ vẫn còn để anh thử lại;
+   Router không tự xóa tài khoản chỉ vì trang web báo lỗi.
 
-Router Windows không hiển thị device code và không hỏi mật khẩu. Nó chỉ chấp
-nhận URL HTTPS thuộc `chatgpt.com` hoặc `auth.openai.com`; việc đăng nhập và
-lưu thông tin xác thực do tiến trình Codex chính chủ xử lý. Cửa sổ đăng nhập
-không có quyền Node, không có preload của Router, không dùng cookie của app
-chính và tự xóa dữ liệu phiên khi đóng.
+Router Windows không hiển thị device code và không hỏi mật khẩu. Nó chỉ chuyển
+URL HTTPS thuộc `chatgpt.com` hoặc `auth.openai.com` sang trình duyệt mặc định;
+việc đăng nhập, callback localhost và lưu thông tin xác thực do tiến trình
+Codex app-server chính chủ của subscription xử lý. Relay không đọc mật khẩu,
+code callback hay token OAuth.
 
 > Lưu ý: Router có thể bảo đảm cookie, local storage và cache của cửa sổ này
 > là mới. Nó không và không nên xóa đăng nhập một lần (SSO), passkey hoặc nhận

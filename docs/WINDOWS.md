@@ -185,17 +185,17 @@ multiplexer.
    shows the quota that is known; a row with missing data says **Updating
    quota…** or **Quota unavailable** instead of showing a misleading dash.
 3. Select **Add another subscription**.
-4. The Router opens the official ChatGPT sign-in in a private child window of
-   the Router itself. It does not launch the default browser.
-5. Every sign-in launch receives a newly generated, non-persistent Electron
-   session. It therefore starts without cookies, local storage, or cache from
-   another Router sign-in.
-6. If that child window is closed before completion, choose **Open secure
-   sign-in** to create a fresh one, or choose **Cancel sign-in** to discard the
+4. The Router opens the official ChatGPT authorization URL in the default
+   browser. This is the documented OAuth hand-off; the isolated Codex
+   app-server child still owns the localhost callback for this subscription.
+5. Complete sign-in in that browser. If it is already signed in to another
+   ChatGPT account, choose **Use another account** there.
+6. If the browser page is closed before completion, choose **Open secure
+   sign-in** to open it again, or choose **Cancel sign-in** to discard the
    unfinished secondary account.
-7. The confirmation polls only the local router. When the account connects,
-   both windows close automatically and one non-blocking success notification
-   appears.
+7. The confirmation polls only the local Router. When the account connects,
+   the confirmation closes automatically and one non-blocking success
+   notification appears. A web OAuth error leaves the row available for retry.
 8. If you select **Cancel sign-in**, the unfinished secondary account is
    stopped and removed. The Primary account and any connected subscription are
    never removed by this action. A previously abandoned `Waiting for sign-in`
@@ -222,15 +222,9 @@ to Router, not to the Microsoft Store app:
 
 Do not provide a password to the Router UI or `routerctl`. Credentials are
 entered only on the official HTTPS `chatgpt.com` / `auth.openai.com` page in
-the private child window; the Router does not collect, display, or exchange
-OAuth tokens. That window has no Router preload or Node access, blocks
-downloads and permission requests, and clears its temporary session data on
-close.
-
-The fresh-session guarantee applies to the Router child window's cookies and
-web storage. It does not erase SSO, passkeys, or identity state managed by the
-operating system or an external identity provider. Use the provider's **Use
-another account** control when needed.
+the default browser; the Router does not collect, display, or exchange OAuth
+tokens. The default browser may reuse its existing SSO, passkeys, or identity
+state; use the provider's **Use another account** control when needed.
 
 `routerctl.exe` remains available for local diagnostics (`routerctl list`), but
 is not required to add or sign in to an account.

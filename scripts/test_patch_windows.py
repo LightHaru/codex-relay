@@ -155,7 +155,7 @@ class WindowsRendererPatchTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Profile settings"):
                 patch_windows_feature_bundles(root)
 
-    def test_patches_private_login_preload_and_main_process(self) -> None:
+    def test_patches_browser_login_preload_and_main_process(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             preload, main = self.make_login_bundles(root)
@@ -166,15 +166,13 @@ class WindowsRendererPatchTests(unittest.TestCase):
             main_source = main.read_text(encoding="utf-8")
             self.assertIn("codexMuxLoginWindow", preload_source)
             self.assertIn("codex-mux:open-isolated-login", preload_source)
-            self.assertIn("codex-mux-login-${randomUUID()}", main_source)
-            self.assertIn("sandbox: true", main_source)
-            self.assertIn("nodeIntegration: false", main_source)
-            self.assertIn("webSecurity: true", main_source)
-            self.assertIn("setPermissionRequestHandler", main_source)
-            self.assertIn("clearStorageData", main_source)
+            self.assertIn("randomUUID()", main_source)
+            self.assertIn("shell.openExternal", main_source)
+            self.assertIn('const EXTERNAL_MODE = "external"', main_source)
+            self.assertIn("auth.openai.com", main_source)
+            self.assertNotIn("new BrowserWindow", main_source)
             self.assertIn("codexMuxUpdater", preload_source)
             self.assertIn("router-updater", main_source)
-            self.assertNotIn("shell.openExternal", main_source)
 
     def test_patches_the_current_renderer_profile(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -189,7 +187,7 @@ class WindowsRendererPatchTests(unittest.TestCase):
         self.assertIn("rxa.useSyncExternalStore", replacement)
         self.assertNotIn("n$s.useSyncExternalStore", replacement)
 
-    def test_rejects_duplicate_private_login_preload_anchor(self) -> None:
+    def test_rejects_duplicate_browser_login_preload_anchor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             preload, _main = self.make_login_bundles(root)
@@ -197,17 +195,18 @@ class WindowsRendererPatchTests(unittest.TestCase):
                 preload.read_text(encoding="utf-8") + LOGIN_PRELOAD_TRAILER_ANCHOR,
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(RuntimeError, "private login preload"):
+            with self.assertRaisesRegex(RuntimeError, "browser login preload"):
                 patch_windows_login_bundles(root)
 
-    def test_menu_uses_the_private_login_bridge_without_window_open(self) -> None:
+    def test_menu_uses_the_browser_login_bridge_without_window_open(self) -> None:
         menu = (ROOT / "ui" / "windows-router-menu.js").read_text(encoding="utf-8")
         self.assertIn("codexMuxLoginWindow", menu)
         self.assertIn("codexMuxUpdater", menu)
         self.assertIn("async function nativeUsageStatus", menu)
         self.assertIn('request("/usage")', menu)
         self.assertIn("Update now", menu)
-        self.assertIn("fresh temporary browser session", menu)
+        self.assertIn("normal browser", menu)
+        self.assertIn("official ChatGPT sign-in page", menu)
         self.assertIn("await showBrowserLogin", menu)
         self.assertNotIn("window.open(", menu)
 

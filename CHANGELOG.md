@@ -3,6 +3,20 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/) and
 this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.6] - 2026-08-20
+
+### Fixed
+
+- Windows **Add another subscription** now hands the official ChatGPT OAuth
+  link to the user's default browser. This avoids embedded Electron/Cloudflare
+  callback failures while the isolated Codex app-server continues to own the
+  localhost callback and credential storage.
+- Login flow identifiers now use a strict opaque format so older Electron/Node
+  builds cannot reject a valid callback session before polling the Relay.
+- The sign-in dialog accepts both `authUrl` and `auth_url` response spellings
+  for compatibility with older app-server builds, and keeps the unfinished
+  account available for a retry when the browser reports an OAuth error.
+
 ## [0.3.5] - 2026-08-20
 
 ### Fixed
@@ -134,7 +148,8 @@ this project uses [Semantic Versioning](https://semver.org/).
 - Loopback-only, token-authenticated diagnostic UI states.
 - Source-only CI, draft release automation, security documentation, and smoke tests.
 
-[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.3.5...HEAD
+[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.3.6...HEAD
+[0.3.6]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.6
 [0.3.5]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.5
 [0.3.4]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.4
 [0.3.3]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.3

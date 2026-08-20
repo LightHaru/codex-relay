@@ -85,7 +85,7 @@ function loadBridge({ fetchImpl, privateLoginImpl, updaterImpl } = {}) {
       "    getActiveToast: () => activeToast,",
       "    showUpdateToast,",
       "    dismissUpdateToast,",
-      "    openPrivateLoginWindow,",
+      "    openBrowserLogin,",
       "    openAccountSettings,",
       "    renderMenu,",
       "    remainingUsage,",
@@ -121,9 +121,9 @@ function loadBridge({ fetchImpl, privateLoginImpl, updaterImpl } = {}) {
     return nextTimer;
   };
   const fakeClearTimeout = (timer) => timers.delete(timer);
-  const privateLogin = privateLoginImpl || {
+  const browserLogin = privateLoginImpl || {
     async open() {
-      return { id: "private-login-fixture" };
+      return { id: "browser-login-fixture", mode: "external" };
     },
     async close() {
       return true;
@@ -158,7 +158,7 @@ function loadBridge({ fetchImpl, privateLoginImpl, updaterImpl } = {}) {
       },
     },
     setTimeout: fakeSetTimeout,
-    codexMuxLoginWindow: privateLogin,
+    codexMuxLoginWindow: browserLogin,
     codexMuxUpdater: updaterImpl || {
       async getState() { return { available: false }; },
       async install() { return { installing: false }; },
@@ -176,7 +176,7 @@ function loadBridge({ fetchImpl, privateLoginImpl, updaterImpl } = {}) {
     bridge: context.CodexMuxWindows,
     document,
     hooks: context.__codexMuxWindowsTest,
-    privateLogin,
+    privateLogin: browserLogin,
     storage,
   };
 }
@@ -211,7 +211,7 @@ test("a stale browser-login poll cannot close a newer sign-in dialog", () => {
   assert.equal(current.completed, false);
 });
 
-test("private login opens only the trusted official URL and cancellation closes its scoped child", async () => {
+test("official browser login opens only the trusted URL and cancellation closes its scoped flow", async () => {
   const requests = [];
   const opened = [];
   const closed = [];
@@ -227,7 +227,7 @@ test("private login opens only the trusted official URL and cancellation closes 
     privateLoginImpl: {
       async open(url) {
         opened.push(url);
-        return { id: `private-login-${opened.length + 1}` };
+        return { id: `browser-login-${opened.length + 1}`, mode: "external" };
       },
       async close(id) {
         closed.push(id);
@@ -241,23 +241,24 @@ test("private login opens only the trusted official URL and cancellation closes 
   });
 
   await hooks.showBrowserLogin(null, { id: "subscription-2", label: "Subscription 2" }, {
-    authUrl: "https://chatgpt.com/codex/desktop-auth?state=example",
-    loginId: "login-2",
+    auth_url: "https://chatgpt.com/codex/desktop-auth?state=example",
+    login_id: "login-2",
   });
   const session = hooks.getActiveLogin();
-  assert.ok(session, "private login should create an active session");
+  assert.ok(session, "browser login should create an active session");
   assert.deepEqual(opened, ["https://chatgpt.com/codex/desktop-auth?state=example"]);
-  assert.equal(session.nativeLoginId, "private-login-2");
+  assert.equal(session.nativeLoginId, "browser-login-2");
+  assert.equal(session.externalBrowser, true);
   assert.equal(document.body.children.length, 1);
 
-  closeListener({ id: "private-login-2", reason: "closed" });
-  assert.equal(session.nativeLoginId, null, "a manually closed private child can be reopened");
-  await hooks.openPrivateLoginWindow(session, new FakeElement("status"), new FakeElement("button"));
+  closeListener({ id: "browser-login-2", reason: "closed" });
+  assert.equal(session.nativeLoginId, null, "a closed browser flow can be reopened");
+  await hooks.openBrowserLogin(session, new FakeElement("status"), new FakeElement("button"));
   assert.deepEqual(opened, [
     "https://chatgpt.com/codex/desktop-auth?state=example",
     "https://chatgpt.com/codex/desktop-auth?state=example",
   ]);
-  assert.equal(session.nativeLoginId, "private-login-3");
+  assert.equal(session.nativeLoginId, "browser-login-3");
 
   const status = new FakeElement("status");
   const button = new FakeElement("button");
@@ -266,12 +267,12 @@ test("private login opens only the trusted official URL and cancellation closes 
   assert.ok(cancellation, "cancel must call the local scoped cancellation endpoint");
   assert.match(cancellation.url, /accounts\/subscription-2\/login\/cancel$/);
   assert.deepEqual(JSON.parse(cancellation.options.body), { loginId: "login-2" });
-  assert.deepEqual(closed, ["private-login-3"]);
+  assert.deepEqual(closed, ["browser-login-3"]);
   assert.equal(session.backdrop.removed, true);
   assert.equal(hooks.getActiveLogin(), null);
 });
 
-test("Windows bridge uses official private login rather than a device code or default browser", () => {
+test("Windows bridge uses official browser OAuth rather than a device code or arbitrary URL", () => {
   const source = fs.readFileSync(path.join(__dirname, "windows-router-menu.js"), "utf8");
   assert.match(source, /body: JSON\.stringify\(\{ mode: "chatgpt" \}\)/);
   assert.match(source, /Open secure sign-in/);
