@@ -21,10 +21,6 @@ const (
 	routingMinimumWindow       = time.Minute
 	routingResetBonusPerCredit = 0.15
 	routingResetBonusCreditCap = 3
-	// A dispatch count is only a tie-breaker for equal/near-equal live quota.
-	// It keeps a subscription pool balanced while still preferring an account
-	// whose reported usage is materially lower.
-	fairShareDispatchPenalty = 2.0
 )
 
 type RateLimitWindow struct {
@@ -45,6 +41,7 @@ type AccountSnapshot struct {
 	Enabled              bool        `json:"enabled"`
 	Controller           bool        `json:"controller"`
 	Connected            bool        `json:"connected"`
+	PendingLogin         bool        `json:"pendingLogin"`
 	DisplayName          string      `json:"displayName,omitempty"`
 	Username             string      `json:"username,omitempty"`
 	Email                string      `json:"email,omitempty"`
@@ -108,7 +105,8 @@ func (m *Multiplexer) accountSnapshots(ctx context.Context, includeProfile bool)
 			if err != nil {
 				snapshot = AccountSnapshot{
 					ID: account.ID, Label: account.Label, Enabled: account.Enabled,
-					Controller: account.Controller, CreatedAt: account.CreatedAt, Error: err.Error(),
+					Controller: account.Controller, PendingLogin: account.PendingLogin,
+					CreatedAt: account.CreatedAt, Error: err.Error(),
 				}
 			}
 			results <- snapshot
@@ -292,6 +290,9 @@ func (m *Multiplexer) StartLogin(ctx context.Context, id, mode string) (json.Raw
 	if err != nil {
 		return nil, err
 	}
+	if _, err := m.store.SetPendingLogin(id, loginIdentifier(response.Result)); err != nil {
+		return nil, fmt.Errorf("persist pending sign-in: %w", err)
+	}
 	return response.Result, nil
 }
 
@@ -307,6 +308,13 @@ func (m *Multiplexer) CancelLogin(ctx context.Context, id, loginID string) (Logi
 	}
 	if account.Controller {
 		return LoginCancellation{}, errors.New("the primary account login cannot be cancelled here")
+	}
+	loginID = strings.TrimSpace(loginID)
+	if loginID == "" {
+		loginID = strings.TrimSpace(account.PendingLoginID)
+	}
+	if !account.PendingLogin && loginID == "" {
+		return LoginCancellation{}, fmt.Errorf("account %q has no pending sign-in", id)
 	}
 
 	m.cancelMu.Lock()
@@ -334,7 +342,6 @@ func (m *Multiplexer) CancelLogin(ctx context.Context, id, loginID string) (Logi
 	if !ok {
 		return LoginCancellation{}, fmt.Errorf("account %q is unavailable", id)
 	}
-	loginID = strings.TrimSpace(loginID)
 	if loginID != "" {
 		params, _ := json.Marshal(map[string]string{"loginId": loginID})
 		if _, err := child.Request(ctx, "account/login/cancel", params); err != nil {
@@ -416,9 +423,18 @@ func (m *Multiplexer) accountSnapshotWithProfile(ctx context.Context, accountID 
 	}
 	snapshot := AccountSnapshot{
 		ID: account.ID, Label: account.Label, Enabled: account.Enabled,
-		Controller: account.Controller, Connected: string(accountResult.Account) != "null" && len(accountResult.Account) > 0,
+		Controller: account.Controller, PendingLogin: account.PendingLogin,
+		Connected: string(accountResult.Account) != "null" && len(accountResult.Account) > 0,
 		CreatedAt: account.CreatedAt, RawAccount: accountResult.Account,
 		ThreadCount: m.store.ThreadCounts()[account.ID],
+	}
+	if snapshot.Connected && account.PendingLogin {
+		// A successful callback may arrive while the app was closed, before the
+		// account/login/completed notification is observed by the mux. Clear the
+		// persisted intent from the authoritative account snapshot as well.
+		if _, clearErr := m.store.ClearPendingLogin(account.ID); clearErr == nil {
+			snapshot.PendingLogin = false
+		}
 	}
 	if snapshot.Connected {
 		var details struct {
@@ -465,6 +481,20 @@ func (m *Multiplexer) accountSnapshotWithProfile(ctx context.Context, accountID 
 	}
 	m.applyRateLimitPreview(&snapshot)
 	return snapshot, nil
+}
+
+func loginIdentifier(payload json.RawMessage) string {
+	var result struct {
+		LoginID      string `json:"loginId"`
+		SnakeLoginID string `json:"login_id"`
+	}
+	if json.Unmarshal(payload, &result) != nil {
+		return ""
+	}
+	if value := strings.TrimSpace(result.LoginID); value != "" {
+		return value
+	}
+	return strings.TrimSpace(result.SnakeLoginID)
 }
 
 func planLabel(planType string) string {
@@ -519,13 +549,14 @@ func (m *Multiplexer) chooseAccountExcluding(ctx context.Context, excluded map[s
 	return m.chooseAccountFromSnapshots(ctx, snapshots, excluded)
 }
 
-// chooseFairShareFromSnapshots selects a new-chat owner from every connected
-// subscription with remaining quota. Live usage is the primary score (the
-// stricter of the reported windows); a small per-account dispatch penalty then
-// breaks ties so equal-quota accounts alternate instead of always selecting
-// the first account in state order. Existing chats do not use this function:
-// their persisted owner remains sticky until an actual quota failure triggers
-// the normal failover path.
+// chooseFairShareFromSnapshots selects a new-chat owner from the connected
+// subscriptions that still have capacity. The selector is deliberately
+// round-robin by dispatch count: quota percentage is used to decide whether an
+// account can enter the pool, not to keep routing every new chat to the account
+// with the lowest current usage. That keeps traffic spread across the pool and
+// gives each subscription a chance to reach the same reset window. Accounts
+// whose quota is temporarily unknown remain last-resort candidates and are
+// never allowed to displace a connected account with known capacity.
 func (m *Multiplexer) chooseFairShareFromSnapshots(
 	snapshots []AccountSnapshot,
 	excluded map[string]struct{},
@@ -533,8 +564,8 @@ func (m *Multiplexer) chooseFairShareFromSnapshots(
 	type candidate struct {
 		account       state.Account
 		reason        RouteReason
-		usageScore    float64
 		dispatchCount uint64
+		knownCapacity bool
 	}
 	candidates := make([]candidate, 0, len(snapshots))
 	for _, snapshot := range snapshots {
@@ -545,33 +576,10 @@ func (m *Multiplexer) chooseFairShareFromSnapshots(
 		if !ok {
 			continue
 		}
-		// A subscription whose quota cannot be read remains usable as a
-		// last-resort failover. It must not outrank any account whose known
-		// windows still have capacity, however, because that would turn an
-		// observability gap into an avoidable quota error.
-		usageScore := 100.0
-		if snapshot.RateLimits != nil {
-			usageScore = 0
-			knownWindow := false
-			for _, window := range []*RateLimitWindow{
-				snapshot.RateLimits.Primary,
-				snapshot.RateLimits.Secondary,
-			} {
-				if window == nil {
-					continue
-				}
-				knownWindow = true
-				if value := math.Max(0, math.Min(100, window.UsedPercent)); value > usageScore {
-					usageScore = value
-				}
-			}
-			if !knownWindow {
-				usageScore = 100
-			}
-		}
 		reason := routeReasonForSnapshot(snapshot)
 		candidates = append(candidates, candidate{
-			account: account, reason: reason, usageScore: usageScore,
+			account: account, reason: reason,
+			knownCapacity: snapshot.RateLimits != nil && snapshot.RateLimitAvailable,
 		})
 	}
 	if len(candidates) == 0 {
@@ -585,16 +593,17 @@ func (m *Multiplexer) chooseFairShareFromSnapshots(
 	for index := range candidates {
 		candidates[index].dispatchCount = m.newThreadDispatch[candidates[index].account.ID]
 	}
+	known := make([]candidate, 0, len(candidates))
+	for _, entry := range candidates {
+		if entry.knownCapacity {
+			known = append(known, entry)
+		}
+	}
+	if len(known) > 0 {
+		candidates = known
+	}
 	sort.SliceStable(candidates, func(i, j int) bool {
 		left, right := candidates[i], candidates[j]
-		leftScore := left.usageScore + float64(left.dispatchCount)*fairShareDispatchPenalty
-		rightScore := right.usageScore + float64(right.dispatchCount)*fairShareDispatchPenalty
-		if math.Abs(leftScore-rightScore) > 0.001 {
-			return leftScore < rightScore
-		}
-		if math.Abs(left.usageScore-right.usageScore) > 0.001 {
-			return left.usageScore < right.usageScore
-		}
 		if left.dispatchCount != right.dispatchCount {
 			return left.dispatchCount < right.dispatchCount
 		}
@@ -605,7 +614,7 @@ func (m *Multiplexer) chooseFairShareFromSnapshots(
 	})
 	selected := &candidates[0]
 	m.newThreadDispatch[selected.account.ID]++
-	score := selected.usageScore + float64(selected.dispatchCount)*fairShareDispatchPenalty
+	score := float64(selected.dispatchCount)
 	selected.reason.FairShareScore = &score
 	selected.reason.NewThreadDispatches = selected.dispatchCount + 1
 	return selected.account, selected.reason, nil

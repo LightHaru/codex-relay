@@ -251,3 +251,54 @@ func TestFairShareDoesNotPreferUnknownQuotaOverKnownCapacity(t *testing.T) {
 		t.Fatalf("selected %q, want known-capacity primary", selected.ID)
 	}
 }
+
+func TestFairShareRoundRobinsKnownCapacityRegardlessOfUsage(t *testing.T) {
+	root := t.TempDir()
+	store, err := state.Open(filepath.Join(root, "mux"), filepath.Join(root, "primary"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.AddAccount("Subscription 2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := store.AddAccount("Subscription 3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	minutes := int64(10_080)
+	multiplexer := &Multiplexer{
+		store:             store,
+		newThreadDispatch: make(map[string]uint64),
+	}
+	snapshots := []AccountSnapshot{
+		{
+			ID: "primary", Controller: true, Enabled: true, Connected: true,
+			AuthType: "chatgpt", RateLimitAvailable: true,
+			RateLimits: &RateLimits{Primary: &RateLimitWindow{UsedPercent: 95, WindowDurationMins: &minutes}},
+		},
+		{
+			ID: second.ID, Enabled: true, Connected: true,
+			AuthType: "chatgpt", RateLimitAvailable: true,
+			RateLimits: &RateLimits{Primary: &RateLimitWindow{UsedPercent: 5, WindowDurationMins: &minutes}},
+		},
+		{
+			ID: third.ID, Enabled: true, Connected: true,
+			AuthType: "chatgpt", RateLimitAvailable: true,
+			RateLimits: &RateLimits{Primary: &RateLimitWindow{UsedPercent: 50, WindowDurationMins: &minutes}},
+		},
+	}
+	counts := map[string]int{}
+	for index := 0; index < 6; index++ {
+		selected, _, err := multiplexer.chooseFairShareFromSnapshots(snapshots, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		counts[selected.ID]++
+	}
+	for _, accountID := range []string{"primary", second.ID, third.ID} {
+		if counts[accountID] != 2 {
+			t.Fatalf("account %q received %d dispatches, want 2: %#v", accountID, counts[accountID], counts)
+		}
+	}
+}

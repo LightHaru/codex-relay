@@ -6,12 +6,13 @@ renames `resources\codex.exe` to `resources\codex.real.exe`, and puts the
 compiled `codex-mux.exe` in its place. The copied Electron app therefore starts
 the same per-account Codex app-server multiplexer used by the macOS build.
 
-It injects a small DOM bridge into the copied renderer for the profile menu
-and signs-in, then applies narrowly version-pinned patches to the reviewed
-Windows renderer build for Profile statistics, Plugins account scope, the
-native rate-limit reset sheet, and the native Settings Usage query. The patcher
-checks every renderer anchor exactly once; an unfamiliar Microsoft Store update
-stops instead of applying a rewrite to an unknown bundle.
+It injects a small DOM bridge into the copied renderer for the profile menu,
+sign-in, and the in-flow multi-subscription panel inside Settings → Usage &
+billing, then applies narrowly version-pinned patches to the reviewed Windows
+renderer build for Profile statistics, Plugins account scope, the native
+rate-limit reset sheet, and the native Settings Usage query. The patcher checks
+every renderer anchor exactly once; an unfamiliar Microsoft Store update stops
+instead of applying a rewrite to an unknown bundle.
 
 ## Install
 
@@ -46,12 +47,15 @@ missing, the installer runs lockfile-resolved `npm ci --ignore-scripts` before
 patching.
 
 It supports every Store build whose exact `app.asar` profile is recorded in
-`scripts/patch_windows.py`. The current profiles include the older
-`26.810.7004.0` package and the newer `26.818.2441.0` package; the older
-profile remains available so an existing checkout can be rebuilt against an
-older installed app. An unrecorded official update stops by default. Review
-its renderer anchors and add a deliberate profile before using it; do not use
-`--allow-untested-source` as a permanent compatibility fix.
+`scripts/patch_windows.py`. The reviewed profiles include
+`26.810.7004.0`, `26.818.2441.0`, and the current `26.818.3698.0` package;
+older profiles remain available so an existing checkout can be rebuilt against
+an older installed app. An unrecorded official update stops by default. For a
+deliberate compatibility check, `--allow-untested-source` asks the patcher to
+discover the same Profile, Plugins, reset, and login anchors structurally after
+extracting the ASAR. It still rejects a missing or duplicated anchor and leaves
+the existing Relay installation untouched. If discovery fails, wait for a
+reviewed release instead of treating the flag as a permanent bypass.
 
 For a scripted upgrade, the equivalent command is:
 
@@ -72,7 +76,8 @@ The patcher creates:
 | `%LOCALAPPDATA%\Codex Relay\Codex Relay.cmd` | Launcher with a dedicated Electron profile |
 | `%USERPROFILE%\Desktop\Codex Relay.lnk` | Direct shortcut to the independent copy, with its dedicated profile |
 | `%APPDATA%\Codex Relay` | Dedicated Electron profile for a fresh Relay installation |
-| `%USERPROFILE%\.codex-mux` | Router state, isolated account homes, and local-control token |
+| `%APPDATA%\Codex Relay\codex-home` | Relay-only primary credentials, sessions, and configuration |
+| `%USERPROFILE%\.codex-mux` | Router state, isolated account homes, and local-control token; never the Store app's credential home |
 | `%LOCALAPPDATA%\Codex Relay Updater\router-updater.exe` | External updater used by the in-app Update button; it is outside the replaceable app tree |
 
 On an upgrade the staged copy is validated before any current Router copy is
@@ -150,10 +155,19 @@ Relay deliberately uses the existing profile rather than moving it during an
 update. This preserves browser/session history. A user may remove an old
 desktop shortcut or backup only after confirming Relay works normally.
 
+When an older state file contains a secondary subscription whose home is still
+`%USERPROFILE%\.codex`, the isolated startup moves that metadata entry to
+`%USERPROFILE%\.codex-mux\accounts\<id>\codex-home` and leaves it disconnected
+until it is signed in again. Router removes only that subscription's stale
+thread-owner mappings; it never copies, deletes, or changes the official
+Codex credential or history files.
+
 ## Quota routing and model-capacity retry
 
-Primary is the stored Router controller and the source of shared configuration;
-it is **not** a "new chats only use Primary" lock. For a new `thread/start`,
+Primary is the stored Router controller and the source of shared Relay
+configuration; it is **not** a "new chats only use Primary" lock. On Windows
+it lives in Relay's dedicated `codex-home`, never in the Store app's
+`%USERPROFILE%\\.codex`. For a new `thread/start`,
 Relay reads the short and longer usage windows from every enabled, connected
 subscription, excludes every depleted account, and selects the least-used
 eligible account. A small per-account dispatch counter breaks ties so accounts
@@ -162,9 +176,12 @@ with comparable quota alternate instead of permanently favoring the first one.
 Once a chat has an owner, its follow-up turns remain sticky for context. If the
 owner is depleted, Relay copies only that local rollout history into a target
 account's isolated `sessions` directory, resumes the same thread, persists the
-new owner, and forwards the turn. A chat that existed before Relay has no
-stored owner; it starts at Primary so its history can be read, but follows this
-same failover path when Primary has no quota.
+new owner, and forwards the turn. A chat that existed before Relay but is
+already present in a Relay-owned home follows the same failover path. If its
+old Router metadata still points at the native Store history, opening that
+known chat in Relay first copies only the matching rollout into a Relay-owned
+home; credentials/configuration and the native source remain untouched. A
+Store-only chat is not scanned or imported automatically.
 
 `Selected model is at capacity. Please try a different model.` is treated as a
 transient model-capacity condition, not a quota failure. Relay retries the
@@ -199,7 +216,10 @@ multiplexer.
 8. If you select **Cancel sign-in**, the unfinished secondary account is
    stopped and removed. The Primary account and any connected subscription are
    never removed by this action. A previously abandoned `Waiting for sign-in`
-   row also has a **Cancel sign-in** action.
+   row is restored after a Relay restart only when Relay has a persisted,
+   intentionally started login flow; a disconnected stale row is shown as
+   **Not connected** and can be removed without pretending a browser flow is
+   active.
 
 ### Choose Primary or remove a subscription
 
@@ -219,6 +239,9 @@ to Router, not to the Microsoft Store app:
   directory is never deleted.
 - A pending sign-in keeps its **Cancel sign-in** action, so abandoned rows can be
   cleaned up without touching a connected identity.
+- Each connected account also shows a native-style **Usage limit resets** card.
+  An available **Use reset** button calls only that subscription's reset
+  endpoint, refreshes the card, and never consumes another account's credit.
 
 Do not provide a password to the Router UI or `routerctl`. Credentials are
 entered only on the official HTTPS `chatgpt.com` / `auth.openai.com` page in
@@ -231,15 +254,22 @@ is not required to add or sign in to an account.
 
 ## Continuing existing chats through the Router
 
-The Router includes existing local chats from the Primary account and each
-connected secondary in its sidebar. Select the old chat in the **Codex Relay**
-window and send the next message there. If the current owner has exhausted
-quota, the Router copies that chat's local rollout history into the fallback
-account's isolated `sessions` directory, resumes the same thread ID there, and
-then forwards the turn. The source account's history file is left unchanged.
-This also covers a legacy chat with no stored Router owner: Relay begins at
-Primary to read history, then fails over instead of showing Primary's depleted
-quota error.
+The Router includes existing local chats owned by Relay's dedicated Primary
+home and each connected secondary in its sidebar. Select the old chat in the
+**Codex Relay** window and send the next message there. If the current owner
+has exhausted quota, the Router copies that chat's local rollout history into
+the fallback account's isolated `sessions` (or `archived_sessions`) directory,
+resumes the same thread ID there, and then forwards the turn. The source
+account's history file is left unchanged. This works with both absolute rollout
+paths and the `CODEX_HOME`-relative paths emitted by different app-server
+versions.
+
+Chats created in the Store Codex app before data separation remain native to
+that app unless the user explicitly opens the same known chat in Relay. For
+that requested chat only, Relay can read the old rollout and copy one file into
+the selected Relay account's isolated history store. It never reads native
+credentials/configuration, starts a child on the Store home, or edits/deletes
+the source rollout. Store-only history is not scanned or imported in bulk.
 
 This does not intercept messages sent in the separate Microsoft Store app. It
 is safe to keep the Store app open, but the message that should be quota-routed
@@ -255,7 +285,7 @@ macOS build for the following surfaces:
 | **Settings → Profile** | Starts with combined statistics and overlapping connected-account photos. Select a photo to reload that subscription's identity/statistics; select it again to return to the combined view. |
 | **Settings → Plugins** | Shows a subscription picker. Plugin definitions and managed MCP configuration remain shared, while Apps, connection status, and OAuth RPCs are sent with the selected account scope. |
 | **Usage / rate-limit resets** | Adds a subscription picker to the native reset sheet. It changes the displayed reset windows and fetches/consumes credits only for that account. |
-| **Settings → Usage & billing** | Injects an **All connected subscriptions** panel. Each account keeps its own plan, credits, short/long rate-limit windows, reset times, spend-control fields, reset-credit counts, code-review/additional limits, and any future fields returned by ChatGPT. The native billing controls below remain scoped to the account selected by the app. |
+| **Settings → Usage & billing** | Keeps the native page shell, sidebar, and billing controls. Adds an in-flow **All connected subscriptions** panel inside the page's content column; it is not a sidebar item or overlay. Each card reads quota, billing, and reset data through the isolated Relay account and keeps failures per account. |
 
 The menu's **Usage remaining** number is the sum of valid windows returned by
 connected accounts. If one account's quota endpoint is temporarily unavailable,
@@ -263,13 +293,15 @@ the known total remains visible and the affected account is marked as updating;
 Router never invents a zero/100% value from missing data.
 
 The Settings Usage proxy still returns the normal single-account Usage JSON
-that the native page expects. The new `/v1/usage/all` route is a separate,
-token-protected dashboard endpoint: it fetches one payload per enabled
-subscription concurrently, keeps partial failures visible, and never merges
-account-scoped billing actions into a fabricated total. It reads isolated
-`auth.json` files only in the Router process; no OAuth access token or local
-control token is exposed to renderer JavaScript. If one account's Usage request
-fails, its card says **Unavailable** while the other accounts remain visible.
+that the native page expects, while the in-flow panel calls the separate,
+token-protected `/v1/usage/all` route. That route fetches one payload per
+enabled subscription concurrently, keeps partial failures visible, and never
+merges account-scoped billing actions into a fabricated total. It reads
+isolated `auth.json` files only in the Router process; no OAuth access token or
+local control token is exposed to renderer JavaScript. If one account's Usage
+request fails, its card says **Unavailable** while the other accounts remain
+visible. If the local bridge is unavailable, the patched native request fails
+closed instead of falling through to the official Codex account.
 
 Every Router account row uses the ChatGPT profile display name (then username
 or email as a fallback), the Router label, and the plan label so subscriptions

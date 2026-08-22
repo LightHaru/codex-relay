@@ -47,8 +47,8 @@ PROFILE_QUERY_REPLACEMENT = (
 )
 USAGE_STATUS_ANCHOR = "try{return await r_.safeGet(`/wham/usage`)}catch(e){"
 USAGE_STATUS_REPLACEMENT = (
-    "try{return(await globalThis.CodexMuxWindows?.usageStatus?.())??"
-    "await r_.safeGet(`/wham/usage`)}catch(e){"
+    "try{return typeof globalThis.CodexMuxWindows?.usageStatus===`function`?"
+    "await globalThis.CodexMuxWindows.usageStatus():{}}catch(e){"
 )
 PLUGIN_REQUEST_ANCHOR = (
     "async sendRequest(e,t,n){if(this.dispatchMessage==null)throw Error("
@@ -125,8 +125,8 @@ CURRENT_RENDERER_PROFILE = {
         "let e=await K_.safeGet(`/wham/usage`,{additionalHeaders:{\"OAI-App-Brand\":H_}})"
     ),
     "usage_status_replacement": (
-        "let e=(await globalThis.CodexMuxWindows?.usageStatus?.())??"
-        "await K_.safeGet(`/wham/usage`,{additionalHeaders:{\"OAI-App-Brand\":H_}})"
+        "let e=typeof globalThis.CodexMuxWindows?.usageStatus===`function`?"
+        "await globalThis.CodexMuxWindows.usageStatus():{}"
     ),
     "plugin_request_anchor": (
         "async sendRequest(e,t,n){if(this.dispatchMessage==null)throw Error("
@@ -193,6 +193,164 @@ CURRENT_RENDERER_PROFILE = {
     ),
 }
 
+# Codex 26.818.3698.0 (Windows Store). This release keeps the same renderer
+# surfaces but rolled the minifier aliases forward. Keep it as a separate,
+# hash-pinned profile so an unrelated Store update still fails closed instead
+# of applying a renderer patch at an ambiguous location.
+STORE_26_818_3698_RENDERER_PROFILE = {
+    "profile_query_anchor": "async function iWl(){let e=await V_.safeGet(`/wham/profiles/me`);",
+    "profile_query_replacement": (
+        "async function iWl(){let e=await(globalThis.CodexMuxWindows?.profileData?.()"
+        "??V_.safeGet(`/wham/profiles/me`));"
+    ),
+    "usage_status_anchor": (
+        "let e=await V_.safeGet(`/wham/usage`,{additionalHeaders:{\"OAI-App-Brand\":L_}})"
+    ),
+    "usage_status_replacement": (
+        "let e=typeof globalThis.CodexMuxWindows?.usageStatus===`function`?"
+        "await globalThis.CodexMuxWindows.usageStatus():{}"
+    ),
+    "plugin_request_anchor": (
+        "async sendRequest(e,t,n){if(this.dispatchMessage==null)throw Error("
+        "`AppServerRequestClient is missing a message dispatcher`);return e===`config/read`?"
+        "this.sendConfigReadRequest(t,n):this.enqueueRequest(e,t,e===`plugin/list`&&n?.timeoutMs==null?"
+        "{...n,timeoutMs:_Ft}:n)}"
+    ),
+    "plugin_request_replacement": (
+        "async sendRequest(e,t,n){t=globalThis.CodexMuxWindows?.scopePluginRequest?.(e,t)??t;"
+        "if(this.dispatchMessage==null)throw Error(`AppServerRequestClient is missing a message dispatcher`);"
+        "return e===`config/read`?this.sendConfigReadRequest(t,n):this.enqueueRequest(e,t,"
+        "e===`plugin/list`&&n?.timeoutMs==null?{...n,timeoutMs:_Ft}:n)}"
+    ),
+    "reset_query_anchor": (
+        "function Zxa(){let e=(0,kV.c)(1),t;return e[0]===Symbol.for(`react.memo_cache_sentinel`)?"
+        "(t={queryKey:[`rate-limit-reset-credits`],queryFn:Qxa,refetchInterval:Op.ONE_MINUTE,"
+        "staleTime:Op.FIVE_SECONDS},e[0]=t):t=e[0],It(t)}"
+    ),
+    "reset_query_replacement": (
+        "function Zxa(){let e=(0,Exa.useSyncExternalStore)("
+        "e=>globalThis.CodexMuxWindows?.subscribeReset?.(e)??(()=>{}),"
+        "()=>globalThis.CodexMuxWindows?.getResetAccountId?.()??null,()=>null),"
+        "t={queryKey:[`rate-limit-reset-credits`,e??`primary`],"
+        "queryFn:e?()=>globalThis.CodexMuxWindows.rateLimitResets(e):Qxa,"
+        "refetchInterval:Op.ONE_MINUTE,staleTime:Op.FIVE_SECONDS};return It(t)}"
+    ),
+    "reset_mutation_anchor": (
+        "function $xa(){let e=(0,kV.c)(3),t=ct(),n=Cb(),r;return e[0]!==n||e[1]!==t?"
+        "(r={mutationFn:eSa,onSuccess:(e,r)=>{let{creditId:i}=r,a=e.code;"
+        "if(a===`reset`||a===`already_redeemed`){let n=e.code===`reset`?e.credit?.id??i:i;"
+        "t.setQueryData([`rate-limit-reset-credits`],e=>Cxa(e,a,n))}"
+        "Promise.all([n([`rate-limit-status`]),n([`rate-limit-reset-credits`])])}},"
+        "e[0]=n,e[1]=t,e[2]=r):r=e[2],Qt(r)}"
+    ),
+    "reset_mutation_replacement": (
+        "function $xa(){let e=ct(),t=Cb(),n=globalThis.CodexMuxWindows?.getResetAccountId?.()??null,"
+        "r=[`rate-limit-reset-credits`,n??`primary`];return Qt({"
+        "mutationFn:n?i=>globalThis.CodexMuxWindows.consumeRateLimitReset(n,i):eSa,"
+        "onSuccess:(n,i)=>{let{creditId:a}=i,o=n.code;if(o===`reset`||o===`already_redeemed`){"
+        "let s=o===`reset`?n.credit?.id??a:a;e.setQueryData(r,e=>Cxa(e,o,s))}"
+        "Promise.all([t([`rate-limit-status`]),t(r)])}})}"
+    ),
+    "selected_usage_anchor": "let y=v;if(g!=null){",
+    "selected_usage_replacement": (
+        "let y=globalThis.CodexMuxWindows?.selectedResetUsageWindows?.()??v;if(g!=null){"
+    ),
+    "reset_header_anchor": (
+        "let _e;t[46]===he?_e=t[47]:(_e=(0,u4.jsxs)(IR,{children:[he,ge]}),"
+        "t[46]=he,t[47]=_e);"
+    ),
+    "reset_header_replacement": (
+        "let _e=(0,u4.jsxs)(IR,{children:[he,ge,"
+        "(0,u4.jsx)(`codex-mux-reset-picker`,{})]});"
+    ),
+    "profile_picker_anchor": "children:[Sn,Cn,Tn]",
+    "profile_picker_replacement": "children:[(0,$.jsx)(`codex-mux-profile-picker`,{}),Sn,Cn,Tn]",
+    "plugin_picker_anchor": "I=(0,D.jsx)(v,{title:O,subtitle:k,action:F,children:w})",
+    "plugin_picker_replacement": (
+        "I=(0,D.jsx)(v,{title:O,subtitle:k,action:F,children:(0,D.jsxs)(`div`,"
+        "{className:`contents`,children:[(0,D.jsx)(`codex-mux-plugin-picker`,{}),w]})})"
+    ),
+}
+
+# Codex 26.818.4152.0 (Windows Store). This build keeps the same feature
+# surfaces but rolled the app-initial module aliases forward again. The native
+# Usage & billing page is still the source of layout and billing copy; its
+# account-scoped requests are redirected through the Relay bridge so the page
+# cannot accidentally read the official Codex account.
+STORE_26_818_4152_RENDERER_PROFILE = {
+    "profile_query_anchor": "async function iWl(){let e=await F_.safeGet(`/wham/profiles/me`);",
+    "profile_query_replacement": (
+        "async function iWl(){let e=await(globalThis.CodexMuxWindows?.profileData?.()"
+        "??F_.safeGet(`/wham/profiles/me`));"
+    ),
+    "usage_status_anchor": (
+        "let e=await F_.safeGet(`/wham/usage`,{additionalHeaders:{\"OAI-App-Brand\":j_}})"
+    ),
+    "usage_status_replacement": (
+        "let e=typeof globalThis.CodexMuxWindows?.usageStatus===`function`?"
+        "await globalThis.CodexMuxWindows.usageStatus():{}"
+    ),
+    "plugin_request_anchor": (
+        "async sendRequest(e,t,n){if(this.dispatchMessage==null)throw Error("
+        "`AppServerRequestClient is missing a message dispatcher`);return e===`config/read`?"
+        "this.sendConfigReadRequest(t,n):this.enqueueRequest(e,t,e===`plugin/list`&&n?.timeoutMs==null?"
+        "{...n,timeoutMs:CFt}:n)}"
+    ),
+    "plugin_request_replacement": (
+        "async sendRequest(e,t,n){t=globalThis.CodexMuxWindows?.scopePluginRequest?.(e,t)??t;"
+        "if(this.dispatchMessage==null)throw Error(`AppServerRequestClient is missing a message dispatcher`);"
+        "return e===`config/read`?this.sendConfigReadRequest(t,n):this.enqueueRequest(e,t,"
+        "e===`plugin/list`&&n?.timeoutMs==null?{...n,timeoutMs:CFt}:n)}"
+    ),
+    "reset_query_anchor": (
+        "function eSa(){let e=(0,EV.c)(1),t;return e[0]===Symbol.for(`react.memo_cache_sentinel`)?"
+        "(t={queryKey:[`rate-limit-reset-credits`],queryFn:tSa,refetchInterval:Ap.ONE_MINUTE,"
+        "staleTime:Ap.FIVE_SECONDS},e[0]=t):t=e[0],It(t)}"
+    ),
+    "reset_query_replacement": (
+        "function eSa(){let n=(0,u4.useSyncExternalStore)("
+        "e=>globalThis.CodexMuxWindows?.subscribeReset?.(e)??(()=>{}),"
+        "()=>globalThis.CodexMuxWindows?.getResetAccountId?.()??null,()=>null);return It({"
+        "queryKey:[`rate-limit-reset-credits`,n??`primary`],"
+        "queryFn:()=>globalThis.CodexMuxWindows?.rateLimitResets?.(n??`primary`)??tSa(),"
+        "refetchInterval:Ap.ONE_MINUTE,staleTime:Ap.FIVE_SECONDS})}"
+    ),
+    "reset_mutation_anchor": (
+        "function nSa(){let e=(0,EV.c)(3),t=ct(),n=mb(),r;return e[0]!==n||e[1]!==t?"
+        "(r={mutationFn:rSa,onSuccess:(e,r)=>{let{creditId:i}=r,a=e.code;"
+        "if(a===`reset`||a===`already_redeemed`){let n=e.code===`reset`?e.credit?.id??i:i;"
+        "t.setQueryData([`rate-limit-reset-credits`],e=>Exa(e,a,n))}"
+        "Promise.all([n([`rate-limit-status`]),n([`rate-limit-reset-credits`])])}},"
+        "e[0]=n,e[1]=t,e[2]=r):r=e[2],Qt(r)}"
+    ),
+    "reset_mutation_replacement": (
+        "function nSa(){let e=ct(),t=mb(),n=globalThis.CodexMuxWindows?.getResetAccountId?.()??null,"
+        "r=[`rate-limit-reset-credits`,n??`primary`];return Qt({"
+        "mutationFn:n?i=>globalThis.CodexMuxWindows.consumeRateLimitReset(n,i):rSa,"
+        "onSuccess:(n,i)=>{let{creditId:a}=i,o=n.code;if(o===`reset`||o===`already_redeemed`){"
+        "let s=o===`reset`?n.credit?.id??a:a;e.setQueryData(r,e=>Exa(e,o,s))}"
+        "Promise.all([t([`rate-limit-status`]),t(r)])}})}"
+    ),
+    "selected_usage_anchor": "let y=v;if(g!=null){",
+    "selected_usage_replacement": (
+        "let y=globalThis.CodexMuxWindows?.selectedResetUsageWindows?.()??v;if(g!=null){"
+    ),
+    "reset_header_anchor": (
+        "let _e;t[46]===he?_e=t[47]:(_e=(0,u4.jsxs)(OR,{children:[he,ge]}),"
+        "t[46]=he,t[47]=_e);"
+    ),
+    "reset_header_replacement": (
+        "let _e=(0,u4.jsxs)(OR,{children:[he,ge,(0,u4.jsx)(`codex-mux-reset-picker`,{})]});"
+    ),
+    "profile_picker_anchor": "children:[Sn,Cn,Tn]",
+    "profile_picker_replacement": "children:[(0,$.jsx)(`codex-mux-profile-picker`,{}),Sn,Cn,Tn]",
+    "plugin_picker_anchor": "I=(0,D.jsx)(v,{title:O,subtitle:k,action:F,children:w})",
+    "plugin_picker_replacement": (
+        "I=(0,D.jsx)(v,{title:O,subtitle:k,action:F,children:(0,D.jsxs)(`div`,"
+        "{className:`contents`,children:[(0,D.jsx)(`codex-mux-plugin-picker`,{}),w]})})"
+    ),
+}
+
 LEGACY_RENDERER_PROFILE = {
     "profile_query_anchor": PROFILE_QUERY_ANCHOR,
     "profile_query_replacement": PROFILE_QUERY_REPLACEMENT,
@@ -217,6 +375,8 @@ LEGACY_RENDERER_PROFILE = {
 WINDOWS_RENDERER_PROFILES = {
     "c7ac6d76cf5f30aa5cb92e1e46561933c06e94e3fe2d6582a04dac18c76f3ed1": LEGACY_RENDERER_PROFILE,
     "71c60b36a782e5597f1ca90abf70dba6a9a6aa4e61f3be69e422be43666a7d70": CURRENT_RENDERER_PROFILE,
+    "1eb70e2aa26f2408a3e65817f0974e137b1a7ff6e52e43a184154bd4db2074d1": STORE_26_818_3698_RENDERER_PROFILE,
+    "10ca5c476ec300f27079184726498a6e8f13ad25b9b443661288eccf4d930ef4": STORE_26_818_4152_RENDERER_PROFILE,
 }
 TESTED_ASAR_HASHES = set(WINDOWS_RENDERER_PROFILES)
 # The browser-login bridge is injected into the standard main-renderer preload
@@ -346,7 +506,11 @@ def parse_args() -> argparse.Namespace:
         help="Managed Router app destination (defaults to the stable per-user location)",
     )
     parser.add_argument("--force", action="store_true", help="Back up and replace an existing router copy")
-    parser.add_argument("--allow-untested-source", action="store_true", help="Allow an unrecorded app.asar hash")
+    parser.add_argument(
+        "--allow-untested-source",
+        action="store_true",
+        help="Try structural anchor discovery for an unrecorded app.asar hash (still fails closed on ambiguity)",
+    )
     parser.add_argument(
         "--launch",
         action="store_true",
@@ -621,6 +785,234 @@ def asset_with_anchor(assets: Path, pattern: str, anchor: str, description: str)
     return matches[0]
 
 
+# Unknown Store builds are not trusted merely because a few human-readable
+# strings still exist. The structural fallback below treats the last reviewed
+# renderer profiles as templates: JavaScript identifiers outside quoted strings
+# are captured and must remain consistent wherever the minifier reuses them.
+# This lets a routine Codex update roll its aliases forward without requiring a
+# new hash entry, while a moved/duplicated feature still fails closed.
+_DYNAMIC_TEMPLATE_RESERVED = {
+    "async", "await", "case", "catch", "const", "default", "else", "Error",
+    "false", "finally", "for", "function", "if", "in", "instanceof", "let",
+    "new", "null", "of", "return", "switch", "throw", "true", "try", "typeof",
+    "var", "void", "while", "this",
+}
+
+
+def _identifier_spans_outside_strings(source: str) -> list[tuple[int, int, str]]:
+    spans: list[tuple[int, int, str]] = []
+    quote: str | None = None
+    index = 0
+    while index < len(source):
+        character = source[index]
+        if quote is not None:
+            if character == "\\":
+                index += 2
+                continue
+            if character == quote:
+                quote = None
+            index += 1
+            continue
+        if character in "'\"`":
+            quote = character
+            index += 1
+            continue
+        if character == "_" or character == "$" or character.isalpha():
+            end = index + 1
+            while end < len(source) and (source[end] == "_" or source[end] == "$" or source[end].isalnum()):
+                end += 1
+            spans.append((index, end, source[index:end]))
+            index = end
+            continue
+        index += 1
+    return spans
+
+
+def _dynamic_template_pattern(template: str) -> tuple[str, dict[str, str]]:
+    groups: dict[str, str] = {}
+    parts: list[str] = []
+    cursor = 0
+    for start, end, token in _identifier_spans_outside_strings(template):
+        parts.append(re.escape(template[cursor:start]))
+        if token in _DYNAMIC_TEMPLATE_RESERVED:
+            parts.append(re.escape(token))
+        elif token in groups:
+            parts.append(f"(?P={groups[token]})")
+        else:
+            name = f"identifier_{len(groups)}"
+            groups[token] = name
+            parts.append(f"(?P<{name}>[A-Za-z_$][A-Za-z0-9_$]*)")
+        cursor = end
+    parts.append(re.escape(template[cursor:]))
+    return "".join(parts), groups
+
+
+def _discover_dynamic_anchor(source: str, template: str, description: str) -> tuple[str, dict[str, str], int]:
+    pattern, groups = _dynamic_template_pattern(template)
+    matches = list(re.finditer(pattern, source))
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"could not safely infer {description} from an untested Windows build "
+            f"(expected one structural match, found {len(matches)})"
+        )
+    match = matches[0]
+    values = {token: match.group(group) for token, group in groups.items()}
+    return match.group(0), values, match.start()
+
+
+def _replace_dynamic_identifiers(source: str, values: dict[str, str]) -> str:
+    output: list[str] = []
+    cursor = 0
+    for start, end, token in _identifier_spans_outside_strings(source):
+        output.append(source[cursor:start])
+        output.append(values.get(token, token))
+        cursor = end
+    output.append(source[cursor:])
+    return "".join(output)
+
+
+def _nearby_jsx_alias(source: str, anchor_start: int) -> str:
+    prefix = source[max(0, anchor_start - 2_000):anchor_start]
+    aliases = re.findall(r"\(0,([A-Za-z_$][A-Za-z0-9_$]*)\.jsx\)", prefix)
+    if not aliases:
+        raise RuntimeError(
+            "could not safely infer the Profile JSX namespace from an untested Windows build"
+        )
+    return aliases[-1]
+
+
+def discover_renderer_profile(extracted: Path) -> dict[str, str]:
+    """Infer a renderer profile from unique semantic anchors.
+
+    The returned profile contains the *actual* anchors and minifier aliases in
+    the extracted build, so the existing exact-once patcher remains the final
+    guard. Discovery is intentionally conservative and is only used when the
+    caller explicitly opted into an untested source.
+    """
+    assets = extracted / "webview" / "assets"
+    if not assets.is_dir():
+        raise RuntimeError("could not find the Windows renderer assets directory")
+    candidates = (
+        CURRENT_RENDERER_PROFILE,
+        LEGACY_RENDERER_PROFILE,
+        STORE_26_818_3698_RENDERER_PROFILE,
+        STORE_26_818_4152_RENDERER_PROFILE,
+    )
+    failures: list[str] = []
+    for template in candidates:
+        try:
+            initial_paths = list(assets.glob("app-initial-*.js"))
+            if not initial_paths:
+                raise RuntimeError("could not find app-initial renderer asset")
+            initial_matches: list[Path] = []
+            for path in initial_paths:
+                source = path.read_text(encoding="utf-8")
+                try:
+                    _discover_dynamic_anchor(source, template["profile_query_anchor"], "Profile query")
+                except RuntimeError as error:
+                    if "found 0" not in str(error):
+                        raise
+                    continue
+                initial_matches.append(path)
+            if len(initial_matches) != 1:
+                raise RuntimeError(
+                    f"could not safely infer Profile query asset (found {len(initial_matches)})"
+                )
+            initial_path = initial_matches[0]
+            initial_source = initial_path.read_text(encoding="utf-8")
+            dynamic: dict[str, str] = {}
+            dynamic_values: dict[str, dict[str, str]] = {}
+            for key, description in (
+                ("profile_query", "Profile query"),
+                ("usage_status", "native usage query"),
+                ("plugin_request", "Plugins RPC"),
+                ("reset_query", "reset query"),
+                ("reset_mutation", "reset mutation"),
+                ("selected_usage", "usage window"),
+                ("reset_header", "reset sheet header"),
+            ):
+                anchor, values, start = _discover_dynamic_anchor(
+                    initial_source, template[f"{key}_anchor"], description
+                )
+                dynamic[f"{key}_anchor"] = anchor
+                dynamic_values[key] = values
+                replacement = _replace_dynamic_identifiers(
+                    template[f"{key}_replacement"], values
+                )
+                if key == "reset_query" and "useSyncExternalStore" in replacement:
+                    react_aliases = set(re.findall(
+                        r"\b([A-Za-z_$][A-Za-z0-9_$]*)\.useSyncExternalStore\b",
+                        initial_source,
+                    ))
+                    if len(react_aliases) != 1:
+                        raise RuntimeError(
+                            "could not safely infer the React subscription namespace for reset query"
+                        )
+                    replacement = re.sub(
+                        r"\b[A-Za-z_$][A-Za-z0-9_$]*\.useSyncExternalStore\b",
+                        f"{next(iter(react_aliases))}.useSyncExternalStore",
+                        replacement,
+                        count=1,
+                    )
+                dynamic[f"{key}_replacement"] = replacement
+
+            profile_paths = list(assets.glob("profile-*.js"))
+            profile_matches: list[tuple[Path, str, dict[str, str], int]] = []
+            for path in profile_paths:
+                source = path.read_text(encoding="utf-8")
+                try:
+                    profile_matches.append((path, *_discover_dynamic_anchor(
+                        source, template["profile_picker_anchor"], "Profile settings"
+                    )))
+                except RuntimeError as error:
+                    if "found 0" not in str(error):
+                        raise
+                    continue
+            if len(profile_matches) != 1:
+                raise RuntimeError(
+                    f"could not safely infer Profile settings asset (found {len(profile_matches)})"
+                )
+            profile_path, profile_anchor, profile_values, profile_start = profile_matches[0]
+            profile_replacement = _replace_dynamic_identifiers(
+                template["profile_picker_replacement"], profile_values
+            )
+            if "(0,$.jsx)" in profile_replacement:
+                profile_replacement = profile_replacement.replace(
+                    "(0,$.jsx)", f"(0,{_nearby_jsx_alias(profile_path.read_text(encoding='utf-8'), profile_start)}.jsx)"
+                )
+            dynamic["profile_picker_anchor"] = profile_anchor
+            dynamic["profile_picker_replacement"] = profile_replacement
+
+            plugin_paths = list(assets.glob("plugins-settings-*.js"))
+            plugin_matches: list[tuple[Path, str, dict[str, str], int]] = []
+            for path in plugin_paths:
+                source = path.read_text(encoding="utf-8")
+                try:
+                    plugin_matches.append((path, *_discover_dynamic_anchor(
+                        source, template["plugin_picker_anchor"], "Plugins settings"
+                    )))
+                except RuntimeError as error:
+                    if "found 0" not in str(error):
+                        raise
+                    continue
+            if len(plugin_matches) != 1:
+                raise RuntimeError(
+                    f"could not safely infer Plugins settings asset (found {len(plugin_matches)})"
+                )
+            _plugin_path, plugin_anchor, plugin_values, _plugin_start = plugin_matches[0]
+            dynamic["plugin_picker_anchor"] = plugin_anchor
+            dynamic["plugin_picker_replacement"] = _replace_dynamic_identifiers(
+                template["plugin_picker_replacement"], plugin_values
+            )
+            return dynamic
+        except RuntimeError as error:
+            failures.append(str(error))
+    raise RuntimeError(
+        "the untested Windows renderer did not pass structural compatibility checks; "
+        "review the new Codex build before installing it (" + failures[-1] + ")"
+    )
+
+
 def patch_windows_feature_bundles(
     extracted: Path,
     renderer_profile: dict[str, str] | None = None,
@@ -807,6 +1199,7 @@ def patch_windows_renderer(
     token: str,
     *,
     renderer_profile: dict[str, str] | None = None,
+    allow_structural_discovery: bool = False,
     router_version: str = VERSION,
 ) -> None:
     node, asar = require_asar_tool()
@@ -837,6 +1230,12 @@ def patch_windows_renderer(
     index = index.replace("</head>", f"    {script_tag}\n</head>", 1)
     index_path.write_text(index, encoding="utf-8")
 
+    if renderer_profile is None and allow_structural_discovery:
+        print("No reviewed hash profile; checking unique renderer anchors…")
+        renderer_profile = discover_renderer_profile(extracted)
+        print("Structural renderer compatibility checks passed.")
+    if renderer_profile is None:
+        raise RuntimeError("Windows renderer profile is required before patching")
     patch_windows_feature_bundles(extracted, renderer_profile)
     login_preload, login_main = patch_windows_login_bundles(extracted, router_version)
 
@@ -1014,9 +1413,9 @@ def patch(
         raise RuntimeError("source app.asar is not approved; review the update or pass --allow-untested-source")
     renderer_profile = WINDOWS_RENDERER_PROFILES.get(actual_hash)
     if renderer_profile is None:
-        raise RuntimeError(
-            "source app.asar has no reviewed Windows renderer profile; "
-            "update the exact anchors before installing it"
+        print(
+            "Source hash is not in the reviewed list; the installer will only "
+            "continue if structural compatibility discovery passes."
         )
     if shutil.which("go") is None:
         raise RuntimeError("Go is required to build the mux")
@@ -1059,6 +1458,7 @@ def patch(
             Path(temp),
             token,
             renderer_profile=renderer_profile,
+            allow_structural_discovery=renderer_profile is None and allow_untested,
             router_version=VERSION,
         )
         real_codex = staged_resources / "codex.real.exe"

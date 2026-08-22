@@ -42,7 +42,7 @@ func syncIsolatedConfig(primaryCodexHome, isolatedCodexHome string) error {
 	// The Windows elevated sandbox currently fails on a number of supported
 	// desktop installations (and can block every chat before a turn starts).
 	// Secondary homes are Router-owned, so make their safe fallback explicit.
-	// The native primary home is intentionally never rewritten here; the
+	// The primary home is intentionally not rewritten by secondary sync; the
 	// Router app-server receives the same override at process start instead.
 	if runtime.GOOS == "windows" {
 		managed = forceWindowsSandboxUnelevated(managed)

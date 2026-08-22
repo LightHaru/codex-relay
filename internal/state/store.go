@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -22,7 +23,14 @@ type Account struct {
 	CodexHome  string `json:"codexHome"`
 	Enabled    bool   `json:"enabled"`
 	Controller bool   `json:"controller"`
-	CreatedAt  int64  `json:"createdAt"`
+	// PendingLogin records an intentionally started secondary-account browser
+	// sign-in. It is persisted so reopening Relay can restore the actionable
+	// "waiting for sign-in" row instead of guessing from a disconnected child.
+	// PendingLoginID is kept private to the control API and is never returned to
+	// the renderer; it lets cancellation finish a flow after a Relay restart.
+	PendingLogin   bool   `json:"pendingLogin,omitempty"`
+	PendingLoginID string `json:"pendingLoginId,omitempty"`
+	CreatedAt      int64  `json:"createdAt"`
 }
 
 type persistedState struct {
@@ -38,13 +46,32 @@ type Store struct {
 	root             string
 	path             string
 	primaryCodexHome string
-	accounts         []Account
-	owners           map[string]string
+	// legacyPrimaryCodexHome is read-only migration context for rollout files
+	// that an older Router build recorded under the native Store home. It is
+	// never used for credentials, child processes, or managed-config syncing.
+	legacyPrimaryCodexHome string
+	accounts               []Account
+	owners                 map[string]string
 }
 
 func Open(root, primaryCodexHome string) (*Store, error) {
+	return open(root, primaryCodexHome, "", false)
+}
+
+// OpenIsolated opens Router state whose primary CODEX_HOME is owned by the
+// independent Relay desktop. It migrates only the old Router metadata that
+// pointed at the native ~/.codex home; the native directory itself is never
+// copied, deleted, or modified.
+func OpenIsolated(root, primaryCodexHome, legacyPrimaryHome string) (*Store, error) {
+	return open(root, primaryCodexHome, legacyPrimaryHome, true)
+}
+
+func open(root, primaryCodexHome, legacyPrimaryHome string, isolatedPrimary bool) (*Store, error) {
 	if root == "" {
 		return nil, errors.New("state root is required")
+	}
+	if primaryCodexHome == "" {
+		return nil, errors.New("primary Codex home is required")
 	}
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, fmt.Errorf("create state root: %w", err)
@@ -54,11 +81,13 @@ func Open(root, primaryCodexHome string) (*Store, error) {
 	}
 
 	store := &Store{
-		root:             root,
-		path:             filepath.Join(root, "state.json"),
-		primaryCodexHome: primaryCodexHome,
-		owners:           make(map[string]string),
+		root:                   root,
+		path:                   filepath.Join(root, "state.json"),
+		primaryCodexHome:       primaryCodexHome,
+		legacyPrimaryCodexHome: strings.TrimSpace(legacyPrimaryHome),
+		owners:                 make(map[string]string),
 	}
+	stateNeedsSave := false
 	data, err := os.ReadFile(store.path)
 	switch {
 	case err == nil:
@@ -88,6 +117,30 @@ func Open(root, primaryCodexHome string) (*Store, error) {
 	default:
 		return nil, fmt.Errorf("read state: %w", err)
 	}
+	if isolatedPrimary {
+		if err := ensurePrivateCodexHome(primaryCodexHome); err != nil {
+			return nil, err
+		}
+		if changed, migrateErr := store.migrateLegacyAccountHomesLocked(legacyPrimaryHome); migrateErr != nil {
+			return nil, migrateErr
+		} else if changed {
+			stateNeedsSave = true
+		}
+		// Force the Relay primary onto file-backed credentials even when a
+		// previous interrupted startup left a partial config behind. This call
+		// only touches the dedicated Relay home, never the native ~/.codex.
+		if err := syncIsolatedConfig(primaryCodexHome, primaryCodexHome); err != nil {
+			return nil, fmt.Errorf("secure isolated primary config: %w", err)
+		}
+	}
+	if store.ensureNativePrimaryLocked() {
+		stateNeedsSave = true
+	}
+	if stateNeedsSave {
+		if err := store.saveLocked(); err != nil {
+			return nil, err
+		}
+	}
 	for _, account := range store.accounts {
 		if samePath(account.CodexHome, primaryCodexHome) {
 			continue
@@ -97,6 +150,86 @@ func Open(root, primaryCodexHome string) (*Store, error) {
 		}
 	}
 	return store, nil
+}
+
+func ensurePrivateCodexHome(codexHome string) error {
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		return fmt.Errorf("create isolated primary Codex home: %w", err)
+	}
+	if err := os.Chmod(codexHome, 0o700); err != nil {
+		return fmt.Errorf("secure isolated primary Codex home: %w", err)
+	}
+	return nil
+}
+
+// migrateLegacyAccountHomesLocked changes only Router metadata. Older Router
+// builds could persist the native ~/.codex home for the Primary account, and a
+// partially completed migration could even leave a secondary row pointing at
+// that same home. Neither case is allowed in isolated mode: every matching row
+// is moved to a Relay-owned home and its old thread-owner mappings are removed.
+// The native home and its rollout/auth files are never copied, deleted, or
+// modified, so the official Codex app keeps its own account and chat history.
+func (s *Store) migrateLegacyAccountHomesLocked(legacyPrimaryHome string) (bool, error) {
+	legacyPrimaryHome = strings.TrimSpace(legacyPrimaryHome)
+	if legacyPrimaryHome == "" || samePath(legacyPrimaryHome, s.primaryCodexHome) {
+		return false, nil
+	}
+	changed := false
+	for index := range s.accounts {
+		account := &s.accounts[index]
+		if !samePath(account.CodexHome, legacyPrimaryHome) {
+			continue
+		}
+		if account.ID == "primary" {
+			account.CodexHome = s.primaryCodexHome
+		} else {
+			if account.ID == "" || filepath.Base(account.ID) != account.ID || account.ID == "." || account.ID == ".." {
+				return false, fmt.Errorf("account %q has an unsafe ID during isolated migration", account.ID)
+			}
+			account.CodexHome = filepath.Join(s.root, "accounts", account.ID, "codex-home")
+		}
+		// The old rollout files live in the native home and are outside this
+		// account's new source directory. Keeping the affinity would recreate
+		// the "existing chat history is outside the source sessions directory"
+		// failure and could route a request with the wrong credentials.
+		changed = true
+		for threadID, owner := range s.owners {
+			if owner == account.ID {
+				delete(s.owners, threadID)
+			}
+		}
+	}
+	return changed, nil
+}
+
+// ensureNativePrimaryLocked repairs state written by older Router builds that
+// allowed the configured Relay Primary account to disappear after a Primary
+// switch or account removal. The configured primary home is always retained as
+// a non-controller subscription when another account is selected as Router
+// Primary; otherwise it remains the controller. Keeping this metadata lets the
+// active Relay home remain addressable across state migrations.
+func (s *Store) ensureNativePrimaryLocked() bool {
+	for _, account := range s.accounts {
+		if samePath(account.CodexHome, s.primaryCodexHome) {
+			return false
+		}
+	}
+	hasController := false
+	for _, account := range s.accounts {
+		if account.Controller {
+			hasController = true
+			break
+		}
+	}
+	s.accounts = append([]Account{{
+		ID:         "primary",
+		Label:      "Primary",
+		CodexHome:  s.primaryCodexHome,
+		Enabled:    true,
+		Controller: !hasController,
+		CreatedAt:  time.Now().Unix(),
+	}}, s.accounts...)
+	return true
 }
 
 func (s *Store) Root() string {
@@ -155,13 +288,22 @@ func (s *Store) Controller() (Account, bool) {
 	return s.accounts[0], true
 }
 
-// PrimaryCodexHome returns the home owned by the original Codex installation.
-// It is used by the mux cleanup path to ensure account management can never
-// remove the user's native Codex credentials or conversation database.
+// PrimaryCodexHome returns the home owned by the Relay Primary account. It is
+// used by the mux cleanup path to ensure account management can never remove
+// the active primary credentials or conversation database.
 func (s *Store) PrimaryCodexHome() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.primaryCodexHome
+}
+
+// LegacyPrimaryCodexHome returns the former native Store home only as a
+// read-only rollout-history migration source. Relay never starts an
+// app-server child there and never reads its auth/config files for routing.
+func (s *Store) LegacyPrimaryCodexHome() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.legacyPrimaryCodexHome
 }
 
 // SetController makes exactly one existing account the Router Primary. The
@@ -259,6 +401,51 @@ func (s *Store) UpdateAccount(id string, label *string, enabled *bool) (Account,
 	return Account{}, fmt.Errorf("account %q not found", id)
 }
 
+// SetPendingLogin marks an account as intentionally waiting for the official
+// browser callback. The login identifier is optional because older Codex
+// builds did not return one, but the pending marker itself is always persisted
+// so a restart cannot turn an unfinished flow into an ambiguous disconnected
+// account row.
+func (s *Store) SetPendingLogin(id, loginID string) (Account, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index := range s.accounts {
+		if s.accounts[index].ID != id {
+			continue
+		}
+		s.accounts[index].PendingLogin = true
+		s.accounts[index].PendingLoginID = strings.TrimSpace(loginID)
+		if err := s.saveLocked(); err != nil {
+			return Account{}, err
+		}
+		return s.accounts[index], nil
+	}
+	return Account{}, fmt.Errorf("account %q not found", id)
+}
+
+// ClearPendingLogin removes the persisted sign-in intent. It is idempotent so
+// account/login/completed notifications and an account snapshot can race
+// safely during the browser callback.
+func (s *Store) ClearPendingLogin(id string) (Account, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index := range s.accounts {
+		if s.accounts[index].ID != id {
+			continue
+		}
+		if !s.accounts[index].PendingLogin && s.accounts[index].PendingLoginID == "" {
+			return s.accounts[index], nil
+		}
+		s.accounts[index].PendingLogin = false
+		s.accounts[index].PendingLoginID = ""
+		if err := s.saveLocked(); err != nil {
+			return Account{}, err
+		}
+		return s.accounts[index], nil
+	}
+	return Account{}, fmt.Errorf("account %q not found", id)
+}
+
 // DiscardProvisionalAccount removes a secondary subscription that never
 // completed sign-in. Callers must first establish that the account is not
 // connected. This narrow operation intentionally cannot remove the controller
@@ -272,8 +459,8 @@ func (s *Store) DiscardProvisionalAccount(id string) (Account, error) {
 		if account.ID != id {
 			continue
 		}
-		if account.Controller {
-			return Account{}, errors.New("the primary account cannot be discarded")
+		if account.Controller || samePath(account.CodexHome, s.primaryCodexHome) {
+			return Account{}, errors.New("the Relay primary account cannot be discarded")
 		}
 		for threadID, ownerID := range s.owners {
 			if ownerID == id {
@@ -312,6 +499,9 @@ func (s *Store) RemoveAccount(id string, force bool) (Account, error) {
 		}
 		if account.Controller {
 			return Account{}, errors.New("choose another Primary account before removing this account")
+		}
+		if samePath(account.CodexHome, s.primaryCodexHome) {
+			return Account{}, errors.New("the Relay primary account cannot be removed")
 		}
 		if len(s.accounts) <= 1 {
 			return Account{}, errors.New("at least one subscription must remain")
@@ -411,10 +601,31 @@ func (s *Store) saveLocked() error {
 	if err := os.Chmod(temporary, 0o600); err != nil {
 		return fmt.Errorf("secure state: %w", err)
 	}
-	if err := os.Rename(temporary, s.path); err != nil {
+	if err := renameStateFile(temporary, s.path); err != nil {
 		return fmt.Errorf("commit state: %w", err)
 	}
 	return nil
+}
+
+// renameStateFile retries short Windows sharing/access races (for example,
+// Defender or the desktop renderer briefly opening state.json). The write is
+// already complete and the destination is replaced atomically; a bounded
+// retry keeps account/thread metadata durable without weakening the failure
+// path for persistent errors.
+func renameStateFile(temporary, destination string) error {
+	const attempts = 8
+	var err error
+	for attempt := 0; attempt < attempts; attempt++ {
+		err = os.Rename(temporary, destination)
+		if err == nil {
+			return nil
+		}
+		if runtime.GOOS != "windows" {
+			return err
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return err
 }
 
 func randomID() (string, error) {

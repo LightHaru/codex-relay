@@ -93,10 +93,13 @@ function loadBridge({ fetchImpl, privateLoginImpl, updaterImpl } = {}) {
        "    dismissToast,",
        "    getActiveLogin: () => activeLogin,",
       "    getActiveToast: () => activeToast,",
-      "    showUpdateToast,",
-      "    dismissUpdateToast,",
-      "    openBrowserLogin,",
-      "    openAccountSettings,",
+       "    showUpdateToast,",
+       "    dismissUpdateToast,",
+       "    openBrowserLogin,",
+       "    openAccountSettings,",
+       "    renderAccountManager,",
+       "    renderAccountResetSection,",
+       "    consumeRateLimitReset,",
       "    renderMenu,",
       "    remainingUsage,",
       "    accountName,",
@@ -104,11 +107,10 @@ function loadBridge({ fetchImpl, privateLoginImpl, updaterImpl } = {}) {
       "    quotaResetSummary,",
       "    formatResetCountdown,",
       "    usageWindows,",
+      "    usageBillingHeading,",
+      "    renderUsageBillingSurface,",
       "    setPrimaryAccount,",
       "    showBrowserLogin,",
-      "    renderUsageBilling,",
-      "    renderUsageAccount,",
-      "    usageBillingPlacement,",
       "  };",
       "",
       startupAnchor,
@@ -211,6 +213,48 @@ test("browser login completion closes only its active dialog and shows one succe
   assert.equal(hooks.completeLoginOnce(session, { label: "Subscription 2" }), false);
   assert.equal(document.body.children.length, 1, "a repeated poll must not duplicate the toast");
   hooks.dismissToast(hooks.getActiveToast());
+});
+
+test("native usage billing bridge exposes the all-subscription endpoint", async () => {
+  const requests = [];
+  const { bridge } = loadBridge({
+    fetchImpl: async (url) => {
+      requests.push(url);
+      return { ok: true, json: async () => ({ accounts: [{ accountId: "primary" }] }) };
+    },
+  });
+  const result = await bridge.usageStatusAll();
+  assert.deepEqual(result.accounts, [{ accountId: "primary" }]);
+  assert.equal(requests.some((url) => url.endsWith("/usage/all")), true);
+});
+
+test("Usage & billing renders one in-flow card for every enabled subscription", async () => {
+  const { hooks } = loadBridge({
+    fetchImpl: async (url) => ({
+      ok: true,
+      json: async () => url.includes("rate-limit-resets")
+        ? { available_count: 1, applicable_available_count: 1, credits: [{ id: "credit-1", status: "available", title: "Weekly reset" }] }
+        : { accounts: [] },
+    }),
+  });
+  const host = new FakeElement("host");
+  hooks.renderUsageBillingSurface([
+    { id: "primary", label: "Primary", displayName: "Bennett", enabled: true, connected: true, controller: true, planLabel: "Plus", rateLimits: { primary: { usedPercent: 17, windowDurationMins: 10080 } } },
+    { id: "secondary", label: "Subscription 2", displayName: "Susan", enabled: true, connected: true, controller: false, planLabel: "Plus", rateLimits: { primary: { usedPercent: 100, windowDurationMins: 10080 } } },
+  ], {
+    availableCount: 2,
+    accounts: [
+      { accountId: "primary", connected: true, usage: { plan_type: "plus", credits: { balance: "0" } } },
+      { accountId: "secondary", connected: true, usage: { plan_type: "plus", credits: { balance: "0" } } },
+    ],
+  }, host, { resetRenderVersion: 1 }, 1);
+  const text = collectText(host);
+  assert.match(text, /All connected subscriptions/);
+  assert.match(text, /Bennett/);
+  assert.match(text, /Susan/);
+  assert.match(text, /General usage limits/);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(collectText(host), /Weekly reset/);
 });
 
 test("a stale browser-login poll cannot close a newer sign-in dialog", () => {
@@ -344,7 +388,7 @@ test("Plugins RPC routing adds the selected account marker without touching unre
   assert.equal(bridge.scopePluginRequest("thread/list", original), original);
 });
 
-test("native Usage bridge reads the token-protected local payload and degrades to null", async () => {
+test("native Usage bridge reads only the token-protected local payload and fails closed", async () => {
   const requests = [];
   const { bridge } = loadBridge({
     fetchImpl: async (url, options = {}) => {
@@ -361,87 +405,129 @@ test("native Usage bridge reads the token-protected local payload and degrades t
   const failed = loadBridge({
     fetchImpl: async () => ({ ok: false, json: async () => ({ error: "unavailable" }) }),
   });
-  assert.equal(await failed.bridge.usageStatus(), null);
+  assert.deepEqual({ ...await failed.bridge.usageStatus() }, {});
 });
 
-test("Usage & billing renders every account payload and preserves new fields", () => {
+test("Account settings renders Usage limit resets per subscription", () => {
   const { hooks } = loadBridge();
-  const host = new FakeElement("codex-mux-usage-billing");
-  hooks.renderUsageBilling(host, {
-    collection: { availableCount: 2 },
-    displayAccounts: [
-      {
-        account: {
-          id: "primary",
-          label: "Primary",
-          displayName: "Bennett",
-          email: "bennett@example.invalid",
-          planLabel: "Plus",
-          planType: "plus",
-          enabled: true,
-          connected: true,
-          controller: true,
-        },
-        usage: {
-          connected: true,
-          usage: {
-            plan_type: "plus",
-            rate_limit: {
-              primary_window: { used_percent: 12, limit_window_seconds: 3600, reset_at: 1900000000 },
-              secondary_window: { used_percent: 4, limit_window_seconds: 604800, reset_at: 1900100000 },
-            },
-            credits: { balance: "12", unlimited: false, approx_local_messages: 20 },
-            spend_control: { reached: false, individual_limit: "25" },
-            rate_limit_reset_credits: { available_count: 2, applicable_available_count: 1 },
-            future_usage_field: { enabled: true },
-          },
-        },
-      },
-      {
-        account: {
-          id: "secondary",
-          label: "Subscription 2",
-          planLabel: "Plus",
-          enabled: true,
-          connected: true,
-          controller: false,
-        },
-        usage: { connected: true, error: "fetch usage: status 401" },
-      },
+  const host = new FakeElement("div");
+  host.append(hooks.renderAccountResetSection({ id: "subscription-2", connected: true }, {
+    available_count: 2,
+    applicable_available_count: 1,
+    credits: [
+      { id: "reset-1", status: "available", title: "Weekly reset", expires_at: "2099-01-02T03:04:05Z" },
+      { id: "reset-2", status: "available", title: "Bonus reset", expires_at: "2099-02-03T04:05:06Z" },
     ],
-  });
+  }));
   const text = collectText(host);
-  assert.match(text, /All connected subscriptions/);
-  assert.match(text, /Bennett/);
-  assert.match(text, /Subscription 2/);
-  assert.match(text, /Credits balance/);
-  assert.match(text, /Reset credits available/);
-  assert.match(text, /future_usage_field/);
-  assert.match(text, /fetch usage: status 401/);
+  assert.match(text, /Usage limit resets/);
+  assert.match(text, /2 available · 1 applicable/);
+  assert.match(text, /Weekly reset/);
+  assert.match(text, /Bonus reset/);
+  assert.match(text, /View all reset details/);
 });
 
-test("Usage panel chooses the native content column instead of the outer shell", () => {
-  const loaded = loadBridge();
-  const heading = new FakeElement("h2");
-  heading.textContent = "Usage & billing";
-  const content = new FakeElement("main");
-  content.rect = { width: 680, height: 900 };
-  content.append(heading, new FakeElement("section"));
-  const outerShell = new FakeElement("div");
-  outerShell.rect = { width: 1000, height: 900 };
-  outerShell.append(new FakeElement("aside"), content);
-  loaded.document.querySelectorAll = () => [heading];
-  const placement = loaded.hooks.usageBillingPlacement();
-  assert.equal(placement.container, content);
+test("Usage limit resets exposes a guarded Use reset action and refreshes after redemption", async () => {
+  const requests = [];
+  let resetReads = 0;
+  const { document, hooks } = loadBridge({
+    fetchImpl: async (url, options = {}) => {
+      requests.push({ url, options });
+      if (url.endsWith("/rate-limit-resets")) {
+        resetReads += 1;
+        return {
+          ok: true,
+          json: async () => resetReads === 1
+            ? {
+              available_count: 1,
+              applicable_available_count: 1,
+              credits: [{ id: "reset-1", status: "available", title: "Full reset", expires_at: "2099-01-02T03:04:05Z" }],
+            }
+            : { available_count: 0, applicable_available_count: 0, credits: [] },
+        };
+      }
+      return { ok: true, json: async () => ({ code: "reset", credit: { id: "reset-1" } }) };
+    },
+  });
+  const host = new FakeElement("host");
+  const state = { resetRenderVersion: 1 };
+  const account = { id: "subscription-2", label: "Subscription 2", connected: true };
+  const section = hooks.renderAccountResetSection(account, {
+    available_count: 1,
+    applicable_available_count: 1,
+    credits: [{ id: "reset-1", status: "available", title: "Full reset", expires_at: "2099-01-02T03:04:05Z" }],
+  }, "", {
+    onUse: async (credit, button) => {
+      button.disabled = true;
+      await hooks.consumeRateLimitReset(account.id, {
+        creditId: credit.id,
+        redeemRequestId: "ui-test-redeem",
+      });
+    },
+  });
+  host.append(section);
+  const find = (element, predicate) => {
+    if (predicate(element)) return element;
+    for (const child of element.children) {
+      if (!child || typeof child !== "object") continue;
+      const match = find(child, predicate);
+      if (match) return match;
+    }
+    return null;
+  };
+  const use = find(section, (element) => element.className === "codex-mux-win-account-reset-use");
+  assert.ok(use, "an available reset must expose a Use reset button");
+  assert.equal(use.textContent, "Use reset");
+  await use.click();
+  const redemption = requests.find((entry) => entry.url.endsWith("/rate-limit-resets/consume"));
+  assert.ok(redemption, "Use reset must call the scoped account endpoint");
+  assert.deepEqual(JSON.parse(redemption.options.body), {
+    creditId: "reset-1",
+    redeemRequestId: "ui-test-redeem",
+  });
+  assert.equal(use.disabled, true, "the action remains locked while the redemption is in flight");
+  assert.match(collectText(host), /Usage limit resets|Full reset/);
 });
 
-test("Usage panel is inserted after the native Usage title and description", () => {
+test("Disconnected accounts only show Cancel sign-in when the Router persisted a pending flow", () => {
+  const { hooks } = loadBridge();
+  const pending = new FakeElement("pending");
+  hooks.renderMenu(pending, [{
+    id: "pending", label: "Pending", enabled: true, connected: false, controller: false, pendingLogin: true,
+  }]);
+  assert.match(collectText(pending), /Waiting for sign-in/);
+  assert.match(collectText(pending), /Cancel sign-in/);
+
+  const stale = new FakeElement("stale");
+  hooks.renderMenu(stale, [{
+    id: "stale", label: "Stale", enabled: true, connected: false, controller: false, pendingLogin: false,
+  }]);
+  assert.match(collectText(stale), /Not connected/);
+  assert.doesNotMatch(collectText(stale), /Cancel sign-in/);
+});
+
+test("Relay primary remains visibly separate and cannot be removed from Account settings", () => {
+  const { hooks } = loadBridge();
+  const state = {
+    accounts: [{ id: "primary", label: "Primary", connected: false, controller: false }],
+    list: new FakeElement("list"),
+    menu: new FakeElement("menu"),
+    status: new FakeElement("status"),
+  };
+  hooks.renderAccountManager(state);
+  const text = collectText(state.list);
+  assert.match(text, /Relay primary · separate from Codex/);
+  assert.match(text, /Relay only/);
+  assert.doesNotMatch(text, /Remove/);
+});
+
+test("the Windows bridge keeps the native Usage & billing page and adds an in-flow Relay surface", () => {
   const source = fs.readFileSync(path.join(__dirname, "windows-router-menu.js"), "utf8");
-  assert.match(source, /semanticHeadings/);
-  assert.match(source, /isNavigationElement/);
-  assert.match(source, /placement\.heading\.nextElementSibling/);
-  assert.match(source, /parent\.insertBefore\(host, before\)/);
-  assert.doesNotMatch(source, /placement\.container\.firstElementChild/);
+  assert.match(source, /const USAGE_SURFACE_ID = "codex-mux-windows-usage-surface"/);
+  assert.match(source, /nativeUsageStatusAll/);
+  assert.match(source, /installUsageBillingSurface\(\);/);
+  assert.match(source, /Usage & billing page/);
+  assert.doesNotMatch(source, /#codex-mux-windows-usage-surface \{[^}]*position:\s*fixed/);
 });
 
 test("usage summary keeps known quota visible when another account has no quota data", () => {

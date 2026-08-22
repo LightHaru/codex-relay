@@ -56,11 +56,16 @@ func run() error {
 	if root == "" {
 		root = filepath.Join(home, ".codex-mux")
 	}
-	primaryCodexHome := os.Getenv("CODEX_HOME")
-	if primaryCodexHome == "" {
-		primaryCodexHome = filepath.Join(home, ".codex")
+	primaryCodexHome, legacyPrimaryHome, isolatedPrimary := resolvePrimaryCodexHome(home, realExecutable)
+	var store *state.Store
+	if isolatedPrimary {
+		// The Relay copy must never inherit the Store app's ~/.codex account,
+		// even when the parent desktop process exposes CODEX_HOME. Its primary
+		// home is a Relay-owned directory with a file-backed credential store.
+		store, err = state.OpenIsolated(root, primaryCodexHome, legacyPrimaryHome)
+	} else {
+		store, err = state.Open(root, primaryCodexHome)
 	}
-	store, err := state.Open(root, primaryCodexHome)
 	if err != nil {
 		return err
 	}
@@ -126,6 +131,58 @@ func run() error {
 	}
 	cancel()
 	return scanner.Err()
+}
+
+// resolvePrimaryCodexHome separates the Windows Relay copy from the official
+// Store installation. The Store app never launches this wrapper, so the
+// executable path is a stable, local marker that does not rely on a mutable
+// Electron user-data directory or on inherited environment variables.
+//
+// CODEX_RELAY_CODEX_HOME is an explicit escape hatch for test/portable
+// installations. CODEX_HOME remains supported for the official/native path.
+func resolvePrimaryCodexHome(home, executable string) (primary, legacy string, isolated bool) {
+	if isRelayWrapperExecutable(executable) {
+		legacyHome := filepath.Join(home, ".codex")
+		if configured := strings.TrimSpace(os.Getenv("CODEX_RELAY_CODEX_HOME")); configured != "" && !sameCodexHome(configured, legacyHome) {
+			return configured, legacyHome, true
+		}
+		appData := strings.TrimSpace(os.Getenv("APPDATA"))
+		if appData == "" {
+			appData = filepath.Join(home, "AppData", "Roaming")
+		}
+		return filepath.Join(appData, "Codex Relay", "codex-home"), legacyHome, true
+	}
+	if configured := strings.TrimSpace(os.Getenv("CODEX_HOME")); configured != "" {
+		return configured, "", false
+	}
+	return filepath.Join(home, ".codex"), "", false
+}
+
+func sameCodexHome(left, right string) bool {
+	leftAbsolute, leftErr := filepath.Abs(left)
+	rightAbsolute, rightErr := filepath.Abs(right)
+	if leftErr != nil || rightErr != nil {
+		leftAbsolute = filepath.Clean(left)
+		rightAbsolute = filepath.Clean(right)
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(leftAbsolute, rightAbsolute)
+	}
+	return leftAbsolute == rightAbsolute
+}
+
+func isRelayWrapperExecutable(executable string) bool {
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	cleaned := strings.ToLower(filepath.Clean(executable))
+	for _, productDirectory := range []string{"codex relay", "codex subscription router"} {
+		marker := strings.ToLower(string(filepath.Separator) + productDirectory + string(filepath.Separator) + "app" + string(filepath.Separator) + "resources" + string(filepath.Separator))
+		if strings.Contains(cleaned, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func resolveRealExecutable() (string, error) {

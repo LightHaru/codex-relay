@@ -7,8 +7,8 @@ const routerWindowsSandboxOverride = `windows.sandbox="unelevated"`
 // normalizeRouterArgs applies the Windows sandbox workaround only to the
 // Router's own Codex process. The official Store app has its own executable
 // and is never passed through this function. Keeping the override on the
-// command line also protects the Router's primary account: its native
-// ~/.codex/config.toml remains untouched for the official app.
+// command line also keeps the Router's primary config scoped to its own
+// CODEX_HOME; the official app's ~/.codex/config.toml remains untouched.
 func normalizeRouterArgs(args []string, forceWindowsUnelevated bool) []string {
 	result := append([]string(nil), args...)
 	if !forceWindowsUnelevated {

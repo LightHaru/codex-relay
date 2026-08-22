@@ -38,6 +38,14 @@ type externalRoute struct {
 	capacityRetries int
 }
 
+// activeTurnRoute remains live after the turn/start response. Codex reports
+// quota failures asynchronously through an error notification and a failed
+// turn/completed event, so the original request must stay available until the
+// turn reaches a terminal state.
+type activeTurnRoute struct {
+	route externalRoute
+}
+
 type serverRequestRoute struct {
 	accountID string
 	original  json.RawMessage
@@ -73,15 +81,17 @@ type Multiplexer struct {
 	initializeParams json.RawMessage
 	initialized      bool
 
-	externalMu     sync.Mutex
-	externalRoutes map[string]externalRoute
-	serverMu       sync.Mutex
-	serverRoutes   map[string]serverRequestRoute
-	serverSequence atomic.Uint64
+	externalMu      sync.Mutex
+	externalRoutes  map[string]externalRoute
+	serverMu        sync.Mutex
+	serverRoutes    map[string]serverRequestRoute
+	serverSequence  atomic.Uint64
+	turnMu          sync.Mutex
+	activeTurns     map[string]activeTurnRoute
+	failedTurnPeers map[string]map[string]struct{}
 	// allocationMu protects the per-account dispatch counters used by the
-	// fair-share selector for new chats. A counter is only a tie-breaker: live
-	// quota percentages remain the primary signal, while the counter prevents
-	// equal-quota subscriptions from always receiving the first request.
+	// round-robin selector for new chats. The counter is the fair-share cursor;
+	// live quota only decides whether an account may enter the pool.
 	allocationMu      sync.Mutex
 	newThreadDispatch map[string]uint64
 
@@ -121,6 +131,8 @@ func New(options Options) (*Multiplexer, error) {
 		cancelling:           make(map[string]struct{}),
 		externalRoutes:       make(map[string]externalRoute),
 		serverRoutes:         make(map[string]serverRequestRoute),
+		activeTurns:          make(map[string]activeTurnRoute),
+		failedTurnPeers:      make(map[string]map[string]struct{}),
 		newThreadDispatch:    make(map[string]uint64),
 		events:               make(map[chan Event]struct{}),
 		profileClient:        &http.Client{Timeout: 10 * time.Second},
@@ -246,20 +258,37 @@ func (m *Multiplexer) initialize(message protocol.Message) {
 	m.initializeParams = append(json.RawMessage(nil), message.Params...)
 	m.initializationMu.Unlock()
 
+	// Initialize every account concurrently. A disconnected or slow account
+	// must not hold the native desktop handshake behind one 30-second timeout
+	// per subscription; the Router can still present the first successful
+	// account while the remaining children finish their own handshake.
+	entries := m.childEntries()
+	type initializationResult struct {
+		result json.RawMessage
+		err    error
+	}
+	results := make(chan initializationResult, len(entries))
+	for _, entry := range entries {
+		go func(entry childEntry) {
+			ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+			response, err := entry.child.Request(ctx, "initialize", message.Params)
+			cancel()
+			results <- initializationResult{result: response.Result, err: err}
+		}(entry)
+	}
+
 	var firstResult json.RawMessage
 	var firstErr error
-	for _, entry := range m.childEntries() {
-		ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
-		response, err := entry.child.Request(ctx, "initialize", message.Params)
-		cancel()
-		if err != nil {
+	for range entries {
+		outcome := <-results
+		if outcome.err != nil {
 			if firstErr == nil {
-				firstErr = err
+				firstErr = outcome.err
 			}
 			continue
 		}
 		if firstResult == nil {
-			firstResult = response.Result
+			firstResult = outcome.result
 		}
 	}
 	if firstResult == nil {
@@ -323,6 +352,14 @@ func (m *Multiplexer) routeExistingRequest(message protocol.Message) {
 	if threadID != "" {
 		accountID, _ = m.store.ThreadOwner(threadID)
 	}
+	if message.Method == "thread/resume" && threadID != "" {
+		// A chat created before Relay was installed may have no persisted owner,
+		// or a previous failover may have left the mapping pointing at a home
+		// that does not contain the rollout. Prefer the account whose managed
+		// history actually contains this thread before falling back to the
+		// selected Router Primary.
+		accountID = m.accountForThreadResume(threadID, accountID)
+	}
 	if accountID == "" {
 		if controller, ok := m.store.Controller(); ok {
 			accountID = controller.ID
@@ -332,6 +369,15 @@ func (m *Multiplexer) routeExistingRequest(message protocol.Message) {
 		m.write(protocol.Failure(message.ID, -32022, "no controller account is configured"))
 		return
 	}
+	if message.Method == "thread/resume" && threadID != "" {
+		// A legacy rollout can still be referenced by an account's SQLite row
+		// while the JSONL itself lives in the former native Store home. Copy that
+		// one rollout into the selected Relay account before forwarding resume;
+		// this keeps the credentials and future writes account-local while making
+		// old chats resumable without asking the native Store child to serve them.
+		go m.routeThreadResume(message, threadID, accountID)
+		return
+	}
 	if message.Method == "turn/start" && threadID != "" {
 		go m.routeTurnStart(message, threadID, accountID)
 		return
@@ -339,6 +385,64 @@ func (m *Multiplexer) routeExistingRequest(message protocol.Message) {
 	if err := m.forward(accountID, message); err != nil {
 		m.write(protocol.Failure(message.ID, -32023, err.Error()))
 	}
+}
+
+func (m *Multiplexer) accountForThreadResume(threadID, mappedAccountID string) string {
+	if mappedAccountID != "" {
+		if account, exists := m.store.Account(mappedAccountID); exists && account.Enabled {
+			if _, found := findThreadHistory(account.CodexHome, threadID); found {
+				return mappedAccountID
+			}
+		}
+	}
+	for _, account := range m.store.Accounts() {
+		if !account.Enabled {
+			continue
+		}
+		if _, found := findThreadHistory(account.CodexHome, threadID); found {
+			return account.ID
+		}
+	}
+	if account, exists := m.store.Account(mappedAccountID); exists && account.Enabled {
+		return account.ID
+	}
+	return ""
+}
+
+func (m *Multiplexer) routeThreadResume(message protocol.Message, threadID, accountID string) {
+	if err := m.ensureThreadHistoryOnAccount(threadID, accountID); err != nil {
+		m.write(protocol.Failure(message.ID, -32027, fmt.Sprintf("prepare chat history: %v", err)))
+		return
+	}
+	if err := m.forward(accountID, message); err != nil {
+		m.write(protocol.Failure(message.ID, -32023, err.Error()))
+	}
+}
+
+// ensureThreadHistoryOnAccount migrates a single rollout from the old native
+// Store home when the Router metadata still points at that chat but the
+// selected Relay account has no local copy. It deliberately does not inspect
+// auth.json, config.toml, or any other credential/configuration file.
+func (m *Multiplexer) ensureThreadHistoryOnAccount(threadID, accountID string) error {
+	account, ok := m.store.Account(accountID)
+	if !ok || !account.Enabled {
+		return fmt.Errorf("account %q is unavailable", accountID)
+	}
+	if _, found := findThreadHistory(account.CodexHome, threadID); found {
+		return nil
+	}
+	legacyHome := m.store.LegacyPrimaryCodexHome()
+	if strings.TrimSpace(legacyHome) == "" || samePath(account.CodexHome, legacyHome) {
+		return nil
+	}
+	legacyPath, found := findThreadHistory(legacyHome, threadID)
+	if !found {
+		return nil
+	}
+	if err := copyThreadHistory(legacyHome, account.CodexHome, legacyPath); err != nil {
+		return fmt.Errorf("copy legacy chat history: %w", err)
+	}
+	return nil
 }
 
 func (m *Multiplexer) forward(accountID string, message protocol.Message) error {
@@ -373,13 +477,106 @@ func (m *Multiplexer) forwardRoute(
 		capacityRetries: capacityRetries,
 	}
 	m.externalMu.Unlock()
+	if message.Method == "turn/start" {
+		if threadID := threadIDFromParams(message.Params); threadID != "" {
+			m.rememberActiveTurn(threadID, externalRoute{
+				accountID:       accountID,
+				method:          message.Method,
+				message:         message,
+				excluded:        cloneAccountSet(excluded),
+				capacityRetries: capacityRetries,
+			})
+		}
+	}
 	if err := child.Send(message); err != nil {
 		m.externalMu.Lock()
 		delete(m.externalRoutes, key)
 		m.externalMu.Unlock()
+		if message.Method == "turn/start" {
+			m.removeActiveTurn(threadIDFromParams(message.Params), accountID)
+		}
 		return err
 	}
 	return nil
+}
+
+func (m *Multiplexer) rememberActiveTurn(threadID string, route externalRoute) {
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		return
+	}
+	m.turnMu.Lock()
+	m.activeTurns[threadID] = activeTurnRoute{route: route}
+	m.turnMu.Unlock()
+}
+
+func (m *Multiplexer) removeActiveTurn(threadID, accountID string) {
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		return
+	}
+	m.turnMu.Lock()
+	if route, ok := m.activeTurns[threadID]; ok && (accountID == "" || route.route.accountID == accountID) {
+		delete(m.activeTurns, threadID)
+	}
+	m.turnMu.Unlock()
+}
+
+// takeActiveTurnForFailure atomically claims a route for the first quota
+// failure notification. Codex can emit both an error event and a failed
+// turn/completed event; only the first one may trigger migration.
+func (m *Multiplexer) takeActiveTurnForFailure(threadID, accountID string) (externalRoute, bool) {
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" || accountID == "" {
+		return externalRoute{}, false
+	}
+	m.turnMu.Lock()
+	defer m.turnMu.Unlock()
+	route, ok := m.activeTurns[threadID]
+	if !ok || route.route.accountID != accountID {
+		return externalRoute{}, false
+	}
+	if peers := m.failedTurnPeers[threadID]; peers != nil {
+		if _, suppressed := peers[accountID]; suppressed {
+			return externalRoute{}, false
+		}
+	}
+	delete(m.activeTurns, threadID)
+	peers := m.failedTurnPeers[threadID]
+	if peers == nil {
+		peers = make(map[string]struct{})
+		m.failedTurnPeers[threadID] = peers
+	}
+	peers[accountID] = struct{}{}
+	return route.route, true
+}
+
+func (m *Multiplexer) suppressFailedTurnEvent(threadID, accountID string) bool {
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" || accountID == "" {
+		return false
+	}
+	m.turnMu.Lock()
+	defer m.turnMu.Unlock()
+	peers := m.failedTurnPeers[threadID]
+	if peers == nil {
+		return false
+	}
+	_, ok := peers[accountID]
+	return ok
+}
+
+func (m *Multiplexer) completeActiveTurn(threadID, accountID string) {
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		return
+	}
+	m.turnMu.Lock()
+	if route, ok := m.activeTurns[threadID]; ok && route.route.accountID == accountID {
+		delete(m.activeTurns, threadID)
+		delete(m.failedTurnPeers, threadID)
+	}
+	m.turnMu.Unlock()
 }
 
 func (m *Multiplexer) routeAggregatedRateLimits(message protocol.Message) {
@@ -445,32 +642,9 @@ func (m *Multiplexer) failoverTurn(
 }
 
 func (m *Multiplexer) resumeThreadOnAccount(ctx context.Context, threadID, sourceAccountID, targetAccountID string) error {
-	source, ok := m.child(sourceAccountID)
-	if !ok {
-		return fmt.Errorf("source subscription is unavailable")
-	}
 	target, ok := m.child(targetAccountID)
 	if !ok {
 		return fmt.Errorf("target subscription is unavailable")
-	}
-	readParams, _ := json.Marshal(map[string]any{"threadId": threadID, "includeTurns": true})
-	readResponse, err := source.Request(ctx, "thread/read", readParams)
-	if err != nil {
-		return fmt.Errorf("read existing chat: %w", err)
-	}
-	var readResult struct {
-		Thread struct {
-			ID            string `json:"id"`
-			Path          string `json:"path"`
-			CWD           string `json:"cwd"`
-			ModelProvider string `json:"modelProvider"`
-		} `json:"thread"`
-	}
-	if err := json.Unmarshal(readResponse.Result, &readResult); err != nil {
-		return fmt.Errorf("decode existing chat: %w", err)
-	}
-	if readResult.Thread.ID == "" || readResult.Thread.Path == "" {
-		return errors.New("existing chat has no resumable history path")
 	}
 	sourceAccount, ok := m.store.Account(sourceAccountID)
 	if !ok {
@@ -480,20 +654,42 @@ func (m *Multiplexer) resumeThreadOnAccount(ctx context.Context, threadID, sourc
 	if !ok {
 		return fmt.Errorf("target subscription %q is unavailable", targetAccountID)
 	}
-	if err := copyThreadHistory(sourceAccount.CodexHome, targetAccount.CodexHome, readResult.Thread.Path); err != nil {
-		return fmt.Errorf("copy existing chat history: %w", err)
+	resumeInfo, err := m.loadThreadResumeInfo(ctx, threadID, sourceAccount, targetAccount)
+	if err != nil {
+		return fmt.Errorf("read existing chat: %w", err)
+	}
+	if !samePath(resumeInfo.historyHome, targetAccount.CodexHome) {
+		if err := copyThreadHistory(
+			resumeInfo.historyHome,
+			targetAccount.CodexHome,
+			resumeInfo.historyPath,
+		); err != nil {
+			return fmt.Errorf("copy existing chat history: %w", err)
+		}
 	}
 	// The bundled Windows app-server accepts threadId, but not the newer
 	// path/history resume parameters. The exact source rollout was copied into
 	// the isolated target CODEX_HOME above, so resume by ID is both compatible
 	// and keeps future turns owned by the fallback subscription.
-	resumeParams, _ := json.Marshal(map[string]any{
-		"threadId":      threadID,
-		"cwd":           readResult.Thread.CWD,
-		"model":         nil,
-		"modelProvider": readResult.Thread.ModelProvider,
-	})
-	if _, err := target.Request(ctx, "thread/resume", resumeParams); err != nil {
+	resumeParams := map[string]any{"threadId": threadID}
+	if resumeInfo.cwd != "" {
+		resumeParams["cwd"] = resumeInfo.cwd
+	}
+	if resumeInfo.modelProvider != "" {
+		resumeParams["modelProvider"] = resumeInfo.modelProvider
+	}
+	encodedResumeParams, _ := json.Marshal(resumeParams)
+	if _, err := target.Request(ctx, "thread/resume", encodedResumeParams); err != nil {
+		// Some app-server builds reject optional resume fields even though they
+		// accept the ID-only form. The rollout has already been copied into the
+		// target home, so retrying the minimal request is safe and preserves
+		// compatibility with those older builds.
+		if resumeInfo.cwd != "" || resumeInfo.modelProvider != "" {
+			minimalParams, _ := json.Marshal(map[string]string{"threadId": threadID})
+			if _, retryErr := target.Request(ctx, "thread/resume", minimalParams); retryErr == nil {
+				return nil
+			}
+		}
 		return fmt.Errorf("resume existing chat: %w", err)
 	}
 	return nil
@@ -547,13 +743,35 @@ func (m *Multiplexer) handleInbound(inbound backend.Inbound) {
 				return
 			}
 			if route.method == "turn/start" && isUsageLimitResponse(message) {
+				m.removeActiveTurn(threadIDFromParams(route.message.Params), inbound.AccountID)
 				go m.retryTurnAfterUsageLimit(route, inbound.AccountID)
+				return
+			}
+			if route.method == "thread/start" && isUsageLimitResponse(message) {
+				// A new-thread request does not have a thread ID yet, so it cannot
+				// use the existing-chat migration path. Retry the identical request
+				// on another subscription and keep the quota error out of the UI.
+				go m.retryNewThreadAfterUsageLimit(route, inbound.AccountID)
 				return
 			}
 			m.learnThreadOwner(route, inbound.AccountID, message.Result)
 			m.writeRaw(inbound.Raw)
 		}
 		return
+	}
+	if message.Method == "error" || message.Method == "turn/completed" {
+		threadID := threadIDFromTurnNotification(message.Params)
+		if threadID != "" && isUsageLimitNotification(message) {
+			if m.suppressFailedTurnEvent(threadID, inbound.AccountID) {
+				// Codex can emit both error and failed turn/completed for one
+				// turn. The first event starts failover; suppress the duplicate.
+				return
+			}
+			if route, ok := m.takeActiveTurnForFailure(threadID, inbound.AccountID); ok {
+				go m.retryTurnAfterAsyncUsageLimit(route, inbound.AccountID)
+				return
+			}
+		}
 	}
 	if message.Method != "" && len(message.ID) > 0 {
 		m.forwardServerRequest(inbound)
@@ -567,6 +785,9 @@ func (m *Multiplexer) handleInbound(inbound backend.Inbound) {
 		if threadID := threadIDFromNotification(message.Params); threadID != "" {
 			_ = m.store.SetThreadOwner(threadID, inbound.AccountID)
 		}
+	}
+	if message.Method == "turn/completed" {
+		m.completeActiveTurn(threadIDFromTurnNotification(message.Params), inbound.AccountID)
 	}
 	if message.Method == "turn/completed" ||
 		message.Method == "account/login/completed" ||
@@ -637,6 +858,112 @@ func (m *Multiplexer) retryTurnAfterUsageLimit(route externalRoute, exhaustedAcc
 	ctx, cancel := context.WithTimeout(context.Background(), 2*requestTimeout)
 	defer cancel()
 	m.failoverTurn(ctx, route.message, threadID, exhaustedAccountID, excluded)
+}
+
+// retryNewThreadAfterUsageLimit handles the immediate quota-rejection shape
+// for thread/start. The selected subscription may have stale usage metadata,
+// or the upstream may enforce a window that was not present in the last
+// snapshot. Keep trying capacity-bearing subscriptions until one accepts the
+// exact original payload or all of them are exhausted.
+func (m *Multiplexer) retryNewThreadAfterUsageLimit(route externalRoute, exhaustedAccountID string) {
+	excluded := cloneAccountSet(route.excluded)
+	if excluded == nil {
+		excluded = make(map[string]struct{})
+	}
+	excluded[exhaustedAccountID] = struct{}{}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*requestTimeout)
+	defer cancel()
+
+	for {
+		fallback, _, err := m.chooseAccountExcluding(ctx, excluded)
+		if err != nil {
+			m.write(m.allSubscriptionsDepleted(ctx, route.message.ID))
+			return
+		}
+		if err := m.forwardRoute(fallback.ID, route.message, excluded, 0); err != nil {
+			excluded[fallback.ID] = struct{}{}
+			if ctx.Err() != nil {
+				m.write(protocol.Failure(route.message.ID, -32027, fmt.Sprintf("retry new chat with %s: %v", fallback.Label, err)))
+				return
+			}
+			continue
+		}
+		m.publish(Event{
+			Type:      "thread-failed-over",
+			AccountID: fallback.ID,
+			Message:   fmt.Sprintf("New chat retried with %s", fallback.Label),
+			Data:      map[string]any{"previousAccountId": exhaustedAccountID},
+		})
+		return
+	}
+}
+
+// retryTurnAfterAsyncUsageLimit handles the app-server's v2 failure shape. A
+// turn/start request can be accepted successfully and only later emit an
+// `error` event / failed `turn/completed` when the upstream quota is rejected.
+// In that case the desktop already received the initial turn response, so the
+// fallback turn/start is sent as an internal child request and its response is
+// intentionally not duplicated to the desktop client.
+func (m *Multiplexer) retryTurnAfterAsyncUsageLimit(route externalRoute, exhaustedAccountID string) {
+	threadID := threadIDFromParams(route.message.Params)
+	if threadID == "" {
+		return
+	}
+	excluded := cloneAccountSet(route.excluded)
+	if excluded == nil {
+		excluded = make(map[string]struct{})
+	}
+	excluded[exhaustedAccountID] = struct{}{}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*requestTimeout)
+	defer cancel()
+
+	for {
+		fallback, _, err := m.chooseAccountExcluding(ctx, excluded)
+		if err != nil {
+			m.write(m.allSubscriptionsDepleted(ctx, route.message.ID))
+			return
+		}
+		if err := m.resumeThreadOnAccount(ctx, threadID, exhaustedAccountID, fallback.ID); err != nil {
+			excluded[fallback.ID] = struct{}{}
+			if ctx.Err() != nil {
+				m.write(protocol.Failure(route.message.ID, -32027, fmt.Sprintf("move chat to %s: %v", fallback.Label, err)))
+				return
+			}
+			continue
+		}
+		child, ok := m.child(fallback.ID)
+		if !ok {
+			excluded[fallback.ID] = struct{}{}
+			continue
+		}
+		// Register the target before sending turn/start. A target can accept the
+		// request and emit its asynchronous quota failure immediately; registering
+		// only after Request returns would race and leak that failure to the UI.
+		m.rememberActiveTurn(threadID, externalRoute{
+			accountID: fallback.ID,
+			method:    route.method,
+			message:   route.message,
+			excluded:  cloneAccountSet(excluded),
+		})
+		response, err := child.Request(ctx, "turn/start", route.message.Params)
+		if err == nil {
+			_ = m.store.SetThreadOwner(threadID, fallback.ID)
+			m.publish(Event{
+				Type:      "thread-failed-over",
+				AccountID: fallback.ID,
+				Message:   fmt.Sprintf("Chat continued with %s", fallback.Label),
+				Data:      map[string]any{"threadId": threadID, "previousAccountId": exhaustedAccountID},
+			})
+			return
+		}
+		m.removeActiveTurn(threadID, fallback.ID)
+		if isUsageLimitResponse(response) {
+			excluded[fallback.ID] = struct{}{}
+			continue
+		}
+		m.write(protocol.Failure(route.message.ID, -32027, fmt.Sprintf("continue chat with %s: %v", fallback.Label, err)))
+		return
+	}
 }
 
 func (m *Multiplexer) forwardServerRequest(inbound backend.Inbound) {
@@ -921,6 +1248,38 @@ func threadIDFromNotification(params json.RawMessage) string {
 	return threadIDFromResult(params)
 }
 
+func threadIDFromTurnNotification(params json.RawMessage) string {
+	if len(params) == 0 {
+		return ""
+	}
+	var decoded struct {
+		ThreadID string `json:"threadId"`
+		Thread   struct {
+			ID string `json:"id"`
+		} `json:"thread"`
+		Turn struct {
+			ThreadID string `json:"threadId"`
+			Thread   struct {
+				ID string `json:"id"`
+			} `json:"thread"`
+		} `json:"turn"`
+	}
+	if json.Unmarshal(params, &decoded) != nil {
+		return ""
+	}
+	for _, value := range []string{
+		decoded.ThreadID,
+		decoded.Thread.ID,
+		decoded.Turn.ThreadID,
+		decoded.Turn.Thread.ID,
+	} {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func accountHasCapacity(snapshot AccountSnapshot) bool {
 	if !snapshot.Enabled || !snapshot.Connected || snapshot.AuthType != "chatgpt" {
 		return false
@@ -949,6 +1308,35 @@ func isUsageLimitResponse(message protocol.Message) bool {
 	text := strings.ToLower(message.Error.Message + " " + string(message.Error.Data))
 	return strings.Contains(text, "usage_limit") ||
 		strings.Contains(text, "usage limit") ||
+		strings.Contains(text, "rate_limit") ||
+		strings.Contains(text, "rate limit") ||
+		strings.Contains(text, "quota")
+}
+
+func isUsageLimitNotification(message protocol.Message) bool {
+	if message.Method == "error" {
+		return isUsageLimitText(string(message.Params))
+	}
+	if message.Method != "turn/completed" {
+		return false
+	}
+	var decoded struct {
+		Turn struct {
+			Status string          `json:"status"`
+			Error  json.RawMessage `json:"error"`
+		} `json:"turn"`
+	}
+	if json.Unmarshal(message.Params, &decoded) != nil || decoded.Turn.Status != "failed" {
+		return false
+	}
+	return isUsageLimitText(string(message.Params) + " " + string(decoded.Turn.Error))
+}
+
+func isUsageLimitText(value string) bool {
+	text := strings.ToLower(value)
+	return strings.Contains(text, "usage_limit") ||
+		strings.Contains(text, "usage limit") ||
+		strings.Contains(text, "usage_limit_exceeded") ||
 		strings.Contains(text, "rate_limit") ||
 		strings.Contains(text, "rate limit") ||
 		strings.Contains(text, "quota")

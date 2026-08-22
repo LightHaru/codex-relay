@@ -70,6 +70,7 @@ func (m *Multiplexer) UsageStatus(ctx context.Context) (json.RawMessage, error) 
 	}
 
 	var failures []string
+	var firstSuccessful json.RawMessage
 	for _, account := range accounts {
 		status, err := fetchUsageStatus(
 			ctx,
@@ -78,14 +79,53 @@ func (m *Multiplexer) UsageStatus(ctx context.Context) (json.RawMessage, error) 
 			filepath.Join(account.CodexHome, "auth.json"),
 		)
 		if err == nil {
-			return status, nil
+			// The native composer asks for one account-shaped Usage object. If
+			// the Router Primary is exhausted, returning that payload would make
+			// the shared UI display an out-of-messages banner even though another
+			// connected subscription can accept the next turn. Keep the first
+			// successful payload as the all-depleted fallback, but prefer the
+			// first payload whose own rate-limit says it is usable.
+			if firstSuccessful == nil {
+				firstSuccessful = status
+			}
+			if usagePayloadHasCapacity(status) {
+				return status, nil
+			}
+			continue
 		}
 		// Keep the control response concise and never include a path, token, or
 		// raw upstream response. The renderer only needs to know whether it can
 		// fall back to its own native request.
 		failures = append(failures, account.ID+": "+compactUsageError(err))
 	}
+	if firstSuccessful != nil {
+		return firstSuccessful, nil
+	}
 	return nil, fmt.Errorf("read subscription usage: %s", strings.Join(failures, "; "))
+}
+
+// usagePayloadHasCapacity reads only the stable native fields needed to
+// choose which account-shaped Usage payload the shared composer should see.
+// Unknown/missing rate-limit fields are treated as usable: older Codex builds
+// omit them, and the app-server routing layer remains responsible for handling
+// a real quota rejection and retrying on another subscription.
+func usagePayloadHasCapacity(status json.RawMessage) bool {
+	var payload struct {
+		RateLimit *struct {
+			Allowed      *bool `json:"allowed"`
+			LimitReached *bool `json:"limit_reached"`
+		} `json:"rate_limit"`
+	}
+	if err := json.Unmarshal(status, &payload); err != nil || payload.RateLimit == nil {
+		return true
+	}
+	if payload.RateLimit.Allowed != nil {
+		return *payload.RateLimit.Allowed
+	}
+	if payload.RateLimit.LimitReached != nil {
+		return !*payload.RateLimit.LimitReached
+	}
+	return true
 }
 
 // UsageStatusAll fetches the native Usage payload for every enabled

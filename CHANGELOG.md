@@ -3,6 +3,108 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/) and
 this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.3.12] - 2026-08-22
+
+### Added
+
+- Windows Settings → Usage & billing now keeps the official native page shell
+  and mounts an in-flow **All connected subscriptions** panel inside its
+  content column. It does not add a sidebar item, replace the Settings shell,
+  or use a fixed overlay.
+- Every account card shows its own plan, credits, quota windows, reset times,
+  reset-credit list, and bounded billing payload details. A failed account is
+  marked **Unavailable** without hiding healthy subscriptions.
+
+### Fixed
+
+- The current Windows Store renderer routes Usage, reset-credit queries, reset
+  mutations, selected usage windows, and the native reset picker through the
+  isolated Relay account bridge.
+- A Relay Usage bridge failure now fails closed instead of falling through to
+  the official Codex browser session, preventing native/Relay account mixing.
+
+Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.12
+
+## [0.3.11] - 2026-08-22
+
+### Fixed
+
+- Isolated-mode startup now migrates every legacy subscription entry that
+  points at the official `%USERPROFILE%\.codex` home, not only the old
+  `Primary` row. The official credential and history files remain untouched;
+  the migrated Relay row requires its own sign-in and stale Router ownership
+  metadata is cleared.
+
+Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.11
+
+## [0.3.10] - 2026-08-22
+
+### Fixed
+
+- Account settings now render native-style **Usage limit resets** cards with a
+  scoped **Use reset** action, refresh the selected account after redemption,
+  and never consume another subscription's credit.
+- Pending browser sign-in intent is persisted per secondary subscription and
+  restored after a Relay restart. Disconnected stale accounts no longer show a
+  false **Waiting for sign-in** row or cancellation action.
+- Unrecorded Windows Store bundles can opt into structural renderer-anchor
+  discovery; minifier aliases are inferred only when every feature anchor is
+  unique, otherwise the installer fails closed without touching the old copy.
+
+Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.10
+
+## [0.3.9] - 2026-08-21
+
+### Fixed
+
+- Windows Relay now uses its own primary `CODEX_HOME` and file-backed
+  credential store under `%APPDATA%\Codex Relay\codex-home`; it no longer
+  inherits the official Store app's `%USERPROFILE%\.codex` account. Existing
+  Relay state is migrated without copying or deleting native credentials, and
+  old native-chat owner mappings are dropped from Relay only.
+- Quota failover now migrates rollouts returned as absolute or
+  `CODEX_HOME`-relative paths by current and older Codex app-server builds.
+- A turn that is accepted and then rejected asynchronously by an exhausted
+  subscription is now retried on the next available account without leaking
+  the native quota error to the desktop client.
+- The native Usage bridge now prefers a connected subscription with remaining
+  capacity, so an exhausted Relay Primary no longer shows a false
+  out-of-messages banner while another subscription can continue the chat.
+- Opening an older chat now imports its single legacy rollout into the selected
+  Relay account before `thread/resume`, so the chat no longer depends on the
+  official Store app's history path after the first successful open.
+- Archived chats under `archived_sessions` can now move to another connected
+  subscription instead of failing with an "outside the source sessions"
+  error.
+- Windows extended-length rollout paths (`\\?\C:\...` and extended UNC paths)
+  are normalized before the source-history boundary check, so valid chats from
+  the current Codex desktop build can be migrated safely.
+- Legacy chats without a Router owner mapping are resolved by scanning managed
+  rollout history, and startup restores the configured Relay `Primary` account
+  metadata so Relay-owned chats can resume after routing is enabled.
+- History migration remains restricted to Codex-managed history directories,
+  validates symlink resolution, and never modifies the source rollout.
+- New chats now use strict round-robin dispatch across connected subscriptions
+  with known remaining capacity; quota percentage no longer pins every chat to
+  the account with the lowest usage.
+- Relay account initialization is concurrent, so a disconnected subscription
+  cannot block the desktop handshake for the rest of the pool.
+- The native Windows **Usage & billing** page is left unchanged. Account
+  settings now show **Usage limit resets** and the full reset-credit details for
+  each connected subscription instead.
+- Account settings now present each available reset as a native-style card with
+  a scoped **Use reset** action; the result refreshes only that subscription's
+  balance and never consumes another account's credit.
+- Browser sign-in intent is persisted per secondary subscription. Relay restores
+  a real unfinished flow after restart, while disconnected stale accounts no
+  longer masquerade as **Waiting for sign-in** rows.
+- Windows upgrades can structurally discover minifier aliases for an unrecorded
+  Store bundle when explicitly requested with `--allow-untested-source`; every
+  renderer anchor is still required exactly once and ambiguous updates fail
+  closed.
+
+Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.9
+
 ## [0.3.8] - 2026-08-21
 
 ### Fixed
@@ -189,7 +291,11 @@ Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.7
 - Loopback-only, token-authenticated diagnostic UI states.
 - Source-only CI, draft release automation, security documentation, and smoke tests.
 
-[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.3.8...HEAD
+[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.3.12...HEAD
+[0.3.12]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.12
+[0.3.11]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.11
+[0.3.10]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.10
+[0.3.9]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.9
 [0.3.8]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.8
 [0.3.7]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.7
 [0.3.6]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.6

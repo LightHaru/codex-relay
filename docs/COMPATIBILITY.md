@@ -1,8 +1,61 @@
 # Compatibility
 
-The patcher is intentionally tied to known ChatGPT desktop bundle structures.
-It verifies every modified renderer, main-process, and native binary anchor and
-stops instead of applying a partial patch.
+The patcher is intentionally tied to reviewed ChatGPT desktop bundle
+structures. It verifies every modified renderer, main-process, and native
+binary anchor and stops instead of applying a partial patch. Known Store
+`app.asar` hashes use exact profiles. An unrecorded hash can be tested with
+`--allow-untested-source`: the patcher then infers minifier aliases from the
+same semantic templates and requires every feature anchor to match exactly
+once. Ambiguous or incomplete discovery still stops; the flag is not a
+blind compatibility bypass.
+
+## Release 0.3.12
+
+The current Windows Store profile keeps the native Settings → Usage & billing
+shell and adds the Relay multi-subscription panel only inside that page's
+content column. The panel uses `/v1/usage/all`; account-specific reset queries
+and mutations are scoped through the Relay bridge. If the bridge is unavailable,
+the patched Usage request fails closed rather than reading the official Codex
+session. The reviewed current Store hash remains
+`10ca5c476ec300f27079184726498a6e8f13ad25b9b443661288eccf4d930ef4`.
+
+## Release 0.3.11
+
+This maintenance release closes the remaining legacy-home isolation hole: every
+subscription row that still points at `%USERPROFILE%\.codex` is moved to a
+Relay-owned home during startup. Native credential/history files remain
+untouched, and only stale Router thread-owner metadata is dropped.
+
+## Release 0.3.10
+
+This release adds guarded structural discovery for an unrecorded Windows Store
+renderer and persists secondary browser-login intent across Relay restarts. It
+also adds the scoped **Use reset** action to Account settings while leaving the
+native Usage & billing page in the official layout. During isolated-mode startup,
+legacy state entries that point any subscription at the native `%USERPROFILE%\.codex`
+home are moved to Relay-owned account homes; only Router ownership metadata is
+discarded, and the native credential/history files are never copied or deleted.
+
+## Release 0.3.9
+
+This hotfix keeps the reviewed Windows renderer profiles unchanged and repairs
+quota failover for rollout paths returned by newer Codex app-server builds.
+The migration accepts absolute and `CODEX_HOME`-relative paths in both
+`sessions` and `archived_sessions`, while retaining the existing path and
+symlink safety checks. The renderer and account-routing compatibility anchors
+remain the same as `0.3.8`. Legacy chat resume also restores missing native
+`Primary` account metadata and resolves an unmapped thread ID from managed
+rollout filenames before routing the request. On Windows, the Relay wrapper
+now selects a dedicated `%APPDATA%\Codex Relay\codex-home` and migrates old
+native-primary metadata without touching `%USERPROFILE%\.codex`.
+New chats now use strict round-robin dispatch across the capacity-bearing
+subscription pool, and Relay initializes account children concurrently so a
+disconnected account cannot block the desktop handshake. The current Store
+build used for the Windows E2E verification is also covered by the reviewed
+`26.818.4152.0` renderer profile (`app.asar` SHA-256
+`10ca5c476ec300f27079184726498a6e8f13ad25b9b443661288eccf4d930ef4`). The
+native Settings → Usage & billing page is left untouched; per-account reset
+credits are rendered under Account settings → Usage limit resets.
 
 ## Release 0.3.5
 
@@ -100,17 +153,20 @@ claim compatibility with an unreviewed upstream Codex build.
 | Architecture | Apple silicon (`arm64`) |
 
 A different official version may work when all anchors remain identical, but
-it is unverified. The patcher rejects a version, build, or ASAR hash mismatch by
-default; `--allow-untested-source` is an explicit diagnostic override. Never
-weaken an anchor-count or binary-constant check merely to make a new build
-complete. Review the upstream change and update the patch deliberately.
+it is unverified. Older releases rejected a version, build, or ASAR hash
+mismatch by default; current Relay additionally offers the structural discovery
+path described above when `--allow-untested-source` is explicitly selected.
+Never weaken an anchor-count or binary-constant check merely to make a new
+build complete. Review the upstream change and publish a tested profile when
+the semantic layout has changed.
 
 ## Windows preview builds
 
 The Windows patcher keeps a separate renderer profile for each reviewed Store
 `app.asar`. Both profiles remain in `scripts/patch_windows.py`, so the same
 checkout can be rebuilt after rolling the official app back to the older
-package. An unknown hash still fails closed.
+package. An unknown hash still fails closed unless the caller explicitly opts
+into structural discovery; discovery itself remains fail-closed on ambiguity.
 
 ### Older Store profile
 
@@ -131,14 +187,29 @@ package. An unknown hash still fails closed.
 | ChatGPT executable file version | `151.0.7922.170` |
 | `app.asar` SHA-256 | `71c60b36a782e5597f1ca90abf70dba6a9a6aa4e61f3be69e422be43666a7d70` |
 
+### Newest Store profile
+
+| Component | Tested value |
+| --- | --- |
+| Platform | Windows x64 |
+| Microsoft Store package | `OpenAI.Codex_26.818.3698.0_x64__2p2nqsd0c76g0` |
+| ChatGPT executable file version | `151.0.7922.170` |
+| `app.asar` SHA-256 | `1eb70e2aa26f2408a3e65817f0974e137b1a7ff6e52e43a184154bd4db2074d1` |
+
 The Windows patcher checks the recorded ASAR hash before copying the Store app.
 It injects a local renderer asset, expands the renderer CSP only with the
 loopback control origin `http://127.0.0.1:48123`, and applies exact-one anchors
 for Profile statistics, Plugins account-scoped RPCs, and the native reset
 sheet. The official Store package is never modified. Any missing, duplicated,
-or changed Windows renderer anchor is a hard build failure.
+or changed Windows renderer anchor is a hard build failure. For an explicitly
+opted-in unknown hash, structural discovery performs the same exact-once
+checks after extracting the ASAR and derives the current minifier aliases;
+the installer still keeps the old app untouched if discovery cannot prove the
+patch is safe.
 
-The in-app updater is compatible with both profiles because it downloads the
-source release and asks the installer to discover whichever reviewed Store
-package is currently installed. It does not silently apply a patch to an
-unreviewed upstream bundle.
+The in-app updater is compatible with all reviewed profiles because it
+downloads the source release and asks the installer to discover whichever
+Store package is currently installed. If the official app has rolled to an
+unrecorded bundle, the updater performs the same structural compatibility
+check; a build whose anchors moved is reported as requiring review rather than
+silently patched.

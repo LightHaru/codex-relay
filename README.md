@@ -3,12 +3,14 @@
 > Tài liệu tiếng Anh: [README.en.md](README.en.md)
 
 Codex Relay cho phép sử dụng nhiều gói ChatGPT/Codex hợp lệ trong một ứng dụng
-Router độc lập. Khi cài lần đầu, tài khoản đang có trong Codex gốc được chọn
-làm **Primary** mặc định. Primary có thể được thay đổi ngay trong Relay; lựa
-chọn này được lưu riêng và không phụ thuộc vào tài khoản đang chọn ở Codex gốc.
-**Primary là tài khoản điều khiển/cấu hình mặc định, không phải khóa định
-tuyến:** chat mới được chia công bằng theo quota thực tế giữa mọi tài khoản còn
-dùng được; chat cũ vẫn bám tài khoản đã xử lý cho đến khi cần failover.
+Router độc lập. Trên Windows, Relay khởi động với `codex-home` và credential
+store riêng; tài khoản đang đăng nhập trong Codex gốc **không được nhập hoặc
+dùng chung**. Người dùng đăng nhập tài khoản cần dùng ngay trong Relay. Primary có thể
+được thay đổi ngay trong Relay; lựa chọn này được lưu riêng và không phụ thuộc
+vào tài khoản đang chọn ở Codex gốc. **Primary là tài khoản điều khiển/cấu hình
+mặc định, không phải khóa định tuyến:** chat mới được chia công bằng theo quota
+thực tế giữa mọi tài khoản còn dùng được; chat cũ vẫn bám tài khoản đã xử lý cho
+đến khi cần failover.
 
 > [!IMPORTANT]
 > Router tạo một bản sao độc lập của ứng dụng chính thức. Nó **không sửa, thay
@@ -100,7 +102,8 @@ Các đường dẫn chính:
 | `%LOCALAPPDATA%\Codex Relay\Codex Relay.cmd` | File mở Relay với profile riêng |
 | Desktop | Shortcut `Codex Relay.lnk` |
 | `%APPDATA%\Codex Relay` | Hồ sơ desktop riêng của bản cài mới |
-| `%USERPROFILE%\.codex-mux` | Trạng thái Router, dữ liệu tài khoản phụ và backup |
+| `%APPDATA%\Codex Relay\codex-home` | Credential, session và cấu hình primary riêng của Relay; không dùng chung với Codex gốc |
+| `%USERPROFILE%\.codex-mux` | Trạng thái Router, dữ liệu tài khoản phụ và backup; không phải thư mục credential của Codex gốc |
 | `%LOCALAPPDATA%\Codex Relay Updater\router-updater.exe` | Trình cập nhật dùng cho nút **Cập nhật ngay** trong Relay |
 
 ### Nâng cấp từ bản cài đặt trước đây
@@ -160,22 +163,31 @@ checkout để Router thay wrapper mới, rồi mở lại Router.
 
 ### Tài khoản chính và tài khoản phụ
 
-- **Primary** là tài khoản điều khiển do Router chọn. Lần đầu nó thường là tài
-  khoản đã đăng nhập sẵn trên Codex gốc, nhưng sau đó không còn bị ràng buộc với
-  Codex gốc. Primary vẫn giữ cấu hình chung và là điểm bắt đầu an toàn cho chat
-  cũ chưa từng được Router gán tài khoản.
+- **Primary** là tài khoản điều khiển do Router chọn. Trên Windows, Primary
+  bắt đầu trong home riêng của Relay và không lấy tài khoản từ Codex gốc; người dùng
+  đăng nhập nó trong Relay nếu muốn dùng. Primary vẫn giữ cấu hình chung của
+  Relay và không phải điểm truy cập vào chat native của Codex gốc.
 - Mỗi tài khoản thêm vào có thư mục dữ liệu Codex và thông tin xác thực riêng.
+- Khi nâng cấp từ bản Router cũ, nếu state còn ghi bất kỳ tài khoản nào dùng
+  `%USERPROFILE%\.codex`, Relay tự chuyển entry đó sang home riêng dưới
+  `%USERPROFILE%\.codex-mux\accounts\...` và yêu cầu đăng nhập lại. Relay chỉ
+  xoá liên kết chủ chat trong metadata của chính Router; file credential và
+  history của Codex gốc vẫn được giữ nguyên.
 - **Chat mới không bị khóa vào Primary.** Router đọc quota ngắn/dài ở mọi tài
-  khoản đã kết nối, ưu tiên tài khoản đang dùng ít hơn; nếu quota gần bằng nhau,
-  các chat mới luân phiên để tránh dồn hết lượt vào một tài khoản.
+  khoản đã kết nối, loại tài khoản đã hết cửa sổ hạn mức, rồi chia chat mới
+  theo round-robin nghiêm ngặt giữa các tài khoản còn quota. Tài khoản có phần
+  trăm thấp hơn không còn bị dồn toàn bộ chat cho đến khi hết lượt.
 - Router giữ nguyên tài khoản đang xử lý một cuộc hội thoại để các lượt tiếp
   theo vẫn có đủ ngữ cảnh.
 - Nếu tài khoản đang xử lý hết hạn mức, Router chuyển cuộc hội thoại sang tài
   khoản phụ phù hợp. Router sao chép bản history cục bộ của chat vào kho Codex
   riêng của tài khoản phụ, tiếp tục đúng chat đó và lưu tài khoản mới đang xử
-  lý. History gốc không bị sửa. Quy tắc này cũng áp dụng cho chat cũ chưa có
-  gán Router: Relay thử đọc history từ Primary, rồi chuyển sang tài khoản còn
-  quota thay vì trả lỗi quota của Primary.
+  lý. History gốc không bị sửa. Quy tắc này áp dụng cho chat cũ đã thuộc Relay
+  nhưng chưa có mapping; Relay tìm rollout trong các home Relay trước khi
+  chuyển sang tài khoản còn quota. Nếu state cũ còn trỏ tới rollout trong
+  `sessions` của Codex gốc, khi người dùng mở đúng chat đó trong Relay, Relay chỉ chép
+  một file rollout vào home riêng của tài khoản được chọn; credential/cấu hình
+  không được nhập và file nguồn không bị sửa.
 - Nếu lỗi là **“Selected model is at capacity”**, Router giữ nguyên model và
   toàn bộ payload của lượt chat, thử lại tối đa 3 lần với chờ ngắn tăng dần trên
   chính tài khoản đó. Nó không tự đổi model và không trừ quota tài khoản khác
@@ -209,34 +221,56 @@ khoản đó cũng hiển thị thời gian hồi của từng cửa sổ hạn 
 1h 20m`. Di chuột lên dòng để xem mốc giờ đầy đủ theo máy đang sử dụng. Nếu ChatGPT chưa
 trả thời gian reset, Router ghi rõ là chưa có dữ liệu thay vì tự đoán.
 
-Mở `Settings` → `Usage & billing`, phía trên màn native sẽ có bảng
-**All connected subscriptions**. Bảng này tải riêng Usage của từng tài khoản
-đã kết nối và hiển thị theo từng thẻ, gồm: gói đang dùng, số dư credits, cửa sổ
-hạn mức ngắn/dài và thời gian reset, giới hạn chi tiêu, số lượt reset credits,
-giới hạn Code Review, các giới hạn bổ sung và toàn bộ trường mới mà ChatGPT
-trả về. Nếu một tài khoản lỗi hoặc hết phiên, thẻ đó ghi **Unavailable** còn
-các tài khoản khác vẫn hiển thị bình thường; dữ liệu thiếu không bị đổi thành
-`0%`.
+Trang native `Settings` → `Usage & billing` vẫn là trang gốc và vẫn giữ nguyên
+sidebar, bố cục, menu điều hướng cùng các thao tác billing của Codex. Relay chỉ
+chèn thêm một panel **All connected subscriptions** vào đúng phần nội dung của
+trang con này; panel không dùng `position: fixed`, không phủ lên Settings và
+không tạo mục mới trong sidebar. Panel hiển thị từng tài khoản bằng home và
+credential Relay riêng, gồm plan, credits, các cửa sổ quota, thời điểm reset,
+reset credit và trạng thái lỗi riêng của tài khoản. Nếu một tài khoản lỗi,
+những tài khoản còn lại vẫn hiển thị.
 
-Màn native bên dưới vẫn được giữ nguyên để dùng các thao tác có tác động tài
-chính. Các nút như **Buy credits**, tự động nạp, đổi gói hoặc hủy gói luôn
-thuộc tài khoản mà Codex native đang chọn, không bị cộng dồn hoặc gửi nhầm sang
-tài khoản khác. Relay lấy payload qua API cục bộ đã xác thực; token OAuth không
-bao giờ được gửi vào renderer. Phần **Usage remaining** trong menu Relay vẫn
-là tóm tắt nhanh quota của cả pool.
+Mở **Account settings** trong menu Relay vẫn cho phép quản lý Primary, gỡ
+subscription và xem nhanh **Usage limit resets** theo từng tài khoản. Nút
+**Use reset** trong cả panel `Usage & billing` lẫn Account settings đều gọi
+đúng subscription đang đứng trên thẻ; không thể trừ reset credit của tài khoản
+khác. Các nút plan, credits, thanh toán và hủy gói tiếp tục do trang native
+quản lý.
+
+Trong **Account settings**, mỗi tài khoản đã kết nối có phần **Usage limit
+resets** riêng. Phần này hiển thị số reset còn dùng được/số reset áp dụng được,
+tiêu đề, trạng thái, thời điểm cấp, hạn dùng, thời điểm đã đổi và toàn bộ chi
+tiết phản hồi của từng reset credit. Dữ liệu được lấy qua home và credential
+tách biệt của tài khoản tương ứng; không tạo số liệu tổng hợp giả.
 
 ### Dùng chat cũ với Router
 
-Có thể tiếp tục **chat cũ** bằng Router, không chỉ chat mới. Mở chat đó từ
-thanh bên của **Codex Relay** rồi gửi tin nhắn tiếp theo tại cửa sổ Router. Nếu
-tài khoản đang sở hữu chat cũ đã hết hạn mức — kể cả chat được tạo trước khi
-cài Relay và chưa có gán Router — Relay sao chép history cục bộ cần thiết sang
-kho tách biệt của tài khoản còn quota, sau đó tiếp tục đúng cuộc hội thoại bằng
-tài khoản này.
+Có thể tiếp tục các **chat cũ đã thuộc Relay**, không chỉ chat mới. Mở chat đó
+từ thanh bên của **Codex Relay** rồi gửi tin nhắn tiếp theo tại cửa sổ Router.
+Nếu tài khoản Relay đang sở hữu chat đã hết hạn mức, Relay sao chép history cục
+bộ cần thiết sang kho tách biệt của tài khoản còn quota, sau đó tiếp tục đúng
+cuộc hội thoại bằng tài khoản này.
+
+Chat được tạo trong Codex gốc trước khi tách dữ liệu vẫn thuộc Codex gốc. Nếu
+người dùng mở đúng chat đó trong Relay và Relay còn biết `threadId`, Relay chỉ đọc
+đúng một file rollout cũ rồi sao chép bản sao vào `CODEX_HOME` riêng của tài
+khoản Relay; Relay không đọc `auth.json`/`config.toml`, không khởi chạy child
+trên home của Codex gốc và không sửa hoặc xóa file nguồn. Chat chỉ có trong
+Codex gốc không tự động bị quét hay nhập hàng loạt.
 
 Router không thể chặn một lượt đã gửi từ cửa sổ **Codex gốc** vì app gốc không
-kết nối với Router. Không cần tắt Codex gốc, nhưng hãy mở lại chính chat đó
-trong **Codex Relay** trước khi gửi lượt muốn Relay chuyển quota.
+kết nối với Router. Không cần tắt Codex gốc; lượt muốn Relay chuyển quota phải
+được gửi từ chính cửa sổ **Codex Relay**.
+
+Relay hỗ trợ history ở cả `sessions` và `archived_sessions`, đồng thời hiểu
+đường dẫn rollout tuyệt đối hoặc tương đối mà các phiên bản Codex khác nhau
+trả về. Vì vậy chat đã lưu trữ vẫn có thể được chuyển sang tài khoản còn
+quota; file history gốc không bị sửa.
+
+Nếu state cũ của Router vẫn trỏ tới rollout nằm trong thư mục `sessions` của
+Codex gốc, việc mở đúng chat đó trong Relay cũng thực hiện di trú một file
+theo cách chỉ đọc. Relay chép file vào kho riêng của tài khoản được chọn,
+không chép credential/cấu hình và giữ nguyên rollout nguồn.
 
 ### Thêm tài khoản phụ trên Windows
 
@@ -251,6 +285,10 @@ trong **Codex Relay** trước khi gửi lượt muốn Relay chuyển quota.
    chọn **Use another account** hoặc đổi tài khoản ngay trên trang đó.
 6. Nếu đã đóng trang đăng nhập, bấm **Open secure sign-in** để mở lại; nếu
    không muốn tiếp tục, bấm **Cancel sign-in** để hủy tài khoản đang chờ.
+   Relay lưu lại ý định đăng nhập đang chờ, vì vậy mở lại Relay sẽ khôi phục
+   dòng **Waiting for sign-in** đúng với phiên đang dang dở. Tài khoản bị ngắt
+   kết nối nhưng không có phiên chờ thật sẽ hiện **Not connected**, không giả
+   làm như trình duyệt vẫn đang đăng nhập.
 7. Khi callback thành công, hộp xác nhận tự đóng và Router hiện thông báo kết
    nối thành công. Nếu OAuth báo lỗi, tài khoản chờ vẫn còn để thử lại;
    Router không tự xóa tài khoản chỉ vì trang web báo lỗi.
@@ -306,22 +344,32 @@ Mở `Settings` (hoặc `Cài đặt`) → `Plugins`.
 `Apps`, trạng thái kết nối và thao tác đăng nhập OAuth sẽ sử dụng tài khoản
 đang chọn.
 
-### Bảng reset hạn mức
+### Reset hạn mức theo từng tài khoản
 
-Mở bảng `Usage remaining` hoặc bảng reset hạn mức có sẵn trong app. Bộ chọn tài
-khoản trong bảng này đổi số dư hiển thị theo tài khoản đã chọn. Khi dùng một
-lượt reset, lượt đó chỉ bị trừ ở đúng tài khoản đã chọn.
+Mở **Account settings** trong menu tài khoản. Mỗi subscription đã kết nối có
+một thẻ **Usage limit resets** theo kiểu giao diện native. Thẻ hiển thị số lượt
+đang có, hạn dùng và trạng thái của từng reset; nút **Use reset** chỉ gọi đúng
+subscription đang đứng trên thẻ, sau đó tải lại số dư. Một tài khoản dùng reset
+không làm trừ lượt của tài khoản khác.
+
+Trang native `Settings` → `Usage & billing` giữ nguyên bố cục của Codex gốc,
+nhưng panel Relay được đặt trong đúng content column của trang con. Nếu bản
+Codex cũ từng hiện **Oops, an error has occurred**, cập nhật Relay rồi mở lại
+shortcut. Relay lấy Usage qua credential tách biệt của từng subscription; khi
+dịch vụ cục bộ tạm lỗi, Relay fail closed và không rơi sang tài khoản của
+Codex gốc.
 
 Nếu mở `Settings` → `Usage` mà bản cũ từng hiện **Oops, an error has occurred**,
 cập nhật Relay rồi mở lại shortcut. Relay mới lấy Usage qua credential tách biệt
 của Router thay vì session browser của Microsoft Store; nếu API cục bộ tạm lỗi,
-màn native vẫn dùng request gốc làm dự phòng.
+panel sẽ báo tài khoản không khả dụng và không đọc nhầm quota của Codex gốc.
 
 ## An toàn dữ liệu
 
 | Vị trí | Nội dung |
 | --- | --- |
-| `~/.codex` | Thông tin, cuộc hội thoại và bộ nhớ đệm của Primary |
+| `%APPDATA%\Codex Relay\codex-home` | Credential, cuộc hội thoại và cấu hình Primary riêng của Relay trên Windows |
+| `~/.codex` | Dữ liệu native của Codex gốc; Relay chỉ có thể đọc một rollout cũ đã được yêu cầu để di trú, không đọc credential/cấu hình và không sửa/xóa thư mục này |
 | `~/.codex-mux/state.json` | Metadata tài khoản và tài khoản đang xử lý từng cuộc hội thoại |
 | `~/.codex-mux/accounts/<id>/codex-home` | Thư mục dữ liệu Codex riêng của từng tài khoản phụ |
 | `~/.codex-mux/control-token` | Token ngẫu nhiên cho dịch vụ điều khiển cục bộ |
@@ -337,6 +385,11 @@ màn native vẫn dùng request gốc làm dự phòng.
   trong cấu hình MCP dùng chung có thể xuất hiện trong thư mục tài khoản phụ;
   các thư mục này không phải ranh giới bí mật tuyệt đối cho cấu hình dùng chung.
 
+Trên Windows, đăng nhập, đăng xuất hoặc xóa tài khoản trong Codex gốc không
+thay đổi danh sách tài khoản của Codex Relay. Relay dùng `codex-home` riêng và
+credential store dạng file riêng; người dùng cần đăng nhập tài khoản đó trong Relay
+nếu muốn dùng nó ở Relay.
+
 Đọc [SECURITY.md](SECURITY.md) và
 [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md) trước khi báo lỗi bảo mật.
 
@@ -346,7 +399,7 @@ Nếu chỉ có bản Router mới, hãy dùng nút **Cập nhật ngay** trong 
 sẽ tự tải, kiểm tra, khởi động lại và mở lại. Khi chính ChatGPT/Codex chính
 thức cập nhật, không ghi đè trực tiếp lên bản Router đang hoạt động. Trước
 tiên, xem [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md). Hiện Router đã giữ
-hồ sơ cho cả gói cũ `26.810.7004.0` và gói mới `26.818.2441.0`. Nếu phiên bản
+hồ sơ cho các gói `26.810.7004.0`, `26.818.2441.0` và `26.818.3698.0`. Nếu phiên bản
 ứng dụng gốc đã được kiểm tra, chạy lại bộ cài:
 
 | Nền tảng | Cách tạo lại Router |

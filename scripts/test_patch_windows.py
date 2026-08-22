@@ -37,6 +37,8 @@ from patch_windows import (
     RESET_QUERY_REPLACEMENT,
     SELECTED_USAGE_ANCHOR,
     SELECTED_USAGE_REPLACEMENT,
+    STORE_26_818_3698_RENDERER_PROFILE,
+    STORE_26_818_4152_RENDERER_PROFILE,
     STOP_ROUTER_PROCESSES_SCRIPT,
     USAGE_STATUS_ANCHOR,
     USAGE_STATUS_REPLACEMENT,
@@ -44,6 +46,7 @@ from patch_windows import (
     default_destination,
     default_source,
     create_desktop_shortcut,
+    discover_renderer_profile,
     legacy_router_profile_directory,
     next_backup_path,
     patch_windows_feature_bundles,
@@ -178,14 +181,65 @@ class WindowsRendererPatchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             assets = self.make_renderer(root, CURRENT_RENDERER_PROFILE)
-            self.assertEqual(len(WINDOWS_RENDERER_PROFILES), 2)
+            self.assertEqual(len(WINDOWS_RENDERER_PROFILES), 4)
             patch_windows_feature_bundles(root, CURRENT_RENDERER_PROFILE)
             self.assert_replacements(assets, CURRENT_RENDERER_PROFILE)
+
+    def test_patches_the_store_26_818_3698_renderer_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            assets = self.make_renderer(root, STORE_26_818_3698_RENDERER_PROFILE)
+            patch_windows_feature_bundles(root, STORE_26_818_3698_RENDERER_PROFILE)
+            self.assert_replacements(assets, STORE_26_818_3698_RENDERER_PROFILE)
+
+    def test_patches_the_store_26_818_4152_usage_billing_bridge(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            assets = self.make_renderer(root, STORE_26_818_4152_RENDERER_PROFILE)
+            patch_windows_feature_bundles(root, STORE_26_818_4152_RENDERER_PROFILE)
+            self.assert_replacements(assets, STORE_26_818_4152_RENDERER_PROFILE)
+            initial = next(assets.glob("app-initial-*.js")).read_text(encoding="utf-8")
+            self.assertIn("typeof globalThis.CodexMuxWindows?.usageStatus", initial)
+            self.assertIn("CodexMuxWindows?.rateLimitResets?", initial)
+            self.assertIn("CodexMuxWindows.consumeRateLimitReset", initial)
+            self.assertIn("codex-mux-reset-picker", initial)
+            self.assertNotIn("F_.safeGet(`/wham/usage`", initial)
+
+    def test_discovers_a_profile_when_minifier_aliases_roll_forward(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            assets = self.make_renderer(root, STORE_26_818_3698_RENDERER_PROFILE)
+            initial = next(assets.glob("app-initial-*.js"))
+            initial.write_text(
+                initial.read_text(encoding="utf-8")
+                + "\nconst ReactAlias=object.useSyncExternalStore;\n",
+                encoding="utf-8",
+            )
+            profile = next(assets.glob("profile-*.js"))
+            profile.write_text(
+                "(0,Q.jsx)" + STORE_26_818_3698_RENDERER_PROFILE["profile_picker_anchor"],
+                encoding="utf-8",
+            )
+            discovered = discover_renderer_profile(root)
+            self.assertIn("globalThis.CodexMuxWindows", discovered["profile_query_replacement"])
+            self.assertIn("(0,Q.jsx)", discovered["profile_picker_replacement"])
+            patch_windows_feature_bundles(root, discovered)
+            self.assert_replacements(assets, discovered)
 
     def test_current_usage_reset_hook_uses_the_renderer_react_namespace(self) -> None:
         replacement = CURRENT_RENDERER_PROFILE["reset_query_replacement"]
         self.assertIn("rxa.useSyncExternalStore", replacement)
         self.assertNotIn("n$s.useSyncExternalStore", replacement)
+
+    def test_store_26_818_3698_usage_reset_hook_uses_the_renderer_react_namespace(self) -> None:
+        replacement = STORE_26_818_3698_RENDERER_PROFILE["reset_query_replacement"]
+        self.assertIn("Exa.useSyncExternalStore", replacement)
+
+    def test_store_26_818_4152_usage_reset_hook_tracks_selected_account(self) -> None:
+        replacement = STORE_26_818_4152_RENDERER_PROFILE["reset_query_replacement"]
+        self.assertIn("u4.useSyncExternalStore", replacement)
+        self.assertIn("subscribeReset", replacement)
+        self.assertIn("n??`primary`", replacement)
 
     def test_rejects_duplicate_browser_login_preload_anchor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"testing"
+)
 
 func TestInteractiveAppServerDetection(t *testing.T) {
 	tests := []struct {
@@ -81,5 +86,52 @@ func TestValidateControlToken(t *testing.T) {
 		if _, err := validateControlToken(invalid); err == nil {
 			t.Fatalf("validateControlToken(%q) unexpectedly succeeded", invalid)
 		}
+	}
+}
+
+func TestResolvePrimaryCodexHomeUsesDedicatedRelayHomeOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("the installed Relay path is Windows-specific")
+	}
+	t.Setenv("APPDATA", filepath.Join(`C:\Users\tester`, "AppData", "Roaming"))
+	t.Setenv("CODEX_HOME", filepath.Join(`C:\Users\tester`, ".codex"))
+	t.Setenv("CODEX_RELAY_CODEX_HOME", "")
+
+	primary, legacy, isolated := resolvePrimaryCodexHome(
+		`C:\Users\tester`,
+		`C:\Users\tester\AppData\Local\Codex Relay\app\resources\codex.exe`,
+	)
+	want := filepath.Join(`C:\Users\tester`, "AppData", "Roaming", "Codex Relay", "codex-home")
+	if primary != want || legacy != filepath.Join(`C:\Users\tester`, ".codex") || !isolated {
+		t.Fatalf("unexpected Relay homes: primary=%q legacy=%q isolated=%v", primary, legacy, isolated)
+	}
+}
+
+func TestResolvePrimaryCodexHomeKeepsNativePathOutsideRelay(t *testing.T) {
+	t.Setenv("CODEX_HOME", filepath.Join(`C:\Users\tester`, ".codex-custom"))
+	t.Setenv("CODEX_RELAY_CODEX_HOME", "")
+	primary, legacy, isolated := resolvePrimaryCodexHome(
+		`C:\Users\tester`,
+		`C:\Program Files\WindowsApps\OpenAI.Codex_26.818.3698.0_x64__2p2nqsd0c76g0\app\resources\codex.exe`,
+	)
+	if primary != os.Getenv("CODEX_HOME") || legacy != "" || isolated {
+		t.Fatalf("native path was changed: primary=%q legacy=%q isolated=%v", primary, legacy, isolated)
+	}
+}
+
+func TestResolvePrimaryCodexHomeRejectsNativeOverride(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("the installed Relay path is Windows-specific")
+	}
+	t.Setenv("APPDATA", filepath.Join(`C:\Users\tester`, "AppData", "Roaming"))
+	t.Setenv("CODEX_HOME", filepath.Join(`C:\Users\tester`, ".codex"))
+	t.Setenv("CODEX_RELAY_CODEX_HOME", `C:\Users\tester\.codex`)
+	primary, legacy, isolated := resolvePrimaryCodexHome(
+		`C:\Users\tester`,
+		`C:\Users\tester\AppData\Local\Codex Relay\app\resources\codex.exe`,
+	)
+	want := filepath.Join(`C:\Users\tester`, "AppData", "Roaming", "Codex Relay", "codex-home")
+	if primary != want || legacy != filepath.Join(`C:\Users\tester`, ".codex") || !isolated {
+		t.Fatalf("native override was accepted: primary=%q legacy=%q isolated=%v", primary, legacy, isolated)
 	}
 }

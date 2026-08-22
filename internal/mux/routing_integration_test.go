@@ -25,6 +25,8 @@ type routingHelperConfig struct {
 	SecondaryShort            float64 `json:"secondaryShort"`
 	SecondaryWeekly           float64 `json:"secondaryWeekly"`
 	CapacityFailures          int     `json:"capacityFailures"`
+	AsyncUsageFailures        int     `json:"asyncUsageFailures"`
+	ThreadStartUsageFailures  int     `json:"threadStartUsageFailures"`
 	ThreadHistoryRelativePath string  `json:"threadHistoryRelativePath"`
 	ThreadHistoryContents     string  `json:"threadHistoryContents"`
 }
@@ -54,6 +56,8 @@ func TestMuxRoutingHelper(t *testing.T) {
 		short, weekly = config.PrimaryShort, config.PrimaryWeekly
 	}
 	capacityFailures := config.CapacityFailures
+	asyncUsageFailures := config.AsyncUsageFailures
+	threadStartUsageFailures := config.ThreadStartUsageFailures
 	shortMinutes, weeklyMinutes := int64(300), int64(10_080)
 	rateLimits, _ := json.Marshal(map[string]any{
 		"rateLimits": RateLimits{
@@ -113,6 +117,13 @@ func TestMuxRoutingHelper(t *testing.T) {
 			result = json.RawMessage(`{"thread":{"id":"thread-1"}}`)
 		case "thread/start":
 			appendRoutingHelperLog(config.LogPath, role+":"+message.Method)
+			if role == "primary" && threadStartUsageFailures > 0 {
+				threadStartUsageFailures--
+				encoded, _ := protocol.Encode(protocol.Failure(message.ID, -32000, "You've hit your usage limit. Please try again after your quota resets."))
+				_, _ = writer.Write(append(encoded, '\n'))
+				_ = writer.Flush()
+				continue
+			}
 			result = json.RawMessage(`{"thread":{"id":"thread-1"}}`)
 		case "turn/start":
 			var params map[string]json.RawMessage
@@ -126,6 +137,20 @@ func TestMuxRoutingHelper(t *testing.T) {
 				appendRoutingHelperLog(config.LogPath, role+":turn/start:capacity:"+model)
 				encoded, _ := protocol.Encode(protocol.Failure(message.ID, -32000, "Selected model is at capacity. Please try a different model."))
 				_, _ = writer.Write(append(encoded, '\n'))
+				_ = writer.Flush()
+				continue
+			}
+			if role == "primary" && asyncUsageFailures > 0 {
+				asyncUsageFailures--
+				appendRoutingHelperLog(config.LogPath, role+":turn/start:async-usage")
+				encoded, _ := protocol.Encode(protocol.Success(message.ID, json.RawMessage(`{"thread":{"id":"thread-1"}}`)))
+				_, _ = writer.Write(append(encoded, '\n'))
+				errorParams := json.RawMessage(`{"threadId":"thread-1","error":{"message":"You've hit your usage limit.","codexErrorInfo":"UsageLimitExceeded"}}`)
+				errorEvent, _ := protocol.Encode(protocol.Message{Method: "error", Params: errorParams})
+				_, _ = writer.Write(append(errorEvent, '\n'))
+				completedParams := json.RawMessage(`{"threadId":"thread-1","turn":{"status":"failed","error":{"message":"You've hit your usage limit.","codexErrorInfo":"UsageLimitExceeded"}}}`)
+				completedEvent, _ := protocol.Encode(protocol.Message{Method: "turn/completed", Params: completedParams})
+				_, _ = writer.Write(append(completedEvent, '\n'))
 				_ = writer.Flush()
 				continue
 			}
@@ -174,12 +199,63 @@ type routingTestPool struct {
 	secondary   state.Account
 	store       *state.Store
 	logPath     string
+	configPath  string
 }
 
 func newRoutingTestPool(
 	t *testing.T,
 	primaryShort, primaryWeekly, secondaryShort, secondaryWeekly float64,
 	capacityFailures ...int,
+) routingTestPool {
+	return newRoutingTestPoolWithAsyncUsage(
+		t,
+		primaryShort,
+		primaryWeekly,
+		secondaryShort,
+		secondaryWeekly,
+		firstInt(capacityFailures),
+		0,
+	)
+}
+
+func newRoutingTestPoolWithAsyncUsage(
+	t *testing.T,
+	primaryShort, primaryWeekly, secondaryShort, secondaryWeekly float64,
+	capacityFailures, asyncUsageFailures int,
+) routingTestPool {
+	return newRoutingTestPoolWithConfig(
+		t,
+		primaryShort,
+		primaryWeekly,
+		secondaryShort,
+		secondaryWeekly,
+		capacityFailures,
+		asyncUsageFailures,
+		0,
+	)
+}
+
+func newRoutingTestPoolWithThreadStartUsage(
+	t *testing.T,
+	primaryShort, primaryWeekly, secondaryShort, secondaryWeekly float64,
+	threadStartUsageFailures int,
+) routingTestPool {
+	return newRoutingTestPoolWithConfig(
+		t,
+		primaryShort,
+		primaryWeekly,
+		secondaryShort,
+		secondaryWeekly,
+		0,
+		0,
+		threadStartUsageFailures,
+	)
+}
+
+func newRoutingTestPoolWithConfig(
+	t *testing.T,
+	primaryShort, primaryWeekly, secondaryShort, secondaryWeekly float64,
+	capacityFailures, asyncUsageFailures, threadStartUsageFailures int,
 ) routingTestPool {
 	t.Helper()
 	root := t.TempDir()
@@ -210,7 +286,9 @@ func newRoutingTestPool(
 		PrimaryWeekly:             primaryWeekly,
 		SecondaryShort:            secondaryShort,
 		SecondaryWeekly:           secondaryWeekly,
-		CapacityFailures:          firstInt(capacityFailures),
+		CapacityFailures:          capacityFailures,
+		AsyncUsageFailures:        asyncUsageFailures,
+		ThreadStartUsageFailures:  threadStartUsageFailures,
 		ThreadHistoryRelativePath: historyRelativePath,
 		ThreadHistoryContents:     historyContents,
 	})
@@ -256,6 +334,7 @@ func newRoutingTestPool(
 		secondary:   secondary,
 		store:       store,
 		logPath:     logPath,
+		configPath:  configPath,
 	}
 }
 
@@ -290,16 +369,29 @@ func allContained(text string, expected ...string) bool {
 	return true
 }
 
-func TestRouteNewThreadUsesLowerUtilizationWhenBothRemain(t *testing.T) {
+func TestRouteNewThreadsRoundRobinAcrossUnequalQuota(t *testing.T) {
 	pool := newRoutingTestPool(t, 80, 90, 5, 5)
-	pool.multiplexer.HandleClient(protocol.Request(
-		"thread/start",
-		protocol.StringID("new-fair-share-thread"),
-		json.RawMessage(`{"cwd":"C:\\fake"}`),
-	))
-	waitForRoutingEvidence(t, pool, "secondary:thread/start")
-	if log, _ := os.ReadFile(pool.logPath); strings.Contains(string(log), "primary:thread/start") {
-		t.Fatalf("new thread did not use the healthier subscription: %s", log)
+	for index := 0; index < 4; index++ {
+		pool.multiplexer.HandleClient(protocol.Request(
+			"thread/start",
+			protocol.StringID(fmt.Sprintf("unequal-fair-share-%d", index)),
+			json.RawMessage(`{"cwd":"C:\\fake"}`),
+		))
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	var log []byte
+	for time.Now().Before(deadline) {
+		log, _ = os.ReadFile(pool.logPath)
+		if strings.Count(string(log), "primary:thread/start")+
+			strings.Count(string(log), "secondary:thread/start") >= 4 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	primaryCount := strings.Count(string(log), "primary:thread/start")
+	secondaryCount := strings.Count(string(log), "secondary:thread/start")
+	if primaryCount != 2 || secondaryCount != 2 {
+		t.Fatalf("unequal-quota pool was not shared evenly primary=%d secondary=%d log=%q", primaryCount, secondaryCount, string(log))
 	}
 }
 
@@ -330,17 +422,29 @@ func TestRouteNewThreadsShareEqualQuotaAcrossSubscriptions(t *testing.T) {
 	}
 }
 
-func TestRouteNewThreadUsesAccountWithMoreRemainingQuota(t *testing.T) {
+func TestRouteNewThreadsRoundRobinAcrossKnownCapacity(t *testing.T) {
 	pool := newRoutingTestPool(t, 75, 80, 10, 20)
-	pool.multiplexer.HandleClient(protocol.Request(
-		"thread/start",
-		protocol.StringID("fair-share-healthier"),
-		json.RawMessage(`{"cwd":"C:\\fake"}`),
-	))
-	waitForRoutingEvidence(t, pool, "secondary:thread/start")
-	log, _ := os.ReadFile(pool.logPath)
-	if strings.Contains(string(log), "primary:thread/start") {
-		t.Fatalf("higher-usage account received the new thread: %s", log)
+	for index := 0; index < 2; index++ {
+		pool.multiplexer.HandleClient(protocol.Request(
+			"thread/start",
+			protocol.StringID(fmt.Sprintf("known-capacity-fair-share-%d", index)),
+			json.RawMessage(`{"cwd":"C:\\fake"}`),
+		))
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	var log []byte
+	for time.Now().Before(deadline) {
+		log, _ = os.ReadFile(pool.logPath)
+		if strings.Count(string(log), "primary:thread/start")+
+			strings.Count(string(log), "secondary:thread/start") >= 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	primaryCount := strings.Count(string(log), "primary:thread/start")
+	secondaryCount := strings.Count(string(log), "secondary:thread/start")
+	if primaryCount != 1 || secondaryCount != 1 {
+		t.Fatalf("known-capacity pool was not shared evenly primary=%d secondary=%d log=%q", primaryCount, secondaryCount, string(log))
 	}
 }
 
@@ -399,6 +503,23 @@ func TestRouteNewThreadFallsBackWhenPrimaryShortWindowIsDepleted(t *testing.T) {
 	}
 }
 
+func TestRouteNewThreadRetriesWhenSelectedAccountReportsUsageLimit(t *testing.T) {
+	pool := newRoutingTestPoolWithThreadStartUsage(t, 10, 10, 20, 20, 1)
+	pool.multiplexer.HandleClient(protocol.Request(
+		"thread/start",
+		protocol.StringID("new-thread-usage-retry"),
+		json.RawMessage(`{"cwd":"C:\\fake"}`),
+	))
+	waitForRoutingEvidence(t, pool,
+		"primary:thread/start",
+		"secondary:thread/start",
+	)
+	output := pool.output.String()
+	if strings.Contains(output, "You've hit your usage limit") || strings.Contains(output, "UsageLimitExceeded") {
+		t.Fatalf("new-thread quota failure leaked to desktop output: %s", output)
+	}
+}
+
 func TestRouteTurnFailsOverToSecondaryAndPersistsNewOwner(t *testing.T) {
 	pool := newRoutingTestPool(t, 100, 100, 15, 25)
 	if err := pool.store.SetThreadOwner("thread-1", "primary"); err != nil {
@@ -418,6 +539,33 @@ func TestRouteTurnFailsOverToSecondaryAndPersistsNewOwner(t *testing.T) {
 	owner, ok := pool.store.ThreadOwner("thread-1")
 	if !ok || owner != pool.secondary.ID {
 		t.Fatalf("failover owner=%q ok=%v, want %q", owner, ok, pool.secondary.ID)
+	}
+}
+
+func TestRouteTurnFailsOverAfterAsyncUsageLimit(t *testing.T) {
+	pool := newRoutingTestPoolWithAsyncUsage(t, 20, 20, 20, 20, 0, 1)
+	if err := pool.store.SetThreadOwner("thread-1", "primary"); err != nil {
+		t.Fatal(err)
+	}
+	pool.multiplexer.HandleClient(protocol.Request(
+		"turn/start",
+		protocol.StringID("async-usage-failover"),
+		json.RawMessage(`{"threadId":"thread-1","model":"gpt-5.3-codex"}`),
+	))
+	waitForRoutingEvidence(t, pool,
+		"primary:turn/start:async-usage",
+		"primary:thread/read",
+		"secondary:history-copied",
+		"secondary:thread/resume",
+		"secondary:turn/start:model:gpt-5.3-codex",
+	)
+	owner, ok := pool.store.ThreadOwner("thread-1")
+	if !ok || owner != pool.secondary.ID {
+		t.Fatalf("async usage failover owner=%q ok=%v, want %q", owner, ok, pool.secondary.ID)
+	}
+	output := pool.output.String()
+	if strings.Contains(output, "You've hit your usage limit") || strings.Contains(output, "UsageLimitExceeded") {
+		t.Fatalf("source async quota failure leaked to desktop output: %s", output)
 	}
 }
 
@@ -441,6 +589,20 @@ func TestRouteUnassignedExistingTurnFailsOverFromController(t *testing.T) {
 	owner, ok := pool.store.ThreadOwner("thread-1")
 	if !ok || owner != pool.secondary.ID {
 		t.Fatalf("legacy chat owner=%q ok=%v, want %q", owner, ok, pool.secondary.ID)
+	}
+}
+
+func TestRouteUnassignedExistingResumeUsesRolloutOwner(t *testing.T) {
+	pool := newRoutingTestPool(t, 20, 20, 20, 20)
+	pool.multiplexer.HandleClient(protocol.Request(
+		"thread/resume",
+		protocol.StringID("legacy-chat-resume"),
+		json.RawMessage(`{"threadId":"thread-1"}`),
+	))
+	waitForRoutingEvidence(t, pool, "primary:thread/resume")
+	owner, ok := pool.store.ThreadOwner("thread-1")
+	if !ok || owner != "primary" {
+		t.Fatalf("legacy resume owner=%q ok=%v, want primary", owner, ok)
 	}
 }
 
