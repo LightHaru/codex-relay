@@ -28,6 +28,9 @@ func normalizeRouterArgs(args []string, forceWindowsUnelevated bool) []string {
 	if commandIndex < 0 {
 		return result
 	}
+	if result[commandIndex] == "app-server" && hasAppServerToolingSubcommand(result, commandIndex) {
+		return result
+	}
 
 	foundOverride := false
 	for index := 0; index < len(result); index++ {

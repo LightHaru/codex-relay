@@ -15,10 +15,18 @@ signature and reuse the same Apple team as the previous installed build.
 
 ## Accounts and routing
 
+Before any live session, run `go test ./internal/state ./internal/mux
+./internal/control`. The deterministic fixtures must cover v1→v2 backup and
+migration, persistent weighted deficits/reservations, low-water reserve, one
+active turn per thread, all three policies, incremental prefix/mismatch copy,
+handoff commit/rollback, crash recovery and side-effect fail-closed behavior.
+These tests use temporary homes and fake app-server children; they must not
+consume a real subscription.
+
 - Connect at least two subscriptions and confirm photos, plans, masked emails,
   pooled usage, and loading states.
-- Start chats until each account has received one; confirm every follow-up stays
-  on its original account.
+- Exercise Sticky, Balanced and Rotate; confirm worker changes happen only
+  after a completed turn and Current Task Route shows the committed generation.
 - Spoof one depleted account and confirm the thread continues on an account with
   quota. Spoof all accounts depleted and confirm the combined alert.
 - Open a quota-triggered reset sheet, switch subscriptions, consume a reset, and
@@ -57,8 +65,34 @@ Run this additional checklist on each recorded Windows `app.asar` profile:
   `%LOCALAPPDATA%\Codex Relay` path.
 - Confirm `http://127.0.0.1:48123/v1/health` is healthy and that the account
   menu shows the connected subscriptions without exposing tokens.
-- Send one new chat and continue one existing chat; confirm quota failover and
-  sticky ownership operate in the Router window.
+- Send one new chat and continue one existing chat; confirm the selected policy,
+  canonical history handoff and quota failover operate in the Router window.
+- Confirm a new task's first turn remains on the worker that created it, then
+  verify Balanced/Rotate can change workers only after that turn completes and
+  the canonical rollout checkpoint exists.
+- Set an active Goal on a depleted worker, continue it through Relay, and verify
+  the target returns the same objective with active status before the next
+  turn completes. Never record the objective in routing diagnostics.
+- Confirm the profile panel shows Relay Controller separately from Current Task
+  Route and that a recovery-required task cannot start another turn until it is
+  reviewed and acknowledged.
+- Open **Routing details** in an idle task and during a disposable active turn.
+  Verify current owner, active worker, last completed worker and next candidate
+  remain distinct; the next row says preview and opening/refreshing the panel
+  does not change scheduler cursor, dispatch count, deficits or reservations.
+- Verify **Why this account** shows fixed selected/skipped reasons and quota
+  freshness, and the recent timeline shows one stable row per logical
+  reservation, selection, completion, rollback and handoff phase. Restart Relay
+  only at an idle boundary and confirm the timeline and scheduler survive.
+- Confirm quota attribution says waiting/unavailable until a newer snapshot is
+  observed and reports a consuming worker/delta only for a measurable decrease.
+  Do not infer consumption from dispatch count and do not use a reset credit.
+- Keep the official Codex window open while checking that the inspector stays
+  in the task composer flow, does not cover the sidebar/task, and remains usable
+  with keyboard focus, a narrow window and common zoom levels.
+- Open Usage & billing and at least two other Settings child pages. Confirm the
+  pool panel exists only inside the Usage content column after its heading, the
+  sidebar remains usable, and the inspector never replaces a Settings page.
 - Check Profile, Plugins account selection, the rate-limit reset picker, and
   the private official browser sign-in flow.
 - Verify `codex.real.exe` receives `windows.sandbox="unelevated"` while the

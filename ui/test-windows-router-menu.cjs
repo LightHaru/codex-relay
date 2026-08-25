@@ -78,7 +78,7 @@ class FakeElement {
   closest() { return null; }
 }
 
-function loadBridge({ fetchImpl, privateLoginImpl, updaterImpl } = {}) {
+function loadBridge({ fetchImpl, privateLoginImpl, updaterImpl, eventSourceImpl, navigatorLanguage = "en-US" } = {}) {
   const filename = path.join(__dirname, "windows-router-menu.js");
   const source = fs.readFileSync(filename, "utf8");
   const startupAnchor = '  if (document.readyState === "loading") {';
@@ -108,7 +108,10 @@ function loadBridge({ fetchImpl, privateLoginImpl, updaterImpl } = {}) {
       "    formatResetCountdown,",
       "    usageWindows,",
       "    usageBillingHeading,",
-      "    renderUsageBillingSurface,",
+       "    renderUsageBillingSurface,",
+		"    routingText,",
+		"    startRoutingWatcher,",
+		"    renderTaskRouteBadge,",
       "    setPrimaryAccount,",
       "    showBrowserLogin,",
       "  };",
@@ -121,10 +124,14 @@ function loadBridge({ fetchImpl, privateLoginImpl, updaterImpl } = {}) {
     readyState: "loading",
     body: new FakeElement("body"),
     head: new FakeElement("head"),
+		elementsById: new Map(),
     addEventListener() {},
     createElement(tagName) {
       return new FakeElement(tagName);
     },
+		getElementById(id) {
+			return this.elementsById.get(id) || null;
+		},
   };
   const definitions = new Map();
   const storage = new Map();
@@ -149,6 +156,8 @@ function loadBridge({ fetchImpl, privateLoginImpl, updaterImpl } = {}) {
   };
   const context = {
     URL,
+		URLSearchParams,
+		EventSource: eventSourceImpl,
     fetch: fetchImpl || (async () => ({ ok: true, json: async () => ({ accounts: [] }) })),
     HTMLElement: FakeElement,
     getComputedStyle() { return { display: "block", visibility: "visible" }; },
@@ -162,6 +171,7 @@ function loadBridge({ fetchImpl, privateLoginImpl, updaterImpl } = {}) {
       },
     },
     document,
+		navigator: { language: navigatorLanguage },
     sessionStorage: {
       getItem(key) {
         return storage.get(key) || null;
@@ -228,7 +238,7 @@ test("native usage billing bridge exposes the all-subscription endpoint", async 
   assert.equal(requests.some((url) => url.endsWith("/usage/all")), true);
 });
 
-test("Usage & billing renders one in-flow card for every enabled subscription", async () => {
+test("Usage & billing renders one in-flow pooled surface with expandable worker diagnostics", async () => {
   const { hooks } = loadBridge({
     fetchImpl: async (url) => ({
       ok: true,
@@ -249,7 +259,8 @@ test("Usage & billing renders one in-flow card for every enabled subscription", 
     ],
   }, host, { resetRenderVersion: 1 }, 1);
   const text = collectText(host);
-  assert.match(text, /All connected subscriptions/);
+  assert.match(text, /Shared quota pool/);
+	assert.match(text, /Worker diagnostics \(2\)/);
   assert.match(text, /Bennett/);
   assert.match(text, /Susan/);
   assert.match(text, /General usage limits/);
@@ -386,6 +397,16 @@ test("Plugins RPC routing adds the selected account marker without touching unre
   assert.deepEqual({ ...scoped }, { codexMuxAccountId: "subscription-2", forceRefresh: true });
   assert.deepEqual(original, { forceRefresh: true }, "the native request object must not be mutated");
   assert.equal(bridge.scopePluginRequest("thread/list", original), original);
+});
+
+test("version-pinned sendRequest hook records the current task for route status", () => {
+  const { bridge, storage } = loadBridge();
+  const threadId = "019fe645-f42f-7a20-8b2b-054f46c0af0a";
+  const params = { threadId, model: "gpt-test" };
+  assert.equal(bridge.scopePluginRequest("turn/start", params), params);
+  assert.equal(storage.get("codex-mux.windows.current-thread"), threadId);
+  bridge.scopePluginRequest("thread/start", { cwd: "C:\\fake" });
+  assert.equal(storage.get("codex-mux.windows.current-thread"), undefined);
 });
 
 test("native Usage bridge reads only the token-protected local payload and fails closed", async () => {
@@ -555,9 +576,190 @@ test("usage summary keeps known quota visible when another account has no quota 
     },
   ]);
   const text = collectText(menu);
-  assert.match(text, /97% left/);
+  assert.match(text, /97% \/ 200% left/);
   assert.match(text, /Updating quota|Quota unavailable/);
   assert.doesNotMatch(text, /–/);
+});
+
+test("five fresh subscriptions are presented as one 500 percent quota pool", () => {
+  const { hooks } = loadBridge();
+  const menu = new FakeElement("menu");
+  const accounts = Array.from({ length: 5 }, (_, index) => ({
+    id: `account-${index + 1}`,
+    label: `Subscription ${index + 1}`,
+    enabled: true,
+    connected: true,
+    rateLimits: { primary: { usedPercent: 0, windowDurationMins: 10080 } },
+  }));
+  hooks.renderMenu(menu, accounts, {
+    status: { pool: { connectedSubscriptions: 5, maximumPercent: 500, confirmedRemainingPercent: 500, knownSubscriptions: 5, unknownSubscriptions: 0, availableSubscriptions: 5 } },
+  });
+  const text = collectText(menu);
+  assert.match(text, /Shared quota pool/);
+  assert.match(text, /500% \/ 500% left/);
+  assert.match(text, /5 subscriptions act as one pool/);
+  assert.match(text, /Worker diagnostics \(5\)/);
+});
+
+test("Vietnamese pooled quota copy is clear and additive", () => {
+  const { hooks } = loadBridge({ navigatorLanguage: "vi-VN" });
+  const menu = new FakeElement("menu");
+  hooks.renderMenu(menu, [{ id: "one", enabled: true, connected: true }], {
+    status: { pool: { connectedSubscriptions: 5, maximumPercent: 500, confirmedRemainingPercent: 173, knownSubscriptions: 5, unknownSubscriptions: 0, availableSubscriptions: 2 } },
+  });
+  const text = collectText(menu);
+  assert.match(text, /Pool quota dùng chung/);
+  assert.match(text, /173% \/ 500% còn lại/);
+  assert.match(text, /5 tài khoản hợp thành một pool/);
+});
+
+test("profile menu distinguishes Relay Controller, Current Task Route, and routing policy", () => {
+  const { hooks } = loadBridge();
+  const menu = new FakeElement("menu");
+  const accounts = [
+    { id: "primary", label: "Controller Account", enabled: true, connected: true, controller: true },
+    { id: "secondary", label: "Task Account", enabled: true, connected: true, controller: false },
+  ];
+  hooks.renderMenu(menu, accounts, {
+    status: { policy: "balanced", nextCandidate: { accountId: "primary", label: "Controller Account", remainingPercent: 64, quotaKnown: true } },
+    threadId: "019fe645-f42f-7a20-8b2b-054f46c0af0a",
+    thread: { route: { accountId: "secondary", generation: 7, recoveryRequired: false } },
+  });
+  const text = collectText(menu);
+  assert.match(text, /Relay Controller/);
+  assert.match(text, /Controller Account/);
+  assert.match(text, /Current Task Route/);
+  assert.match(text, /Task Account · generation 7/);
+  assert.match(text, /Next Candidate/);
+  assert.match(text, /Controller Account · 64% left/);
+  assert.match(text, /Sticky/);
+  assert.match(text, /Balanced/);
+  assert.match(text, /Rotate/);
+});
+
+test("routing panel provides clear Vietnamese labels", () => {
+	const { hooks } = loadBridge({ navigatorLanguage: "vi-VN" });
+	const menu = new FakeElement("menu");
+	hooks.renderMenu(menu, [
+		{ id: "primary", label: "Điều khiển", enabled: true, connected: true, controller: true },
+		{ id: "secondary", label: "Thực thi", enabled: true, connected: true, controller: false },
+	], {
+		status: { policy: "balanced", effectivePolicy: "balanced", handoffSupported: true },
+		threadId: "019fe645-f42f-7a20-8b2b-054f46c0af0a",
+		thread: { route: { accountId: "secondary", generation: 3 } },
+	});
+	const text = collectText(menu);
+	assert.match(text, /Định tuyến Relay/);
+	assert.match(text, /Tài khoản điều khiển Relay/);
+	assert.match(text, /Tài khoản chạy task hiện tại/);
+	assert.match(text, /Cân bằng/);
+});
+
+test("handoff SSE refreshes the open route badge", async () => {
+	let source;
+	let statusReads = 0;
+	class FakeEventSource {
+		constructor(url) { this.url = url; source = this; }
+	}
+	const { document, hooks } = loadBridge({
+		eventSourceImpl: FakeEventSource,
+		fetchImpl: async (url) => {
+			if (url.endsWith("/accounts")) return { ok: true, json: async () => ({ accounts: [] }) };
+			if (url.endsWith("/router/status")) {
+				statusReads += 1;
+				return { ok: true, json: async () => ({ policy: "balanced", effectivePolicy: "balanced", handoffSupported: true }) };
+			}
+			return { ok: true, json: async () => ({ decisions: [] }) };
+		},
+	});
+	const menu = new FakeElement("menu");
+	document.elementsById.set("codex-mux-windows-menu", menu);
+	hooks.startRoutingWatcher();
+	assert.match(source.url, /\/events\?token=/);
+	source.onmessage({ data: JSON.stringify({ type: "handoff-committed", threadId: "thread-1" }) });
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(statusReads, 1);
+	assert.ok(Number(menu.dataset.codexMuxLastRefresh) > 0);
+});
+
+test("task-view route badge shows current worker, next candidate, policy, and handoff in normal flow", () => {
+	const { hooks } = loadBridge();
+	const badge = new FakeElement("section");
+	hooks.renderTaskRouteBadge(badge, [
+		{ id: "primary", label: "Agent Aira", planLabel: "Plus" },
+		{ id: "secondary", label: "reo", planLabel: "Plus" },
+	], {
+		status: { policy: "balanced", effectivePolicy: "balanced", nextCandidate: { accountId: "primary", quotaKnown: true, remainingPercent: 100 } },
+		thread: {
+			route: { accountId: "secondary", generation: 6, recoveryRequired: false },
+			handoffs: [{ sourceAccountId: "primary", targetAccountId: "secondary", phase: "COMMITTED" }],
+		},
+	});
+	const text = collectText(badge);
+	assert.match(text, /Running via/);
+	assert.match(text, /reo · Plus · generation 6/);
+	assert.match(text, /Mode/);
+	assert.match(text, /balanced/);
+	assert.match(text, /Next Candidate/);
+	assert.match(text, /Agent Aira · Plus · 100% left/);
+	assert.match(text, /Handoff/);
+	assert.doesNotMatch(fs.readFileSync(path.join(__dirname, "windows-router-menu.js"), "utf8"), /#\$\{TASK_ROUTE_BADGE_ID\} \{[^}]*position:\s*fixed/);
+});
+
+test("task route inspector distinguishes owner, active worker, last quota worker, reasons, and timeline", () => {
+	const { hooks } = loadBridge({ navigatorLanguage: "vi-VN" });
+	const badge = new FakeElement("section");
+	hooks.renderTaskRouteBadge(badge, [
+		{ id: "primary", label: "Agent Aira", planLabel: "Plus", enabled: true, connected: true },
+		{ id: "secondary", label: "reo", planLabel: "Plus", enabled: true, connected: true },
+	], {
+		status: { policy: "balanced", effectivePolicy: "balanced", pool: { connectedSubscriptions: 2, maximumPercent: 200, confirmedRemainingPercent: 95, availableSubscriptions: 1 } },
+		thread: {
+			route: { accountId: "primary", generation: 7, recoveryRequired: false },
+			currentOwner: { accountId: "primary", label: "Agent Aira", planLabel: "Plus" },
+			activeWorker: { accountId: "secondary", label: "reo", planLabel: "Plus" },
+			lastCompletedWorker: { accountId: "primary", label: "Agent Aira", planLabel: "Plus" },
+			lastQuotaConsumingWorker: { accountId: "secondary", label: "reo", planLabel: "Plus" },
+			previousWorker: { accountId: "primary", label: "Agent Aira", planLabel: "Plus" },
+			requestedPolicy: "balanced", effectivePolicy: "balanced",
+			nextCandidate: { accountId: "primary", quotaKnown: true, remainingPercent: 55 },
+			workers: [
+				{ accountId: "primary", label: "Agent Aira", planLabel: "Plus", quotaKnown: true, confirmedRemainingPercent: 55, reasonCode: "selected_highest_score", scoreComponents: { finalScore: 1.2 } },
+				{ accountId: "secondary", label: "reo", planLabel: "Plus", quotaKnown: true, confirmedRemainingPercent: 40, reasonCode: "eligible_lower_score", scoreComponents: { finalScore: 0.8 } },
+			],
+			timeline: [{ id: "event-1", type: "handoff_committed", timestamp: Date.now(), targetAccountId: "secondary", reasonCode: "handoff_quota_exhausted" }],
+			pool: { connectedSubscriptions: 2, maximumPercent: 200, confirmedRemainingPercent: 95, availableSubscriptions: 1 },
+			handoffs: [],
+		},
+	});
+	const text = collectText(badge);
+	assert.match(text, /Tài khoản đang sở hữu task Agent Aira · Plus/);
+	assert.match(text, /Tài khoản thực thi hiện tại reo · Plus/);
+	assert.match(text, /Quota gần nhất ghi nhận ở reo · Plus/);
+	assert.match(text, /Được chọn: điểm khả dụng cao nhất/);
+	assert.match(text, /Chuyển vì tài khoản trước hết quota/);
+	assert.match(text, /95% Quota xác nhận còn lại \/ 200% Dung lượng tối đa/);
+	assert.ok(badge.children.some((child) => child?.tagName === "details"), "inspector must use a keyboard-accessible native details control");
+});
+
+test("replayed handoff event shows only one session-scoped toast", async () => {
+	let source;
+	class FakeEventSource {
+		constructor() { source = this; }
+	}
+	const { document, hooks } = loadBridge({
+		eventSourceImpl: FakeEventSource,
+		fetchImpl: async () => ({ ok: true, json: async () => ({ accounts: [], decisions: [] }) }),
+	});
+	hooks.startRoutingWatcher();
+	const event = { id: "handoff-1:committed", type: "handoff_committed", previousAccountId: "primary", accountId: "secondary", data: { reasonCode: "handoff_quota_exhausted" } };
+	source.onmessage({ data: JSON.stringify(event) });
+	const first = hooks.getActiveToast();
+	assert.ok(first, "first terminal handoff event should notify the user");
+	const toastCount = document.body.children.length;
+	source.onmessage({ data: JSON.stringify(event) });
+	assert.equal(hooks.getActiveToast(), first);
+	assert.equal(document.body.children.length, toastCount);
 });
 
 test("account rows show the real profile identity and each quota window reset", () => {

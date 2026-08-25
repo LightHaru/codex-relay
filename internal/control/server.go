@@ -8,10 +8,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/LightHaru/codex-relay/internal/mux"
+	"github.com/LightHaru/codex-relay/internal/state"
 )
 
 type Server struct {
@@ -28,6 +30,11 @@ func New(address, token string, multiplexer *mux.Multiplexer, uiTests bool) *Ser
 	router.HandleFunc("/v1/accounts", server.accounts)
 	router.HandleFunc("/v1/accounts/", server.accountAction)
 	router.HandleFunc("/v1/thread-account", server.threadAccount)
+	router.HandleFunc("/v1/router/status", server.routerStatus)
+	router.HandleFunc("/v1/thread-route", server.threadRoute)
+	router.HandleFunc("/v1/thread-route/recover", server.threadRouteRecover)
+	router.HandleFunc("/v1/routing/decisions", server.routingDecisions)
+	router.HandleFunc("/v1/routing/policy", server.routingPolicy)
 	router.HandleFunc("/v1/profile/combined", server.combinedProfile)
 	router.HandleFunc("/v1/usage", server.usage)
 	router.HandleFunc("/v1/usage/all", server.usageAll)
@@ -44,6 +51,110 @@ func New(address, token string, multiplexer *mux.Multiplexer, uiTests bool) *Ser
 		MaxHeaderBytes:    16 * 1024,
 	}
 	return server
+}
+
+func (s *Server) routerStatus(response http.ResponseWriter, request *http.Request) {
+	if !s.authorized(request) {
+		writeJSON(response, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if request.Method != http.MethodGet {
+		methodNotAllowed(response)
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), 30*time.Second)
+	defer cancel()
+	writeJSON(response, http.StatusOK, s.mux.RouterStatus(ctx))
+}
+
+func (s *Server) threadRoute(response http.ResponseWriter, request *http.Request) {
+	if !s.authorized(request) {
+		writeJSON(response, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if request.Method != http.MethodGet {
+		methodNotAllowed(response)
+		return
+	}
+	threadID := strings.TrimSpace(request.URL.Query().Get("threadId"))
+	if threadID == "" {
+		writeJSON(response, http.StatusBadRequest, map[string]any{"error": "threadId is required"})
+		return
+	}
+	result, err := s.mux.ThreadRouteStatus(request.Context(), threadID)
+	if err != nil {
+		writeJSON(response, http.StatusNotFound, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(response, http.StatusOK, result)
+}
+
+func (s *Server) threadRouteRecover(response http.ResponseWriter, request *http.Request) {
+	if !s.authorized(request) {
+		writeJSON(response, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if request.Method != http.MethodPost {
+		methodNotAllowed(response)
+		return
+	}
+	var input struct {
+		ThreadID string `json:"threadId"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeJSON(response, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if err := s.mux.AcknowledgeThreadRecovery(strings.TrimSpace(input.ThreadID)); err != nil {
+		writeJSON(response, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) routingDecisions(response http.ResponseWriter, request *http.Request) {
+	if !s.authorized(request) {
+		writeJSON(response, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if request.Method != http.MethodGet {
+		methodNotAllowed(response)
+		return
+	}
+	limit := 200
+	if raw := strings.TrimSpace(request.URL.Query().Get("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 200 {
+			writeJSON(response, http.StatusBadRequest, map[string]any{"error": "limit must be between 1 and 200"})
+			return
+		}
+		limit = parsed
+	}
+	threadID := strings.TrimSpace(request.URL.Query().Get("threadId"))
+	writeJSON(response, http.StatusOK, map[string]any{"decisions": s.mux.RoutingDecisions(threadID, limit)})
+}
+
+func (s *Server) routingPolicy(response http.ResponseWriter, request *http.Request) {
+	if !s.authorized(request) {
+		writeJSON(response, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+		return
+	}
+	if request.Method != http.MethodPut {
+		methodNotAllowed(response)
+		return
+	}
+	var input struct {
+		Policy state.RoutingPolicy `json:"policy"`
+	}
+	if err := decodeJSON(request, &input); err != nil {
+		writeJSON(response, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if err := s.mux.SetRoutingPolicy(input.Policy); err != nil {
+		writeJSON(response, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]any{"policy": input.Policy})
 }
 
 func (s *Server) combinedProfile(response http.ResponseWriter, request *http.Request) {

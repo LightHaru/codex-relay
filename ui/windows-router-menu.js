@@ -11,11 +11,14 @@
   const API = "http://127.0.0.1:__CODEX_MUX_CONTROL_PORT__/v1";
   const TOKEN = "__CODEX_MUX_CONTROL_TOKEN__";
   const MENU_ID = "codex-mux-windows-menu";
+  const TASK_ROUTE_BADGE_ID = "codex-mux-windows-task-route";
   const USAGE_SURFACE_ID = "codex-mux-windows-usage-surface";
   const STYLE_ID = "codex-mux-windows-menu-style";
   const PROFILE_ACCOUNT_KEY = "codex-mux.windows.profile-account";
   const PLUGIN_ACCOUNT_KEY = "codex-mux.windows.plugin-account";
   const RESET_ACCOUNT_KEY = "codex-mux.windows.reset-account";
+  const CURRENT_THREAD_KEY = "codex-mux.windows.current-thread";
+  const ROUTING_EVENT_IDS_KEY = "codex-mux.windows.routing-event-ids";
   const SCOPED_PLUGIN_METHODS = new Set([
     "app/installed",
     "app/list",
@@ -35,9 +38,85 @@
   let activeToast = null;
   let activeUpdateToast = null;
   let updateWatcherStarted = false;
+  let routingWatcherStarted = false;
+  let routingEventSource = null;
   let latestAccounts = [];
   let usageSurfaceVersion = 0;
   const resetSubscribers = new Set();
+
+  const ROUTING_COPY = {
+    en: {
+      title: "Relay routing", controller: "Relay Controller", current: "Current Task Route",
+      next: "Next Candidate", unavailable: "Unavailable", noRoute: "No route recorded",
+      openTask: "Open a task to inspect its route", generation: "generation", recovery: "recovery required",
+      left: "left", probation: "quota probation", effective: "Effective mode",
+      unsupported: "Safe handoff is unavailable for this app version; tasks remain Sticky.",
+      reviewed: "I reviewed this task · allow next turn", clearFailed: "Could not clear recovery state",
+      policyFailed: "Could not change routing policy", lastDecision: "Last decision",
+      sticky: "Sticky", balanced: "Balanced", rotate: "Rotate",
+      runningVia: "Running via", mode: "Mode", handoff: "Handoff",
+      lastUsed: "Last completed via", nextPreview: "Next Candidate (preview)", noActiveTurn: "No turn is currently running",
+      details: "Routing details", currentOwner: "Current owner", activeWorker: "Active worker",
+      lastQuota: "Last quota attributed to", previousWorker: "Previous worker", requestedMode: "Requested mode",
+      why: "Why this account", timeline: "Routing timeline", poolSummary: "Pool summary",
+      routingOnly: "Pool quota is routing capacity. Each request still runs on one subscription.",
+      quotaFreshness: "Quota snapshot", score: "score", reservation: "reservation", noEvents: "No routing events yet",
+      quotaAttribution: "Quota attribution", decisionId: "Scheduler decision",
+      handoffComplete: "Task handoff completed", handoffFailed: "Task handoff needs attention",
+      recoveryNotice: "Automatic retry stopped safely", from: "from", to: "to",
+      allDepleted: "All connected subscriptions are out of quota", policyDowngraded: "Routing mode changed for safety",
+      eligible: "eligible", depleted: "depleted", unknownQuota: "quota unknown", updated: "updated",
+      sharedPool: "Shared quota pool", poolWorkers: "subscriptions act as one pool",
+      poolUpdating: "quota updating", workerDiagnostics: "Worker diagnostics",
+      confirmedRemaining: "Confirmed remaining", poolMaximum: "Pool maximum", activeWorkers: "Active workers",
+    },
+    vi: {
+      title: "Định tuyến Relay", controller: "Tài khoản điều khiển Relay", current: "Tài khoản chạy task hiện tại",
+      next: "Tài khoản dự kiến lượt kế", unavailable: "Không khả dụng", noRoute: "Chưa ghi nhận tuyến",
+      openTask: "Mở một task để xem tuyến đang dùng", generation: "thế hệ", recovery: "cần kiểm tra phục hồi",
+      left: "còn lại", probation: "đang kiểm tra quota", effective: "Chế độ thực tế",
+      unsupported: "Phiên bản app này chưa hỗ trợ handoff an toàn; task sẽ giữ chế độ Sticky.",
+      reviewed: "Đã kiểm tra task · cho phép lượt tiếp theo", clearFailed: "Không thể xóa trạng thái phục hồi",
+      policyFailed: "Không thể đổi chế độ định tuyến", lastDecision: "Quyết định gần nhất",
+      sticky: "Bám tài khoản", balanced: "Cân bằng", rotate: "Luân phiên",
+      runningVia: "Đang chạy qua", mode: "Chế độ", handoff: "Đang bàn giao",
+      lastUsed: "Lượt hoàn tất gần nhất qua", nextPreview: "Tài khoản dự kiến (chưa chạy)", noActiveTurn: "Hiện không có lượt nào đang chạy",
+      details: "Chi tiết định tuyến", currentOwner: "Tài khoản đang sở hữu task", activeWorker: "Tài khoản thực thi hiện tại",
+      lastQuota: "Quota gần nhất ghi nhận ở", previousWorker: "Tài khoản trước", requestedMode: "Chế độ đã chọn",
+      why: "Vì sao chọn tài khoản", timeline: "Dòng thời gian định tuyến", poolSummary: "Tổng quan pool",
+      routingOnly: "Quota trong pool là dung lượng định tuyến. Mỗi request vẫn chỉ chạy bằng một subscription.",
+      quotaFreshness: "Thời điểm quota", score: "điểm", reservation: "giữ chỗ", noEvents: "Chưa có sự kiện định tuyến",
+      quotaAttribution: "Ghi nhận tài khoản dùng quota", decisionId: "Mã quyết định scheduler",
+      handoffComplete: "Đã bàn giao task", handoffFailed: "Bàn giao task cần kiểm tra",
+      recoveryNotice: "Đã dừng thử lại tự động để bảo vệ task", from: "từ", to: "sang",
+      allDepleted: "Tất cả tài khoản đã kết nối đều hết quota", policyDowngraded: "Đã đổi chế độ định tuyến để bảo đảm an toàn",
+      eligible: "có thể nhận lượt", depleted: "đã hết quota", unknownQuota: "chưa rõ quota", updated: "cập nhật",
+      sharedPool: "Pool quota dùng chung", poolWorkers: "tài khoản hợp thành một pool",
+      poolUpdating: "quota đang cập nhật", workerDiagnostics: "Chẩn đoán worker",
+      confirmedRemaining: "Quota xác nhận còn lại", poolMaximum: "Dung lượng tối đa", activeWorkers: "Worker khả dụng",
+    },
+  };
+
+  function routingText(key) {
+    const language = String(globalThis.navigator?.language || "en").toLowerCase().startsWith("vi") ? "vi" : "en";
+    return ROUTING_COPY[language][key] || ROUTING_COPY.en[key] || key;
+  }
+
+  function poolPresentation(accounts, routing = null) {
+    const connected = (Array.isArray(accounts) ? accounts : []).filter((account) => account?.enabled && account?.connected);
+    const knownUsage = connected.map(remainingUsage).filter((value) => value != null);
+    const upstream = routing?.status?.pool || routing?.pool || null;
+    return {
+      connected: Number.isFinite(Number(upstream?.connectedSubscriptions)) ? Number(upstream.connectedSubscriptions) : connected.length,
+      maximum: Number.isFinite(Number(upstream?.maximumPercent)) ? Number(upstream.maximumPercent) : connected.length * 100,
+      remaining: Number.isFinite(Number(upstream?.confirmedRemainingPercent))
+        ? Number(upstream.confirmedRemainingPercent)
+        : knownUsage.reduce((sum, value) => sum + value, 0),
+      known: Number.isFinite(Number(upstream?.knownSubscriptions)) ? Number(upstream.knownSubscriptions) : knownUsage.length,
+      unknown: Number.isFinite(Number(upstream?.unknownSubscriptions)) ? Number(upstream.unknownSubscriptions) : Math.max(0, connected.length - knownUsage.length),
+      available: Number.isFinite(Number(upstream?.availableSubscriptions)) ? Number(upstream.availableSubscriptions) : connected.length,
+    };
+  }
 
   function normalize(value) {
     return String(value || "").replace(/\s+/g, " ").trim();
@@ -141,10 +220,24 @@
   }
 
   function scopePluginRequest(method, params) {
+    observeThreadRequest(method, params);
     if (!SCOPED_PLUGIN_METHODS.has(method)) return params;
     if (params != null && (typeof params !== "object" || Array.isArray(params))) return params;
     const accountId = getPluginAccountId();
     return accountId ? { ...(params || {}), codexMuxAccountId: accountId } : params;
+  }
+
+  function observeThreadRequest(method, params) {
+    const normalizedMethod = String(method || "");
+    if (normalizedMethod === "thread/start") {
+      writeSessionValue(CURRENT_THREAD_KEY, null);
+      return;
+    }
+    if (!/^(thread|turn|item|hook)\//.test(normalizedMethod) || params == null || typeof params !== "object") return;
+    const candidate = [params.threadId, params.thread_id, params.thread?.id, params.turn?.threadId, params.turn?.thread?.id]
+      .map((value) => String(value || "").trim())
+      .find((value) => /^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(value));
+    if (candidate) writeSessionValue(CURRENT_THREAD_KEY, candidate);
   }
 
   async function profileData() {
@@ -189,6 +282,250 @@
     } catch {
       return { accounts: [], error: "Relay usage data is temporarily unavailable." };
     }
+  }
+
+  function currentThreadId() {
+    const observed = readSessionValue(CURRENT_THREAD_KEY, "");
+    if (observed) return observed;
+    const source = String(globalThis.location?.href || "");
+    const match = source.match(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i);
+    return match ? match[0] : "";
+  }
+
+  async function routingContext() {
+	const status = await request("/router/status");
+    const threadId = currentThreadId();
+    let thread = null;
+    if (threadId) {
+      thread = await request(`/thread-route?threadId=${encodeURIComponent(threadId)}`).catch(() => null);
+    }
+    const query = new URLSearchParams({ limit: "1" });
+    if (threadId) query.set("threadId", threadId);
+    const decisionResult = await request(`/routing/decisions?${query}`).catch(() => ({ decisions: [] }));
+    return { status, thread, threadId, lastDecision: decisionResult?.decisions?.at?.(-1) || null };
+  }
+
+  function startRoutingWatcher() {
+    if (routingWatcherStarted || typeof globalThis.EventSource !== "function") return;
+    routingWatcherStarted = true;
+    routingEventSource = new EventSource(`${API}/events?token=${encodeURIComponent(TOKEN)}`);
+    routingEventSource.onmessage = (event) => {
+      let payload = null;
+      try { payload = JSON.parse(event?.data || "null"); } catch { return; }
+      const eventType = String(payload?.type || "").replaceAll("-", "_");
+      if (!/^(route_|routing_|turn_|quota_circuit_|handoff_|recovery_|all_accounts_|policy_)/.test(eventType)) return;
+      const reasonCode = payload?.data?.reasonCode || payload?.data?.ReasonCode || "";
+      const shouldNotify = eventType === "handoff_failed" || eventType === "recovery_required" || eventType === "all_accounts_depleted" || eventType === "policy_downgraded" || (eventType === "handoff_committed" && reasonCode === "handoff_quota_exhausted");
+      if (payload?.id && shouldNotify && rememberRoutingEvent(payload.id)) {
+        const detail = payload?.message || [payload?.previousAccountId, payload?.accountId].filter(Boolean).join(" → ");
+        const title = eventType === "handoff_committed"
+          ? routingText("handoffComplete")
+          : eventType === "handoff_failed" ? routingText("handoffFailed")
+            : eventType === "all_accounts_depleted" ? routingText("allDepleted")
+              : eventType === "policy_downgraded" ? routingText("policyDowngraded") : routingText("recoveryNotice");
+        showActionToast(title, detail || routingText("title"), eventType !== "handoff_committed");
+      }
+      const menu = document.getElementById?.(MENU_ID);
+      if (menu?.isConnected) void refreshMenu(menu);
+      const badge = document.getElementById?.(TASK_ROUTE_BADGE_ID);
+      if (badge?.isConnected) void refreshTaskRouteBadge(badge);
+    };
+  }
+
+  function rememberRoutingEvent(eventId) {
+    const id = String(eventId || "").trim();
+    if (!id) return false;
+    let known = [];
+    try { known = JSON.parse(readSessionValue(ROUTING_EVENT_IDS_KEY, "[]")); } catch { known = []; }
+    if (!Array.isArray(known)) known = [];
+    if (known.includes(id)) return false;
+    known.push(id);
+    writeSessionValue(ROUTING_EVENT_IDS_KEY, JSON.stringify(known.slice(-100)));
+    return true;
+  }
+
+  function routeWorkerLabel(worker, accountsById) {
+    if (!worker) return routingText("unavailable");
+    const account = accountsById.get(worker.accountId);
+    if (account) return accountName(account);
+    const name = worker.displayName || worker.label || worker.accountId || routingText("unavailable");
+    return worker.planLabel ? `${name} · ${worker.planLabel}` : name;
+  }
+
+  function routeReasonLabel(code) {
+    const vi = String(globalThis.navigator?.language || "en").toLowerCase().startsWith("vi");
+    const labels = {
+      selected_highest_score: ["Selected: highest available score", "Được chọn: điểm khả dụng cao nhất"],
+      selected_sticky_owner: ["Selected: Sticky owner", "Được chọn: tài khoản giữ task ở chế độ Bám"],
+      eligible_lower_score: ["Eligible, lower score", "Có thể dùng nhưng điểm thấp hơn"],
+      skipped_disabled: ["Skipped: disabled", "Bỏ qua: đã tắt"],
+      skipped_disconnected: ["Skipped: disconnected", "Bỏ qua: chưa kết nối"],
+      skipped_incompatible: ["Skipped: incompatible account", "Bỏ qua: tài khoản không tương thích"],
+      skipped_open_circuit: ["Skipped: quota cooldown", "Bỏ qua: đang chờ quota hồi phục"],
+      skipped_cooldown: ["Skipped: cooldown active", "Bỏ qua: thời gian chờ vẫn còn hiệu lực"],
+      skipped_depleted: ["Skipped: depleted", "Bỏ qua: đã hết quota"],
+      skipped_unknown_quota: ["Skipped: quota not confirmed", "Bỏ qua: quota chưa được xác nhận"],
+      skipped_stale_quota: ["Skipped: stale quota", "Bỏ qua: dữ liệu quota đã cũ"],
+      skipped_low_water_reserve: ["Skipped: reserve threshold", "Bỏ qua: chạm ngưỡng dự phòng"],
+      handoff_quota_exhausted: ["Moved after quota exhaustion", "Chuyển vì tài khoản trước hết quota"],
+      handoff_balanced_boundary: ["Moved at a safe balancing boundary", "Chuyển tại ranh giới an toàn để cân bằng"],
+      handoff_rotate_boundary: ["Moved at a safe rotation boundary", "Chuyển tại ranh giới luân phiên an toàn"],
+      policy_downgraded_unknown_profile: ["Sticky fallback: compatibility not verified", "Tạm dùng chế độ Bám: chưa xác minh tương thích"],
+    };
+    const value = labels[String(code || "")];
+    return value ? value[vi ? 1 : 0] : String(code || routingText("unavailable")).replaceAll("_", " ");
+  }
+
+  function routeItem(key, value, className = "") {
+    const item = make("div", `codex-mux-win-task-route-item ${className}`.trim());
+    const output = String(value ?? routingText("unavailable"));
+    const valueNode = make("span", "codex-mux-win-task-route-value", output);
+    valueNode.title = output;
+    append(item, make("span", "codex-mux-win-task-route-key", key), valueNode);
+    return item;
+  }
+
+  function renderTaskRouteBadge(badge, accounts, routing) {
+    badge.replaceChildren();
+    if (!routing?.status || !routing?.thread?.route) return;
+    const byId = new Map((Array.isArray(accounts) ? accounts : []).map((account) => [account.id, account]));
+    const thread = routing.thread;
+    const route = thread.route;
+    const current = byId.get(route.accountId);
+    const runningWorker = thread.activeWorker || thread.currentOwner || (current ? { accountId: current.id } : { accountId: route.accountId });
+    const runningStatus = (Array.isArray(thread.workers) ? thread.workers : []).find((worker) => worker.accountId === runningWorker?.accountId);
+    const next = routing.thread.nextCandidate || routing.status.nextCandidate;
+    const compact = make("div", "codex-mux-win-task-route-compact");
+    compact.append(
+      routeItem(routingText("runningVia"), `${routeWorkerLabel(runningWorker, byId)} · ${routingText("generation")} ${route.generation}`),
+      routeItem(routingText("mode"), thread.effectivePolicy || routing.status.effectivePolicy || routing.status.policy),
+    );
+    if (!thread.activeWorker) compact.append(routeItem("", routingText("noActiveTurn"), "codex-mux-win-task-route-muted"));
+    if (runningStatus?.quotaKnown && Number.isFinite(Number(runningStatus.confirmedRemainingPercent))) compact.append(routeItem(routingText("confirmedRemaining"), `${Math.round(Number(runningStatus.confirmedRemainingPercent))}%`));
+    if (thread.lastCompletedWorker) compact.append(routeItem(routingText("lastUsed"), routeWorkerLabel(thread.lastCompletedWorker, byId)));
+    if (next) {
+      const nextAccount = byId.get(next.accountId);
+      const quota = next.quotaKnown ? ` · ${Math.round(next.remainingPercent)}% ${routingText("left")}` : ` · ${routingText("probation")}`;
+      compact.append(routeItem(routingText("nextPreview"), `${nextAccount ? accountName(nextAccount) : next.label || next.accountId}${quota}`));
+    }
+    badge.append(compact);
+    const handoffs = Array.isArray(routing.thread.handoffs) ? routing.thread.handoffs : [];
+    const latestHandoff = handoffs.at(-1);
+    if (latestHandoff && !["FAILED", "ROLLED_BACK"].includes(latestHandoff.phase)) {
+      const from = byId.get(latestHandoff.sourceAccountId);
+      const to = byId.get(latestHandoff.targetAccountId);
+      compact.append(routeItem(routingText("handoff"), `${from ? accountName(from) : latestHandoff.sourceAccountId} → ${to ? accountName(to) : latestHandoff.targetAccountId} · ${latestHandoff.phase}`));
+      if (latestHandoff.reasonCode) compact.append(routeItem("", routeReasonLabel(latestHandoff.reasonCode)));
+      if (latestHandoff.sourceGeneration || latestHandoff.targetGeneration) compact.append(routeItem(routingText("generation"), `${latestHandoff.sourceGeneration || "?"} → ${latestHandoff.targetGeneration || "?"}`));
+    }
+    if (route.recoveryRequired) compact.append(routeItem("", routingText("recovery"), "codex-mux-win-task-route-recovery"));
+
+    const details = make("details", "codex-mux-win-task-route-details");
+    details.append(make("summary", "codex-mux-win-task-route-summary", routingText("details")));
+    const facts = make("div", "codex-mux-win-task-route-facts");
+    const attribution = thread.quotaAttribution || {};
+    const attributionDelta = Number.isFinite(Number(attribution.deltaPercent)) ? ` · -${Number(attribution.deltaPercent).toFixed(2)}%` : "";
+    const quotaWhen = thread.quotaSnapshotAt ? new Date(thread.quotaSnapshotAt).toLocaleString() : routingText("unavailable");
+    const reservation = thread.reservation
+      ? `${routeWorkerLabel({ accountId: thread.reservation.accountId }, byId)} · ${Number(thread.reservation.weight || 0).toFixed(2)}`
+      : routingText("unavailable");
+    facts.append(
+      routeItem(routingText("currentOwner"), routeWorkerLabel(thread.currentOwner || { accountId: route.accountId }, byId)),
+      routeItem(routingText("activeWorker"), thread.activeWorker ? routeWorkerLabel(thread.activeWorker, byId) : routingText("noActiveTurn")),
+      routeItem(routingText("lastUsed"), routeWorkerLabel(thread.lastCompletedWorker, byId)),
+      routeItem(routingText("lastQuota"), routeWorkerLabel(thread.lastQuotaConsumingWorker, byId)),
+      routeItem(routingText("previousWorker"), routeWorkerLabel(thread.previousWorker, byId)),
+      routeItem(routingText("requestedMode"), thread.requestedPolicy || routing.status.policy),
+      routeItem(routingText("effective"), thread.effectivePolicy || routing.status.effectivePolicy),
+      routeItem(routingText("quotaFreshness"), `${thread.quotaFreshness || "unknown"} · ${quotaWhen}`),
+      routeItem(routingText("quotaAttribution"), `${attribution.status || "unavailable"}${attributionDelta}`),
+      routeItem(routingText("reservation"), reservation),
+      routeItem(routingText("decisionId"), thread.schedulerDecisionId || routingText("unavailable")),
+    );
+    details.append(facts);
+
+    const why = make("section", "codex-mux-win-task-route-section");
+    why.append(make("h4", "", routingText("why")));
+    const workers = Array.isArray(thread.workers) ? thread.workers : [];
+    const workerList = make("div", "codex-mux-win-task-route-workers");
+    for (const worker of workers) {
+      const quota = worker.quotaKnown && Number.isFinite(Number(worker.confirmedRemainingPercent))
+        ? `${Math.round(Number(worker.confirmedRemainingPercent))}%`
+        : routingText("probation");
+      const score = Number.isFinite(Number(worker?.scoreComponents?.finalScore)) ? ` · ${routingText("score")} ${Number(worker.scoreComponents.finalScore).toFixed(2)}` : "";
+      const row = make("div", "codex-mux-win-task-route-worker");
+      append(row, make("div", "codex-mux-win-task-route-worker-name", routeWorkerLabel(worker, byId)), make("div", "codex-mux-win-task-route-worker-reason", `${routeReasonLabel(worker.reasonCode)} · ${quota}${score}`));
+      workerList.append(row);
+    }
+    if (!workers.length) workerList.append(make("div", "codex-mux-win-task-route-muted", routingText("unavailable")));
+    why.append(workerList);
+    details.append(why);
+
+    const timeline = make("section", "codex-mux-win-task-route-section");
+    timeline.append(make("h4", "", routingText("timeline")));
+    const timelineList = make("ol", "codex-mux-win-task-route-timeline");
+    const events = (Array.isArray(thread.timeline) ? thread.timeline : []).slice(-12).reverse();
+    for (const event of events) {
+      const worker = event.targetAccountId || event.accountId;
+      const identity = worker ? routeWorkerLabel({ accountId: worker }, byId) : "";
+      const when = event.timestamp ? new Date(event.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "";
+      const item = make("li", "");
+      append(item, make("span", "codex-mux-win-task-route-event", String(event.type || "event").replaceAll("_", " ")), make("span", "codex-mux-win-task-route-event-meta", [when, identity, routeReasonLabel(event.reasonCode)].filter(Boolean).join(" · ")));
+      timelineList.append(item);
+    }
+    if (!events.length) timelineList.append(make("li", "codex-mux-win-task-route-muted", routingText("noEvents")));
+    timeline.append(timelineList);
+    details.append(timeline);
+
+    const pool = poolPresentation(accounts, thread);
+    const poolSection = make("section", "codex-mux-win-task-route-section");
+    const poolUpdated = thread.pool?.quotaUpdatedAt ? new Date(thread.pool.quotaUpdatedAt).toLocaleString() : routingText("unavailable");
+    poolSection.append(
+      make("h4", "", routingText("poolSummary")),
+      make("div", "", `${Math.round(pool.remaining)}% ${routingText("confirmedRemaining")} / ${Math.round(pool.maximum)}% ${routingText("poolMaximum")}`),
+      make("div", "", `${pool.available}/${pool.connected} ${routingText("eligible")} · ${Number(thread.pool?.depletedSubscriptions || 0)} ${routingText("depleted")} · ${Number(thread.pool?.unknownSubscriptions || 0)} ${routingText("unknownQuota")}`),
+      make("div", "codex-mux-win-task-route-event-meta", `${routingText("updated")}: ${poolUpdated}`),
+      make("p", "codex-mux-win-task-route-note", routingText("routingOnly")),
+    );
+    details.append(poolSection);
+    badge.append(details);
+  }
+
+  async function refreshTaskRouteBadge(badge) {
+    badge.dataset.codexMuxLastRefresh = String(Date.now());
+    try {
+      const [accounts, routing] = await Promise.all([loadAccounts(), routingContext()]);
+      renderTaskRouteBadge(badge, accounts, routing);
+    } catch {
+      // The native task view remains untouched when the local control API is unavailable.
+    }
+  }
+
+  function taskRoutePlacement() {
+    const inputs = [...(document.querySelectorAll?.('textarea, [contenteditable="true"]') || [])].filter(isVisible);
+    const input = inputs.at(-1);
+    if (!input) return null;
+    const anchor = input.closest?.("form") || input.parentElement;
+    return anchor?.parentElement ? { parent: anchor.parentElement, before: anchor } : null;
+  }
+
+  function installTaskRouteBadge() {
+    let badge = document.getElementById?.(TASK_ROUTE_BADGE_ID);
+    if (!currentThreadId()) {
+      badge?.remove();
+      return;
+    }
+    const placement = taskRoutePlacement();
+    if (!placement) return;
+    if (!badge || badge.parentElement !== placement.parent) {
+      badge?.remove();
+      badge = make("section", "", "");
+      badge.id = TASK_ROUTE_BADGE_ID;
+      badge.setAttribute("aria-label", routingText("title"));
+      placement.parent.insertBefore(badge, placement.before);
+    }
+    const lastRefresh = Number(badge.dataset.codexMuxLastRefresh || 0);
+    if (Date.now() - lastRefresh > 5000) void refreshTaskRouteBadge(badge);
   }
 
   function rateLimitResets(accountId) {
@@ -462,6 +799,36 @@
       .codex-mux-win-actions button:hover, .codex-mux-win-actions a:hover { background: rgb(255 255 255 / .2); }
       .codex-mux-win-actions .codex-mux-win-primary { background: #4f6bed; color: white; }
       .codex-mux-win-status { min-height: 20px; margin-top: 12px; color: var(--text-secondary, var(--token-text-secondary, #c7c7c7)); font-size: 12px; }
+      .codex-mux-win-route-panel { margin: 10px 12px 4px; padding: 10px; border: 1px solid color-mix(in srgb, currentColor 18%, transparent); border-radius: 10px; background: color-mix(in srgb, currentColor 4%, transparent); font-size: 11px; }
+      #${TASK_ROUTE_BADGE_ID} { display: block; width: min(760px, calc(100% - 24px)); margin: 0 auto 8px; border: 1px solid color-mix(in srgb, currentColor 16%, transparent); border-radius: 10px; background: color-mix(in srgb, currentColor 4%, transparent); color: var(--text-primary, var(--token-text-primary, inherit)); padding: 7px 10px; font-size: 11px; line-height: 16px; }
+      #${TASK_ROUTE_BADGE_ID} .codex-mux-win-task-route-compact { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; }
+      #${TASK_ROUTE_BADGE_ID} .codex-mux-win-task-route-item { display: flex; min-width: 0; gap: 5px; overflow: hidden; }
+      #${TASK_ROUTE_BADGE_ID} .codex-mux-win-task-route-key { margin-right: 5px; color: var(--text-secondary, var(--token-text-secondary, #aaa)); }
+      #${TASK_ROUTE_BADGE_ID} .codex-mux-win-task-route-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      #${TASK_ROUTE_BADGE_ID} .codex-mux-win-task-route-recovery { color: #e9a23b; }
+      #${TASK_ROUTE_BADGE_ID} .codex-mux-win-task-route-muted { color: var(--text-secondary, var(--token-text-secondary, #aaa)); }
+      #${TASK_ROUTE_BADGE_ID} .codex-mux-win-task-route-details { margin-top: 5px; border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent); padding-top: 4px; }
+      #${TASK_ROUTE_BADGE_ID} .codex-mux-win-task-route-summary { width: fit-content; border-radius: 5px; color: var(--text-secondary, var(--token-text-secondary, #aaa)); cursor: pointer; font-weight: 600; padding: 2px 4px; }
+      #${TASK_ROUTE_BADGE_ID} .codex-mux-win-task-route-summary:hover, #${TASK_ROUTE_BADGE_ID} .codex-mux-win-task-route-summary:focus-visible { background: color-mix(in srgb, currentColor 9%, transparent); color: inherit; outline: none; }
+      #${TASK_ROUTE_BADGE_ID} .codex-mux-win-task-route-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px 16px; margin-top: 7px; }
+      #${TASK_ROUTE_BADGE_ID} .codex-mux-win-task-route-section { margin-top: 9px; border-top: 1px solid color-mix(in srgb, currentColor 10%, transparent); padding-top: 8px; }
+      #${TASK_ROUTE_BADGE_ID} .codex-mux-win-task-route-section h4 { margin: 0 0 5px; font-size: 11px; line-height: 16px; }
+      #${TASK_ROUTE_BADGE_ID} .codex-mux-win-task-route-workers { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; }
+      #${TASK_ROUTE_BADGE_ID} .codex-mux-win-task-route-worker { min-width: 0; border: 1px solid color-mix(in srgb, currentColor 10%, transparent); border-radius: 7px; padding: 5px 7px; }
+      #${TASK_ROUTE_BADGE_ID} .codex-mux-win-task-route-worker-name { overflow: hidden; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+      #${TASK_ROUTE_BADGE_ID} .codex-mux-win-task-route-worker-reason, #${TASK_ROUTE_BADGE_ID} .codex-mux-win-task-route-event-meta, #${TASK_ROUTE_BADGE_ID} .codex-mux-win-task-route-note { color: var(--text-secondary, var(--token-text-secondary, #aaa)); }
+      #${TASK_ROUTE_BADGE_ID} .codex-mux-win-task-route-timeline { display: grid; max-height: 150px; gap: 4px; margin: 0; overflow: auto; padding-left: 20px; }
+      #${TASK_ROUTE_BADGE_ID} .codex-mux-win-task-route-timeline li { padding-left: 2px; }
+      #${TASK_ROUTE_BADGE_ID} .codex-mux-win-task-route-event { margin-right: 5px; font-weight: 600; }
+      #${TASK_ROUTE_BADGE_ID} .codex-mux-win-task-route-note { margin: 3px 0 0; }
+      @media (max-width: 640px) { #${TASK_ROUTE_BADGE_ID} .codex-mux-win-task-route-facts, #${TASK_ROUTE_BADGE_ID} .codex-mux-win-task-route-workers { grid-template-columns: minmax(0, 1fr); } }
+      .codex-mux-win-route-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; }
+      .codex-mux-win-route-row + .codex-mux-win-route-row { margin-top: 6px; }
+      .codex-mux-win-route-key { color: var(--text-secondary, var(--token-text-secondary, #aaa)); }
+      .codex-mux-win-route-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+      .codex-mux-win-policy-actions { display: flex; gap: 4px; margin-top: 8px; }
+      .codex-mux-win-policy-button { flex: 1; border: 1px solid color-mix(in srgb, currentColor 18%, transparent); border-radius: 7px; padding: 5px 3px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+      .codex-mux-win-policy-button[aria-pressed="true"] { background: color-mix(in srgb, #5b78ff 30%, transparent); border-color: #6680ff; }
       .codex-mux-win-toast { position: fixed; z-index: 2147483646; top: 20px; right: 20px; display: flex; width: min(380px, calc(100vw - 32px)); align-items: flex-start; gap: 11px; border: 1px solid color-mix(in srgb, #55c982 58%, transparent); border-radius: 13px; background: color-mix(in srgb, var(--main-surface-background, #292929) 94%, #164a2c); box-shadow: 0 16px 45px rgb(0 0 0 / .35); color: var(--text-primary, var(--token-text-primary, #f7f7f7)); padding: 13px 14px; }
       .codex-mux-win-toast-icon { display: grid; width: 22px; height: 22px; flex: 0 0 22px; place-items: center; border-radius: 50%; background: #2da861; color: white; font-size: 14px; font-weight: 800; }
       .codex-mux-win-toast-copy { min-width: 0; flex: 1; }
@@ -1282,22 +1649,21 @@
     return card;
   }
 
-  function renderUsageBillingSurface(accounts, collection, host, state, renderVersion) {
+  function renderUsageBillingSurface(accounts, collection, host, state, renderVersion, routing = null) {
     const enabled = (Array.isArray(accounts) ? accounts : []).filter((account) => account?.enabled);
     const entries = new Map((Array.isArray(collection?.accounts) ? collection.accounts : [])
       .map((entry) => [entry.accountId, entry]));
     const section = make("section", "");
     section.id = USAGE_SURFACE_ID;
-    section.setAttribute("aria-label", "All connected subscriptions");
+    section.setAttribute("aria-label", routingText("sharedPool"));
     append(
       section,
-      make("div", "codex-mux-win-usage-heading", "All connected subscriptions"),
-      make("div", "codex-mux-win-usage-description", "Relay keeps every subscription isolated and shows its quota, billing data, and reset credits here in the native Usage & billing page."),
+      make("div", "codex-mux-win-usage-heading", routingText("sharedPool")),
+      make("div", "codex-mux-win-usage-description", "Relay combines schedulable quota into one pool while keeping every upstream credential isolated. Per-worker billing and reset details remain available below for diagnostics."),
     );
-    const connected = enabled.filter((account) => account.connected).length;
-    const available = Number.isFinite(Number(collection?.availableCount)) ? Number(collection.availableCount) : 0;
+    const pool = poolPresentation(accounts, routing);
     const summary = make("div", "codex-mux-win-usage-summary");
-    [["Connected", connected], ["Usage available", available], ["Needs attention", Math.max(0, enabled.length - available)]]
+    [[routingText("confirmedRemaining"), `${Math.round(pool.remaining)}%`], [routingText("poolMaximum"), `${Math.round(pool.maximum)}%`], [routingText("activeWorkers"), `${pool.available}/${pool.connected}`]]
       .forEach(([label, value]) => {
         const item = make("div", "codex-mux-win-usage-summary-card");
         append(item, make("div", "codex-mux-win-usage-summary-label", label), make("div", "codex-mux-win-usage-summary-value", value));
@@ -1311,16 +1677,18 @@
     const sorted = enabled.slice().sort((left, right) => Number(right.controller) - Number(left.controller));
     if (sorted.length === 0) cards.append(make("div", "codex-mux-win-picker-empty", "No Relay subscriptions are configured."));
     sorted.forEach((account) => cards.append(renderUsageBillingAccount(account, entries.get(account.id), state, renderVersion)));
-    section.append(cards);
+    const diagnostics = make("details", "codex-mux-win-usage-details codex-mux-win-worker-diagnostics");
+    diagnostics.append(make("summary", "", `${routingText("workerDiagnostics")} (${enabled.length})`), cards);
+    section.append(diagnostics);
     host.replaceChildren(section);
   }
 
   async function loadUsageBillingSurface(host, renderVersion) {
     try {
-      const [accounts, collection] = await Promise.all([loadAccounts(), nativeUsageStatusAll()]);
+      const [accounts, collection, routing] = await Promise.all([loadAccounts(), nativeUsageStatusAll(), routingContext().catch(() => null)]);
       if (!host.isConnected || usageSurfaceVersion !== renderVersion) return;
       const state = { resetRenderVersion: renderVersion };
-      renderUsageBillingSurface(accounts, collection, host, state, renderVersion);
+      renderUsageBillingSurface(accounts, collection, host, state, renderVersion, routing);
     } catch (error) {
       if (!host.isConnected || usageSurfaceVersion !== renderVersion) return;
       host.replaceChildren(make("div", "codex-mux-win-usage-error", `Could not load Relay usage: ${error.message}`));
@@ -1446,33 +1814,110 @@
     return state;
   }
 
-  function renderMenu(menu, accounts) {
+  function renderRoutingPanel(menu, accounts, routing) {
+    if (!routing?.status) return;
+    const byId = new Map(accounts.map((account) => [account.id, account]));
+    const controller = accounts.find((account) => account.controller);
+    const route = routing.thread?.route;
+    const routeAccount = route ? byId.get(route.accountId) : null;
+    const panel = make("section", "codex-mux-win-route-panel");
+    append(
+      panel,
+      make("div", "codex-mux-win-title", routingText("title")),
+    );
+    const controllerRow = make("div", "codex-mux-win-route-row");
+    append(controllerRow, make("span", "codex-mux-win-route-key", routingText("controller")), make("span", "codex-mux-win-route-value", controller ? accountName(controller) : routingText("unavailable")));
+    const taskRow = make("div", "codex-mux-win-route-row");
+    const taskLabel = route
+      ? `${routeAccount ? accountName(routeAccount) : route.accountId} · ${routingText("generation")} ${route.generation}${route.recoveryRequired ? ` · ${routingText("recovery")}` : ""}`
+      : routing.threadId ? routingText("noRoute") : routingText("openTask");
+    append(taskRow, make("span", "codex-mux-win-route-key", routingText("current")), make("span", "codex-mux-win-route-value", taskLabel));
+    panel.append(controllerRow, taskRow);
+    const next = routing.status.nextCandidate;
+    if (next) {
+      const nextAccount = byId.get(next.accountId);
+      const nextRow = make("div", "codex-mux-win-route-row");
+      const nextLabel = `${nextAccount ? accountName(nextAccount) : next.label || next.accountId} · ${next.quotaKnown ? `${Math.round(next.remainingPercent)}% ${routingText("left")}` : routingText("probation")}`;
+      append(nextRow, make("span", "codex-mux-win-route-key", routingText("next")), make("span", "codex-mux-win-route-value", nextLabel));
+      panel.append(nextRow);
+    }
+    const effectiveRow = make("div", "codex-mux-win-route-row");
+    const effectiveLabel = routing.status.effectivePolicy || routing.status.policy;
+    append(effectiveRow, make("span", "codex-mux-win-route-key", routingText("effective")), make("span", "codex-mux-win-route-value", effectiveLabel));
+    panel.append(effectiveRow);
+    if (routing.status.handoffSupported === false) panel.append(make("div", "codex-mux-win-status", routingText("unsupported")));
+    if (routing.lastDecision?.reason) {
+      const decisionRow = make("div", "codex-mux-win-route-row");
+      append(decisionRow, make("span", "codex-mux-win-route-key", routingText("lastDecision")), make("span", "codex-mux-win-route-value", routing.lastDecision.reason));
+      panel.append(decisionRow);
+    }
+    if (route?.recoveryRequired && routing.threadId) {
+      const recover = make("button", "codex-mux-win-policy-button", routingText("reviewed"));
+      recover.type = "button";
+      recover.addEventListener("click", async (event) => {
+        event.preventDefault(); event.stopPropagation(); recover.disabled = true;
+        try {
+          await request("/thread-route/recover", { method: "POST", body: JSON.stringify({ threadId: routing.threadId }) });
+          await refreshMenu(menu);
+        } catch (error) {
+          setMenuStatus(menu, `${routingText("clearFailed")}: ${error.message}`); recover.disabled = false;
+        }
+      });
+      panel.append(recover);
+    }
+    const actions = make("div", "codex-mux-win-policy-actions");
+    const policies = [["sticky", routingText("sticky")], ["balanced", routingText("balanced")], ["rotate-completed-turn", routingText("rotate")]];
+    for (const [value, label] of policies) {
+      const button = make("button", "codex-mux-win-policy-button", label);
+      button.type = "button";
+      button.setAttribute("aria-pressed", String(routing.status.policy === value));
+      button.addEventListener("click", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        button.disabled = true;
+        try {
+          await request("/routing/policy", { method: "PUT", body: JSON.stringify({ policy: value }) });
+          await refreshMenu(menu);
+        } catch (error) {
+          setMenuStatus(menu, `${routingText("policyFailed")}: ${error.message}`);
+          button.disabled = false;
+        }
+      });
+      actions.append(button);
+    }
+    panel.append(actions);
+    menu.append(panel);
+  }
+
+  function renderMenu(menu, accounts, routing = null) {
     const priorError = menu.querySelector(".codex-mux-win-error")?.textContent || "";
     menu.replaceChildren();
-    const connected = accounts.filter((account) => account.enabled && account.connected);
-    const knownUsage = connected.map(remainingUsage).filter((value) => value != null);
-    const total = knownUsage.length > 0
-      ? knownUsage.reduce((sum, value) => sum + value, 0)
-      : null;
-    const missing = Math.max(0, connected.length - knownUsage.length);
+    const pool = poolPresentation(accounts, routing);
 
     const summary = make("div", "codex-mux-win-summary");
     const icon = make("div", "codex-mux-win-summary-icon", "◔");
     const label = make("div", "codex-mux-win-summary-label");
     append(
       label,
-      make("div", "codex-mux-win-title", "Usage remaining"),
-      make("div", "codex-mux-win-subtext", missing > 0
-        ? `${knownUsage.length}/${connected.length} quota${knownUsage.length === 1 ? "" : "s"} available · updating ${missing}`
-        : `${connected.length} connected subscription${connected.length === 1 ? "" : "s"}`),
+      make("div", "codex-mux-win-title", routingText("sharedPool")),
+      make("div", "codex-mux-win-subtext", pool.unknown > 0
+        ? `${pool.known}/${pool.connected} ${routingText("poolUpdating")} · ${pool.unknown} updating`
+        : `${pool.connected} ${routingText("poolWorkers")}`),
     );
-    append(summary, icon, label, make("div", `codex-mux-win-total${total == null ? " codex-mux-win-percent-muted" : ""}`, total == null ? "Updating…" : `${Math.round(total)}% left`));
+    const totalLabel = pool.connected === 0 ? "Updating…" : `${Math.round(pool.remaining)}% / ${Math.round(pool.maximum)}% ${routingText("left")}`;
+    append(summary, icon, label, make("div", `codex-mux-win-total${pool.connected === 0 ? " codex-mux-win-percent-muted" : ""}`, totalLabel));
     menu.append(summary);
+	  renderRoutingPanel(menu, accounts, routing);
 
-    if (accounts.length) menu.append(make("div", "codex-mux-win-divider"));
-    accounts.forEach((account) => menu.append(row(account, (button) => {
-      cancelPendingSubscription(menu, account, button).catch((error) => setMenuStatus(menu, error.message));
-    })));
+    if (accounts.length) {
+      menu.append(make("div", "codex-mux-win-divider"));
+      const diagnostics = make("details", "codex-mux-win-worker-diagnostics");
+      diagnostics.append(make("summary", "codex-mux-win-add", `${routingText("workerDiagnostics")} (${accounts.length})`));
+      accounts.forEach((account) => diagnostics.append(row(account, (button) => {
+        cancelPendingSubscription(menu, account, button).catch((error) => setMenuStatus(menu, error.message));
+      })));
+      menu.append(diagnostics);
+    }
 
     const add = make("button", "codex-mux-win-add");
     add.type = "button";
@@ -1831,7 +2276,8 @@
   async function refreshMenu(menu) {
     menu.dataset.codexMuxLastRefresh = String(Date.now());
     try {
-      renderMenu(menu, await loadAccounts());
+      const [accounts, routing] = await Promise.all([loadAccounts(), routingContext().catch(() => null)]);
+      renderMenu(menu, accounts, routing);
     } catch (error) {
       setMenuStatus(menu, `Router unavailable: ${error.message}`);
     }
@@ -1863,12 +2309,14 @@
     window.setTimeout(() => {
       installIntoProfileMenu();
       installUsageBillingSurface();
+      installTaskRouteBadge();
     }, 50);
   }
 
   function start() {
     addStyles();
     startUpdateWatcher();
+    startRoutingWatcher();
     new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true });
     window.setInterval(schedule, 1000);
     schedule();
@@ -1883,6 +2331,7 @@
     getResetAccountId,
     profileData,
     rateLimitResets,
+    routingContext,
     scopePluginRequest,
     selectedResetUsageWindows,
     subscribeReset,

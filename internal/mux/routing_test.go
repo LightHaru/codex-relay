@@ -29,6 +29,52 @@ func TestIsUsageLimitResponseIgnoresUnrelatedError(t *testing.T) {
 	}
 }
 
+func TestUsageLimitNotificationRecognizesCurrentCamelCaseTurnError(t *testing.T) {
+	message := protocol.Message{
+		Method: "turn/completed",
+		Params: json.RawMessage(`{
+			"threadId":"thread-1",
+			"turn":{"id":"turn-1","status":"failed","error":{
+				"message":"You've hit your usage limit",
+				"codexErrorInfo":"usageLimitExceeded"
+			}}
+		}`),
+	}
+	if !isUsageLimitNotification(message) {
+		t.Fatal("current app-server usageLimitExceeded notification was not recognized")
+	}
+}
+
+func TestUsageLimitNotificationRecognizesGoalTerminalErrorWithoutStatus(t *testing.T) {
+	message := protocol.Message{
+		Method: "turn/completed",
+		Params: json.RawMessage(`{
+			"threadId":"thread-1",
+			"turn":{"id":"turn-1","error":{
+				"message":"usage rejected",
+				"codex_error_info":"usage_limit_exceeded"
+			}}
+		}`),
+	}
+	if !isUsageLimitNotification(message) {
+		t.Fatal("goal terminal quota error without status was not recognized")
+	}
+}
+
+func TestUsageLimitNotificationIgnoresQuotaTextInTurnItems(t *testing.T) {
+	message := protocol.Message{
+		Method: "turn/completed",
+		Params: json.RawMessage(`{
+			"threadId":"thread-1",
+			"turn":{"id":"turn-1","status":"completed","error":null,
+			"items":[{"type":"userMessage","text":"please explain quota routing"}]}
+		}`),
+	}
+	if isUsageLimitNotification(message) {
+		t.Fatal("ordinary user quota text was misclassified as an upstream failure")
+	}
+}
+
 func TestIsModelCapacityResponseRecognizesSelectedModelMessage(t *testing.T) {
 	message := protocol.Message{Error: &protocol.RPCError{
 		Code:    -32000,
@@ -78,5 +124,21 @@ func TestAllSubscriptionsDepletedShowsKnownResetTime(t *testing.T) {
 	want := "All connected subscriptions are depleted. Usage resets on Sunday, 16 August at 10:30 AM."
 	if message.Error.Message != want {
 		t.Fatalf("unexpected reset message: %q", message.Error.Message)
+	}
+}
+
+func TestThreadIDParserSupportsReviewedProtocolShapes(t *testing.T) {
+	fixtures := []string{
+		`{"threadId":"thread-1"}`,
+		`{"thread_id":"thread-1"}`,
+		`{"conversationId":"thread-1"}`,
+		`{"thread":{"id":"thread-1"}}`,
+		`{"turn":{"threadId":"thread-1"}}`,
+		`{"turn":{"thread":{"id":"thread-1"}}}`,
+	}
+	for _, fixture := range fixtures {
+		if got := threadIDFromAnyParams(json.RawMessage(fixture)); got != "thread-1" {
+			t.Fatalf("thread ID from %s = %q", fixture, got)
+		}
 	}
 }

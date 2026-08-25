@@ -250,11 +250,12 @@ func normalizeWindowsHistoryPath(value string) string {
 	}
 }
 
-// findThreadHistory locates a persisted rollout by its thread ID in one
-// account's managed history directories. It is used when an older Router
-// state file has no owner mapping for a chat that already exists on disk.
-// WalkDir does not follow directory symlinks; copyThreadHistory performs the
-// final EvalSymlinks boundary check before reading any file.
+// findThreadHistory locates the newest persisted rollout generation for a
+// thread ID in one account's managed history directories. Windows can keep an
+// older rollout pathname locked during handoff, so Relay installs a verified
+// sibling generation. Returning the first lexical match would then checkpoint
+// stale history forever. WalkDir does not follow directory symlinks;
+// copyThreadHistory performs the final EvalSymlinks boundary check.
 func findThreadHistory(codexHome, threadID string) (string, bool) {
 	codexHome = normalizeWindowsHistoryPath(codexHome)
 	threadID = strings.TrimSpace(threadID)
@@ -262,9 +263,14 @@ func findThreadHistory(codexHome, threadID string) (string, bool) {
 		return "", false
 	}
 	wanted := strings.ToLower(threadID)
+	type candidate struct {
+		path    string
+		modTime int64
+		size    int64
+	}
+	var selected candidate
 	for _, rootName := range []string{"sessions", "archived_sessions"} {
 		root := filepath.Join(codexHome, rootName)
-		var found string
 		_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 			if walkErr != nil || entry == nil || entry.IsDir() {
 				return nil
@@ -275,16 +281,21 @@ func findThreadHistory(codexHome, threadID string) (string, bool) {
 			base := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
 			base = strings.ToLower(base)
 			if base == wanted || strings.HasSuffix(base, "-"+wanted) {
-				found = path
-				return fs.SkipAll
+				info, infoErr := entry.Info()
+				if infoErr != nil || !info.Mode().IsRegular() {
+					return nil
+				}
+				entryCandidate := candidate{path: path, modTime: info.ModTime().UnixNano(), size: info.Size()}
+				if selected.path == "" || entryCandidate.modTime > selected.modTime ||
+					(entryCandidate.modTime == selected.modTime && entryCandidate.size > selected.size) ||
+					(entryCandidate.modTime == selected.modTime && entryCandidate.size == selected.size && entryCandidate.path > selected.path) {
+					selected = entryCandidate
+				}
 			}
 			return nil
 		})
-		if found != "" {
-			return found, true
-		}
 	}
-	return "", false
+	return selected.path, selected.path != ""
 }
 
 func isPathWithin(root, candidate string) bool {

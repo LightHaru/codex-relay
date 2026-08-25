@@ -15,12 +15,37 @@ func TestInteractiveAppServerDetection(t *testing.T) {
 		{args: []string{"-c", "features.code_mode_host=true", "app-server", "--analytics-default-enabled"}, want: true},
 		{args: []string{"app-server", "daemon", "version"}, want: false},
 		{args: []string{"app-server", "generate-ts", "--out", "/tmp/schema"}, want: false},
+		{args: []string{"app-server", "-c", "windows.sandbox=\"unelevated\"", "generate-json-schema", "--out", "/tmp/schema"}, want: false},
 		{args: []string{"exec", "hello"}, want: false},
 	}
 	for _, test := range tests {
 		if got := isInteractiveAppServer(test.args); got != test.want {
 			t.Fatalf("isInteractiveAppServer(%q)=%v, want %v", test.args, got, test.want)
 		}
+	}
+}
+
+func TestResolveCompatibilityProfileFailsClosedWithoutReviewedManifest(t *testing.T) {
+	root := t.TempDir()
+	resources := filepath.Join(root, "resources")
+	if err := os.MkdirAll(resources, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	realExecutable := filepath.Join(resources, "codex.real.exe")
+	if got := resolveCompatibilityProfile(realExecutable); got != "unknown" {
+		t.Fatalf("missing manifest profile = %q", got)
+	}
+	if err := os.WriteFile(filepath.Join(root, "codex-relay.json"), []byte(`{"appServerCompatibilityProfile":"windows-reviewed-fixture"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolveCompatibilityProfile(realExecutable); got != "windows-reviewed-fixture" {
+		t.Fatalf("reviewed manifest profile = %q", got)
+	}
+	if err := os.WriteFile(filepath.Join(root, "codex-relay.json"), []byte(`{"sourceAsarSha256":"legacy-without-capability"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := resolveCompatibilityProfile(realExecutable); got != "unknown" {
+		t.Fatalf("legacy manifest profile = %q", got)
 	}
 }
 
@@ -52,6 +77,17 @@ func TestNormalizeRouterArgsForSandboxLeavesPayloadAlone(t *testing.T) {
 	want := []string{"sandbox", "-c", routerWindowsSandboxOverride, "windows", "--", "cmd.exe", "-c", "echo ok"}
 	if !equalStrings(got, want) {
 		t.Fatalf("normalizeRouterArgs(sandbox)=%q, want %q", got, want)
+	}
+}
+
+func TestNormalizeRouterArgsLeavesAppServerToolingUntouched(t *testing.T) {
+	for _, args := range [][]string{
+		{"app-server", "generate-json-schema", "--out", `C:\temp\schema`},
+		{"app-server", "-c", "features.test=true", "generate-ts", "--out", `C:\temp\schema`},
+	} {
+		if got := normalizeRouterArgs(args, true); !equalStrings(got, args) {
+			t.Fatalf("app-server tooling changed: got=%q want=%q", got, args)
+		}
 	}
 }
 

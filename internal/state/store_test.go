@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestStoreBootstrapsPrimaryAndPersistsThreadAffinity(t *testing.T) {
@@ -47,6 +48,121 @@ func TestStoreBootstrapsPrimaryAndPersistsThreadAffinity(t *testing.T) {
 	if !ok || owner != added.ID {
 		t.Fatalf("thread affinity was not persisted: owner=%q ok=%v", owner, ok)
 	}
+}
+
+func TestV1StateMigratesAtomicallyToV2WithBackupAndDefaultPolicy(t *testing.T) {
+	root := t.TempDir()
+	stateRoot := filepath.Join(root, "mux")
+	primaryHome := filepath.Join(root, "primary")
+	if err := os.MkdirAll(stateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	v1 := `{
+  "version": 1,
+  "accounts": [{"id":"primary","label":"Primary","codexHome":"` + filepath.ToSlash(primaryHome) + `","enabled":true,"controller":true,"createdAt":1}],
+  "threadOwner": {"thread-v1":"primary"}
+}`
+	statePath := filepath.Join(stateRoot, "state.json")
+	if err := os.WriteFile(statePath, []byte(v1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(stateRoot, primaryHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.RoutingPolicy() != RoutingPolicyBalanced {
+		t.Fatalf("default policy = %q, want balanced", store.RoutingPolicy())
+	}
+	route, ok := store.ThreadRoute("thread-v1")
+	if !ok || route.AccountID != "primary" || route.Generation != 1 {
+		t.Fatalf("legacy owner was not migrated to a v2 route: %#v ok=%v", route, ok)
+	}
+	backup, err := os.ReadFile(statePath + ".v1.backup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(backup) != v1 {
+		t.Fatal("v1 migration backup does not match the source state")
+	}
+	var persisted map[string]any
+	data, err := os.ReadFile(statePath)
+	if err != nil || json.Unmarshal(data, &persisted) != nil {
+		t.Fatalf("read migrated state: %v", err)
+	}
+	if persisted["version"] != float64(2) {
+		t.Fatalf("migrated version = %#v, want 2", persisted["version"])
+	}
+}
+
+func TestRoutingStateSurvivesRestartAndRejectsUnknownPolicy(t *testing.T) {
+	root := t.TempDir()
+	stateRoot := filepath.Join(root, "mux")
+	primaryHome := filepath.Join(root, "primary")
+	store, err := Open(stateRoot, primaryHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetRoutingPolicy(RoutingPolicyRotate); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetRoutingPolicy("random"); err == nil {
+		t.Fatal("unknown policy was accepted")
+	}
+	if err := store.PutThreadRoute(ThreadRoute{ThreadID: "thread-2", AccountID: "primary", Generation: 3}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutTurnAttempt(TurnAttempt{ID: "attempt-1", ThreadID: "thread-2", AccountID: "primary", Generation: 3, Phase: "RUNNING", StartedAt: time.Now().UnixMilli()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutHandoff(Handoff{ID: "handoff-1", ThreadID: "thread-2", SourceAccountID: "primary", TargetAccountID: "secondary", SourceGeneration: 3, TargetGeneration: 4, Phase: "PREPARED", StartedAt: time.Now().UnixMilli()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutCheckpoint(CanonicalCheckpoint{ThreadID: "thread-2", Generation: 3, HistorySHA256: "abc", HistorySize: 42, RolloutPath: filepath.Join(root, "canonical.jsonl")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordDecision(RoutingDecision{ID: "decision-1", ThreadID: "thread-2", ToAccountID: "primary", Policy: RoutingPolicyRotate, Reason: "test"}); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(stateRoot, primaryHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.RoutingPolicy() != RoutingPolicyRotate {
+		t.Fatalf("policy did not persist: %q", reopened.RoutingPolicy())
+	}
+	if attempt, ok := reopened.TurnAttempt("attempt-1"); !ok || attempt.Generation != 3 {
+		t.Fatalf("attempt did not persist: %#v ok=%v", attempt, ok)
+	}
+	if handoffs := reopened.Handoffs(); len(handoffs) != 1 || handoffs[0].Phase != "PREPARED" {
+		t.Fatalf("handoff did not persist: %#v", handoffs)
+	}
+	if checkpoint, ok := reopened.Checkpoint("thread-2"); !ok || checkpoint.HistorySize != 42 {
+		t.Fatalf("checkpoint did not persist: %#v ok=%v", checkpoint, ok)
+	}
+	if decisions := reopened.RoutingDecisions(10); len(decisions) != 1 || decisions[0].ID != "decision-1" {
+		t.Fatalf("routing ledger did not persist: %#v", decisions)
+	}
+}
+
+func TestStoreRecoversCorruptPrimaryStateFromLastValidBackup(t *testing.T) {
+	root := t.TempDir()
+	stateRoot := filepath.Join(root, "mux")
+	primaryHome := filepath.Join(root, "primary")
+	store, err := Open(stateRoot, primaryHome)
+	if err != nil { t.Fatal(err) }
+	if err := store.SetRoutingPolicy(RoutingPolicyRotate); err != nil { t.Fatal(err) }
+	statePath := filepath.Join(stateRoot, "state.json")
+	if _, err := os.Stat(statePath + ".backup"); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(statePath, []byte("{corrupt"), 0o600); err != nil { t.Fatal(err) }
+	recovered, err := Open(stateRoot, primaryHome)
+	if err != nil { t.Fatalf("open from valid backup: %v", err) }
+	if recovered.RoutingPolicy() != RoutingPolicyBalanced {
+		t.Fatalf("recovered policy = %q, want last backed-up balanced policy", recovered.RoutingPolicy())
+	}
+	data, err := os.ReadFile(statePath)
+	if err != nil || !json.Valid(data) { t.Fatalf("recovered state was not rewritten atomically: %v %q", err, data) }
 }
 
 func TestAccountConfigInheritsManagedMCPAndPreservesLocalProjects(t *testing.T) {

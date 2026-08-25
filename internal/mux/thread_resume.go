@@ -63,6 +63,7 @@ func (m *Multiplexer) loadThreadResumeInfo(
 			} else if decoded.Thread.ID == "" || decoded.Thread.Path == "" {
 				readErr = errors.New("existing chat has no resumable history path")
 			} else if home, path, ok := resolveManagedHistoryPath(decoded.Thread.Path, resumeHistoryHomes(sourceAccount, targetAccount, m.store)); ok {
+				m.recordThreadReadCapability(sourceAccount.ID)
 				return threadResumeInfo{
 					historyHome:   home,
 					historyPath:   path,
@@ -82,13 +83,23 @@ func (m *Multiplexer) loadThreadResumeInfo(
 	// the read-only native migration home, and other managed account homes.
 	for _, home := range resumeHistoryHomes(sourceAccount, targetAccount, m.store) {
 		if path, found := findThreadHistory(home, threadID); found {
+			if checkpoint, checkpointExists := m.store.Checkpoint(threadID); checkpointExists {
+				hash, size, hashErr := hashRegularFile(path)
+				if hashErr != nil || hash != checkpoint.HistorySHA256 || size != checkpoint.HistorySize {
+					continue
+				}
+			} else if !samePath(home, sourceAccount.CodexHome) && !samePath(home, m.store.LegacyPrimaryCodexHome()) {
+				// Without a committed canonical checkpoint, an arbitrary replica
+				// cannot promote itself merely because it contains the same ID.
+				continue
+			}
 			return threadResumeInfo{historyHome: home, historyPath: path}, nil
 		}
 	}
 	if readErr != nil {
-		return threadResumeInfo{}, readErr
+		return threadResumeInfo{}, fmt.Errorf("no rollout found for thread id %s: %w", threadID, readErr)
 	}
-	return threadResumeInfo{}, errors.New("existing chat has no resumable history")
+	return threadResumeInfo{}, fmt.Errorf("no rollout found for thread id %s", threadID)
 }
 
 // resumeHistoryHomes returns deterministic, de-duplicated search roots. The

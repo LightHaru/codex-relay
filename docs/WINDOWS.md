@@ -48,7 +48,8 @@ patching.
 
 It supports every Store build whose exact `app.asar` profile is recorded in
 `scripts/patch_windows.py`. The reviewed profiles include
-`26.810.7004.0`, `26.818.2441.0`, and the current `26.818.3698.0` package;
+`26.810.7004.0`, `26.818.2441.0`, `26.818.3698.0`, and the current
+`26.818.4152.0`, `26.818.5229.0`, and `26.818.5345.0` packages;
 older profiles remain available so an existing checkout can be rebuilt against
 an older installed app. An unrecorded official update stops by default. For a
 deliberate compatibility check, `--allow-untested-source` asks the patcher to
@@ -168,20 +169,49 @@ Primary is the stored Router controller and the source of shared Relay
 configuration; it is **not** a "new chats only use Primary" lock. On Windows
 it lives in Relay's dedicated `codex-home`, never in the Store app's
 `%USERPROFILE%\\.codex`. For a new `thread/start`,
-Relay reads the short and longer usage windows from every enabled, connected
-subscription, excludes every depleted account, and selects the least-used
-eligible account. A small per-account dispatch counter breaks ties so accounts
-with comparable quota alternate instead of permanently favoring the first one.
+Relay reads fresh short and longer usage windows from every enabled, connected
+subscription, excludes depleted/open-circuit accounts, protects a low-water
+reserve and selects through persistent weighted-deficit round robin. Deficits,
+cursor and active reservations survive restart.
 
-Once a chat has an owner, its follow-up turns remain sticky for context. If the
-owner is depleted, Relay copies only that local rollout history into a target
-account's isolated `sessions` directory, resumes the same thread, persists the
-new owner, and forwards the turn. A chat that existed before Relay but is
+Task routing follows Sticky, Balanced (default), or Rotate at completed-turn
+boundaries. A worker change journals a canonical Relay Memory checkpoint,
+incrementally materializes the verified rollout into the target account's
+isolated `sessions` directory, resumes the same thread, and only then commits a
+new owner generation. A chat that existed before Relay but is
 already present in a Relay-owned home follows the same failover path. If its
 old Router metadata still points at the native Store history, opening that
 known chat in Relay first copies only the matching rollout into a Relay-owned
 home; credentials/configuration and the native source remain untouched. A
 Store-only chat is not scanned or imported automatically.
+
+The profile menu shows **Relay Controller** separately from **Current Task
+Route**. The normal task view also gets a small in-flow route badge near its
+composer with the committed worker, generation, effective policy, next
+candidate, latest handoff phase, and recovery state. SSE refreshes that badge
+after a route or handoff event. Neither surface uses `position: fixed`, adds a
+Settings navigation item, or replaces the native Settings shell.
+
+In 0.4.1, **Routing details** expands that badge without leaving the task. The
+compact row distinguishes the active worker, last completed worker and
+policy-aware next-candidate preview. The native `<details>` panel adds current
+owner, previous/last-quota workers, requested/effective policy, reservation,
+quota freshness, fixed selected/skipped reasons, handoff generations, a
+bounded timeline and pool summary. It remains in the composer flow at narrow
+window sizes and normal zoom; it never enters the Settings sidebar or uses a
+fixed overlay.
+
+SSE terminal events refresh the panel. Quota failover, failed handoff,
+recovery-required, all-depleted and safe policy downgrade may show one small
+toast; the event ID is retained in session storage so a duplicate/replayed
+event cannot show the same toast twice. Balanced/Rotate maintenance handoffs
+remain visible in the timeline without default toast noise.
+
+An exact reviewed installer manifest is required for these cross-account
+handoffs. If the manifest is missing/unknown, the requested policy remains
+visible but the effective policy is Sticky and no history copy/resume occurs.
+No reviewed profile currently enables incomplete-turn resume; a post-side-
+effect quota failure is shown as recovery-required instead of replayed.
 
 `Selected model is at capacity. Please try a different model.` is treated as a
 transient model-capacity condition, not a quota failure. Relay retries the
@@ -285,10 +315,11 @@ macOS build for the following surfaces:
 | **Settings → Profile** | Starts with combined statistics and overlapping connected-account photos. Select a photo to reload that subscription's identity/statistics; select it again to return to the combined view. |
 | **Settings → Plugins** | Shows a subscription picker. Plugin definitions and managed MCP configuration remain shared, while Apps, connection status, and OAuth RPCs are sent with the selected account scope. |
 | **Usage / rate-limit resets** | Adds a subscription picker to the native reset sheet. It changes the displayed reset windows and fetches/consumes credits only for that account. |
-| **Settings → Usage & billing** | Keeps the native page shell, sidebar, and billing controls. Adds an in-flow **All connected subscriptions** panel inside the page's content column; it is not a sidebar item or overlay. Each card reads quota, billing, and reset data through the isolated Relay account and keeps failures per account. |
+| **Settings → Usage & billing** | Keeps the native page shell, sidebar, and billing controls. Adds an in-flow **Shared quota pool** panel inside the page's content column; it is not a sidebar item or overlay. The additive pool is primary and isolated account billing/reset details are collapsed under Worker diagnostics. |
 
-The menu's **Usage remaining** number is the sum of valid windows returned by
-connected accounts. If one account's quota endpoint is temporarily unavailable,
+The menu's **Shared quota pool** number is additive: five full subscriptions
+show `500% / 500%`, while 155 confirmed percentage points show `155% / 500%`.
+If one account's quota endpoint is temporarily unavailable,
 the known total remains visible and the affected account is marked as updating;
 Router never invents a zero/100% value from missing data.
 
@@ -321,6 +352,7 @@ labels. If a future upstream update removes or renames its visible `Settings`
 or `Log out` rows, the bridge does not inject. Separately, renderer patches are
 locked to the recorded `app.asar` hash; review and update their anchors before
 building for a new Store version. Windows Computer Use integrations have not
-been ported. The multiplexer, sticky thread ownership, and per-account Codex
-homes are shared core code and are covered by the Go test suite. Keep each
+been ported. The multiplexer, state-v2 task routes, canonical Relay Memory, and
+per-account Codex homes are shared core code and are covered by the Go test
+suite. Keep each
 connected subscription compliant with its governing terms.

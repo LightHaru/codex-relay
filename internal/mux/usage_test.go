@@ -44,6 +44,49 @@ func TestFetchUsageStatusUsesIsolatedAccountCredential(t *testing.T) {
 	}
 }
 
+func TestUsagePayloadAllowedDoesNotOverrideExhaustedWindow(t *testing.T) {
+	status := json.RawMessage(`{
+		"rate_limit": {
+			"allowed": true,
+			"limit_reached": false,
+			"primary_window": {
+				"used_percent": 100,
+				"limit_window_seconds": 18000,
+				"reset_at": 2000000300
+			},
+			"secondary_window": {
+				"used_percent": 20,
+				"limit_window_seconds": 604800,
+				"reset_at": 2000600000
+			}
+		}
+	}`)
+	if usagePayloadHasCapacity(status) {
+		t.Fatal("allowed=true incorrectly overrode a 100%-used quota window")
+	}
+	signal, ok := decodeUsageQuotaSignal(status)
+	if !ok || signal.Allowed == nil || !*signal.Allowed || signal.RateLimits == nil {
+		t.Fatalf("usage quota signal was not decoded: %#v", signal)
+	}
+	if signal.RateLimits.Primary == nil || signal.RateLimits.Primary.WindowDurationMins == nil ||
+		*signal.RateLimits.Primary.WindowDurationMins != 300 {
+		t.Fatalf("primary window was not converted to minutes: %#v", signal.RateLimits.Primary)
+	}
+}
+
+func TestUsagePayloadExplicitDenyOverridesRemainingWindow(t *testing.T) {
+	status := json.RawMessage(`{
+		"rate_limit": {
+			"allowed": false,
+			"limit_reached": true,
+			"primary_window": {"used_percent": 42}
+		}
+	}`)
+	if usagePayloadHasCapacity(status) {
+		t.Fatal("explicit usage denial was treated as routable")
+	}
+}
+
 func TestUsageStatusFallsBackWhenControllerCredentialIsUnavailable(t *testing.T) {
 	var requested []string
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {

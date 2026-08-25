@@ -351,6 +351,156 @@ STORE_26_818_4152_RENDERER_PROFILE = {
     ),
 }
 
+# Codex 26.818.5229.0 (Windows Store). The renderer still exposes the reviewed
+# Relay surfaces, but the Profile bundle now reuses its short children shape in
+# unrelated cards and the Plugins row moved into a neighboring asset. This
+# profile records the exact unique component anchors validated against ASAR
+# c5d839bc...0479; structural discovery is only a review aid and is never used
+# automatically for an installed release.
+STORE_26_818_5229_RENDERER_PROFILE = {
+    **STORE_26_818_4152_RENDERER_PROFILE,
+    "profile_query_anchor": "async function lGl(){let e=await z_.safeGet(`/wham/profiles/me`);",
+    "profile_query_replacement": (
+        "async function lGl(){let e=await(globalThis.CodexMuxWindows?.profileData?.()"
+        "??z_.safeGet(`/wham/profiles/me`));"
+    ),
+    "usage_status_anchor": (
+        "let e=await z_.safeGet(`/wham/usage`,{additionalHeaders:{\"OAI-App-Brand\":F_}})"
+    ),
+    "plugin_request_anchor": (
+        "async sendRequest(e,t,n){if(this.dispatchMessage==null)throw Error("
+        "`AppServerRequestClient is missing a message dispatcher`);return e===`config/read`?"
+        "this.sendConfigReadRequest(t,n):this.enqueueRequest(e,t,e===`plugin/list`&&n?.timeoutMs==null?"
+        "{...n,timeoutMs:TFt}:n)}"
+    ),
+    "plugin_request_replacement": (
+        "async sendRequest(e,t,n){t=globalThis.CodexMuxWindows?.scopePluginRequest?.(e,t)??t;"
+        "if(this.dispatchMessage==null)throw Error(`AppServerRequestClient is missing a message dispatcher`);"
+        "return e===`config/read`?this.sendConfigReadRequest(t,n):this.enqueueRequest(e,t,"
+        "e===`plugin/list`&&n?.timeoutMs==null?{...n,timeoutMs:TFt}:n)}"
+    ),
+    "reset_query_anchor": (
+        "function vCa(){let e=(0,PV.c)(1),t;return e[0]===Symbol.for(`react.memo_cache_sentinel`)?"
+        "(t={queryKey:[`rate-limit-reset-credits`],queryFn:yCa,refetchInterval:jp.ONE_MINUTE,"
+        "staleTime:jp.FIVE_SECONDS},e[0]=t):t=e[0],It(t)}"
+    ),
+    "reset_query_replacement": (
+        "function vCa(){let n=(0,f0.useSyncExternalStore)("
+        "e=>globalThis.CodexMuxWindows?.subscribeReset?.(e)??(()=>{}),"
+        "()=>globalThis.CodexMuxWindows?.getResetAccountId?.()??null,()=>null);return It({"
+        "queryKey:[`rate-limit-reset-credits`,n??`primary`],"
+        "queryFn:()=>globalThis.CodexMuxWindows?.rateLimitResets?.(n??`primary`)??yCa(),"
+        "refetchInterval:jp.ONE_MINUTE,staleTime:jp.FIVE_SECONDS})}"
+    ),
+    "reset_mutation_anchor": (
+        "function bCa(){let e=(0,PV.c)(3),t=ct(),n=_b(),r;return e[0]!==n||e[1]!==t?"
+        "(r={mutationFn:xCa,onSuccess:(e,r)=>{let{creditId:i}=r,a=e.code;"
+        "if(a===`reset`||a===`already_redeemed`){let n=e.code===`reset`?e.credit?.id??i:i;"
+        "t.setQueryData([`rate-limit-reset-credits`],e=>WSa(e,a,n))}"
+        "Promise.all([n([`rate-limit-status`]),n([`rate-limit-reset-credits`])])}},"
+        "e[0]=n,e[1]=t,e[2]=r):r=e[2],Qt(r)}"
+    ),
+    "reset_mutation_replacement": (
+        "function bCa(){let e=ct(),t=_b(),n=globalThis.CodexMuxWindows?.getResetAccountId?.()??null,"
+        "r=[`rate-limit-reset-credits`,n??`primary`];return Qt({"
+        "mutationFn:n?i=>globalThis.CodexMuxWindows.consumeRateLimitReset(n,i):xCa,"
+        "onSuccess:(n,i)=>{let{creditId:a}=i,o=n.code;if(o===`reset`||o===`already_redeemed`){"
+        "let s=o===`reset`?n.credit?.id??a:a;e.setQueryData(r,e=>WSa(e,o,s))}"
+        "Promise.all([t([`rate-limit-status`]),t(r)])}})}"
+    ),
+    "reset_header_anchor": (
+        "let _e;t[46]===he?_e=t[47]:(_e=(0,f0.jsxs)(BR,{children:[he,ge]}),"
+        "t[46]=he,t[47]=_e);"
+    ),
+    "reset_header_replacement": (
+        "let _e=(0,f0.jsxs)(BR,{children:[he,ge,(0,f0.jsx)(`codex-mux-reset-picker`,{})]});"
+    ),
+    "profile_picker_anchor": "En=(0,$.jsxs)(Ot,{ref:Ce,header:Gt,children:[Sn,Cn,Tn]})",
+    "profile_picker_replacement": (
+        "En=(0,$.jsxs)(Ot,{ref:Ce,header:Gt,"
+        "children:[(0,$.jsx)(`codex-mux-profile-picker`,{}),Sn,Cn,Tn]})"
+    ),
+    "plugin_picker_anchor": "I=(0,D.jsx)(_,{title:O,subtitle:k,action:F,children:w})",
+    "plugin_picker_replacement": (
+        "I=(0,D.jsx)(_,{title:O,subtitle:k,action:F,children:(0,D.jsxs)(`div`,"
+        "{className:`contents`,children:[(0,D.jsx)(`codex-mux-plugin-picker`,{}),w]})})"
+    ),
+}
+
+# Codex 26.818.5345.0 (Windows Store). A review of the unpacked upstream ASAR
+# found that every Relay-owned renderer anchor and replacement is byte-for-byte
+# identical to the 26.818.5229.0 profile. Keep a separately named exact profile
+# so the new source hash is explicit and remains covered by release fixtures.
+STORE_26_818_5345_RENDERER_PROFILE = {
+    **STORE_26_818_5229_RENDERER_PROFILE,
+}
+
+# Codex 26.818.8289.0 (Windows Store). The generated app-server schema retains
+# the reviewed quota, turn-completion, thread/resume, and Goal contracts, while
+# the renderer rolls several minifier aliases. These anchors were structurally
+# discovered against the unpacked upstream ASAR and then reviewed as unique
+# exact-once patch sites before recording the source hash below.
+STORE_26_818_8289_RENDERER_PROFILE = {
+    **STORE_26_818_5345_RENDERER_PROFILE,
+    "profile_query_anchor": "async function fGl(){let e=await F_.safeGet(`/wham/profiles/me`);",
+    "profile_query_replacement": (
+        "async function fGl(){let e=await(globalThis.CodexMuxWindows?.profileData?.()??"
+        "F_.safeGet(`/wham/profiles/me`));"
+    ),
+    "usage_status_anchor": (
+        "let e=await F_.safeGet(`/wham/usage`,{additionalHeaders:{\"OAI-App-Brand\":j_}})"
+    ),
+    "plugin_request_anchor": (
+        "async sendRequest(e,t,n){if(this.dispatchMessage==null)throw "
+        "Error(`AppServerRequestClient is missing a message dispatcher`);return "
+        "e===`config/read`?this.sendConfigReadRequest(t,n):this.enqueueRequest(e,t,"
+        "e===`plugin/list`&&n?.timeoutMs==null?{...n,timeoutMs:kFt}:n)}"
+    ),
+    "plugin_request_replacement": (
+        "async sendRequest(e,t,n){t=globalThis.CodexMuxWindows?.scopePluginRequest?.(e,t)??t;"
+        "if(this.dispatchMessage==null)throw Error(`AppServerRequestClient is missing a message dispatcher`);"
+        "return e===`config/read`?this.sendConfigReadRequest(t,n):this.enqueueRequest(e,t,"
+        "e===`plugin/list`&&n?.timeoutMs==null?{...n,timeoutMs:kFt}:n)}"
+    ),
+    "reset_query_anchor": (
+        "function TCa(){let e=(0,kV.c)(1),t;return "
+        "e[0]===Symbol.for(`react.memo_cache_sentinel`)?"
+        "(t={queryKey:[`rate-limit-reset-credits`],queryFn:ECa,refetchInterval:Dp.ONE_MINUTE,"
+        "staleTime:Dp.FIVE_SECONDS},e[0]=t):t=e[0],It(t)}"
+    ),
+    "reset_query_replacement": (
+        "function TCa(){let n=(0,d0.useSyncExternalStore)"
+        "(e=>globalThis.CodexMuxWindows?.subscribeReset?.(e)??(()=>{}),"
+        "()=>globalThis.CodexMuxWindows?.getResetAccountId?.()??null,()=>null);"
+        "return It({queryKey:[`rate-limit-reset-credits`,n??`primary`],"
+        "queryFn:()=>globalThis.CodexMuxWindows?.rateLimitResets?.(n??`primary`)??ECa(),"
+        "refetchInterval:Dp.ONE_MINUTE,staleTime:Dp.FIVE_SECONDS})}"
+    ),
+    "reset_mutation_anchor": (
+        "function DCa(){let e=(0,kV.c)(3),t=ct(),n=hb(),r;return e[0]!==n||e[1]!==t?"
+        "(r={mutationFn:OCa,onSuccess:(e,r)=>{let{creditId:i}=r,a=e.code;"
+        "if(a===`reset`||a===`already_redeemed`){let n=e.code===`reset`?e.credit?.id??i:i;"
+        "t.setQueryData([`rate-limit-reset-credits`],e=>ZSa(e,a,n))}"
+        "Promise.all([n([`rate-limit-status`]),n([`rate-limit-reset-credits`])])}},"
+        "e[0]=n,e[1]=t,e[2]=r):r=e[2],Qt(r)}"
+    ),
+    "reset_mutation_replacement": (
+        "function DCa(){let e=ct(),t=hb(),n=globalThis.CodexMuxWindows?.getResetAccountId?.()??null,"
+        "r=[`rate-limit-reset-credits`,n??`primary`];return Qt({"
+        "mutationFn:n?i=>globalThis.CodexMuxWindows.consumeRateLimitReset(n,i):OCa,"
+        "onSuccess:(n,i)=>{let{creditId:a}=i,o=n.code;if(o===`reset`||o===`already_redeemed`){"
+        "let s=o===`reset`?n.credit?.id??a:a;e.setQueryData(r,e=>ZSa(e,o,s))}"
+        "Promise.all([t([`rate-limit-status`]),t(r)])}})}"
+    ),
+    "reset_header_anchor": (
+        "let _e;t[46]===he?_e=t[47]:(_e=(0,d0.jsxs)(MR,{children:[he,ge]}),"
+        "t[46]=he,t[47]=_e);"
+    ),
+    "reset_header_replacement": (
+        "let _e=(0,d0.jsxs)(MR,{children:[he,ge,(0,d0.jsx)(`codex-mux-reset-picker`,{})]});"
+    ),
+}
+
 LEGACY_RENDERER_PROFILE = {
     "profile_query_anchor": PROFILE_QUERY_ANCHOR,
     "profile_query_replacement": PROFILE_QUERY_REPLACEMENT,
@@ -377,8 +527,18 @@ WINDOWS_RENDERER_PROFILES = {
     "71c60b36a782e5597f1ca90abf70dba6a9a6aa4e61f3be69e422be43666a7d70": CURRENT_RENDERER_PROFILE,
     "1eb70e2aa26f2408a3e65817f0974e137b1a7ff6e52e43a184154bd4db2074d1": STORE_26_818_3698_RENDERER_PROFILE,
     "10ca5c476ec300f27079184726498a6e8f13ad25b9b443661288eccf4d930ef4": STORE_26_818_4152_RENDERER_PROFILE,
+    "c5d839bc9b122b7ef2a2f0f45186b3e5895923de5b6cef5253c936fe670c0479": STORE_26_818_5229_RENDERER_PROFILE,
+    "819b966c725fe9d80a9fd54d0949cc447464c983380dd4ee458437e963713bf1": STORE_26_818_5345_RENDERER_PROFILE,
+    "e2f04d6aa921d07981b42368df0a28a8bebe8cd21375d4a1f9286757b51c1313": STORE_26_818_8289_RENDERER_PROFILE,
 }
 TESTED_ASAR_HASHES = set(WINDOWS_RENDERER_PROFILES)
+
+
+def app_server_compatibility_profile(actual_hash: str, renderer_profile: dict[str, str] | None) -> str:
+    """Return a handoff capability marker only for an exact reviewed build."""
+    if renderer_profile is None or actual_hash not in WINDOWS_RENDERER_PROFILES:
+        return "unknown"
+    return f"windows-reviewed-{actual_hash}"
 # The browser-login bridge is injected into the standard main-renderer preload
 # and main-process bundle of the supported ASAR. The installer checks the ASAR
 # hash before it reaches these anchors, and both replacements must match once.
@@ -752,14 +912,19 @@ def require_asar_tool() -> tuple[str, Path]:
 
 
 def run_asar(node: str, asar: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [node, str(asar), *arguments],
+    command = [node, str(asar), *arguments]
+    completed = subprocess.run(
+        command,
         cwd=ROOT,
-        check=True,
+        check=False,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "unknown ASAR failure").strip()
+        raise RuntimeError(f"ASAR {arguments[0] if arguments else 'command'} failed: {detail}")
+    return completed
 
 
 def replace_once(source: str, anchor: str, replacement: str, description: str) -> str:
@@ -860,6 +1025,34 @@ def _discover_dynamic_anchor(source: str, template: str, description: str) -> tu
     return match.group(0), values, match.start()
 
 
+def _discover_dynamic_anchor_near(
+    source: str,
+    template: str,
+    description: str,
+    near_start: int,
+    *,
+    maximum_distance: int = 50_000,
+) -> tuple[str, dict[str, str], int]:
+    """Resolve a repeated minified shape only within one reviewed component.
+
+    Some tiny expressions (notably the selected Usage window assignment) are
+    duplicated throughout newer bundles. The reset-sheet header is a stronger
+    unique anchor in the same component, so structural discovery accepts only
+    a single nearest match within a small, explicit byte distance.
+    """
+    pattern, groups = _dynamic_template_pattern(template)
+    matches = list(re.finditer(pattern, source))
+    ranked = sorted((abs(match.start() - near_start), match) for match in matches)
+    if not ranked or ranked[0][0] > maximum_distance or (len(ranked) > 1 and ranked[0][0] == ranked[1][0]):
+        raise RuntimeError(
+            f"could not safely infer {description} near its reviewed component "
+            f"(found {len(matches)} structural matches)"
+        )
+    match = ranked[0][1]
+    values = {token: match.group(group) for token, group in groups.items()}
+    return match.group(0), values, match.start()
+
+
 def _replace_dynamic_identifiers(source: str, values: dict[str, str]) -> str:
     output: list[str] = []
     cursor = 0
@@ -922,7 +1115,32 @@ def discover_renderer_profile(extracted: Path) -> dict[str, str]:
             initial_source = initial_path.read_text(encoding="utf-8")
             dynamic: dict[str, str] = {}
             dynamic_values: dict[str, dict[str, str]] = {}
+            dynamic_starts: dict[str, int] = {}
             for key, description in (
+                ("profile_query", "Profile query"),
+                ("usage_status", "native usage query"),
+                ("plugin_request", "Plugins RPC"),
+                ("reset_query", "reset query"),
+                ("reset_mutation", "reset mutation"),
+                ("reset_header", "reset sheet header"),
+                ("selected_usage", "usage window"),
+            ):
+                if key == "selected_usage":
+                    anchor, values, start = _discover_dynamic_anchor_near(
+                        initial_source,
+                        template[f"{key}_anchor"],
+                        description,
+                        dynamic_starts["reset_header"],
+                    )
+                else:
+                    anchor, values, start = _discover_dynamic_anchor(
+                        initial_source, template[f"{key}_anchor"], description
+                    )
+                dynamic[f"{key}_anchor"] = anchor
+                dynamic_values[key] = values
+                dynamic_starts[key] = start
+
+            for key, _description in (
                 ("profile_query", "Profile query"),
                 ("usage_status", "native usage query"),
                 ("plugin_request", "Plugins RPC"),
@@ -931,26 +1149,40 @@ def discover_renderer_profile(extracted: Path) -> dict[str, str]:
                 ("selected_usage", "usage window"),
                 ("reset_header", "reset sheet header"),
             ):
-                anchor, values, start = _discover_dynamic_anchor(
-                    initial_source, template[f"{key}_anchor"], description
-                )
-                dynamic[f"{key}_anchor"] = anchor
-                dynamic_values[key] = values
+                values = dynamic_values[key]
                 replacement = _replace_dynamic_identifiers(
                     template[f"{key}_replacement"], values
                 )
                 if key == "reset_query" and "useSyncExternalStore" in replacement:
-                    react_aliases = set(re.findall(
+                    template_alias_match = re.search(
                         r"\b([A-Za-z_$][A-Za-z0-9_$]*)\.useSyncExternalStore\b",
-                        initial_source,
-                    ))
-                    if len(react_aliases) != 1:
+                        template[f"{key}_replacement"],
+                    )
+                    template_alias = template_alias_match.group(1) if template_alias_match else ""
+                    mapped_aliases = {
+                        mappings[template_alias]
+                        for mappings in dynamic_values.values()
+                        if template_alias in mappings
+                    }
+                    if len(mapped_aliases) == 1:
+                        react_alias = next(iter(mapped_aliases))
+                    else:
+                        react_aliases = set(re.findall(
+                            r"\b([A-Za-z_$][A-Za-z0-9_$]*)\.useSyncExternalStore\b",
+                            initial_source,
+                        ))
+                        if len(react_aliases) != 1:
+                            raise RuntimeError(
+                                "could not safely infer the React subscription namespace for reset query"
+                            )
+                        react_alias = next(iter(react_aliases))
+                    if not react_alias:
                         raise RuntimeError(
                             "could not safely infer the React subscription namespace for reset query"
                         )
                     replacement = re.sub(
                         r"\b[A-Za-z_$][A-Za-z0-9_$]*\.useSyncExternalStore\b",
-                        f"{next(iter(react_aliases))}.useSyncExternalStore",
+                        f"{react_alias}.useSyncExternalStore",
                         replacement,
                         count=1,
                     )
@@ -958,16 +1190,42 @@ def discover_renderer_profile(extracted: Path) -> dict[str, str]:
 
             profile_paths = list(assets.glob("profile-*.js"))
             profile_matches: list[tuple[Path, str, dict[str, str], int]] = []
+            profile_fallback_matches: list[tuple[Path, str, dict[str, str], int]] = []
+            profile_pattern, profile_groups = _dynamic_template_pattern(
+                template["profile_picker_anchor"]
+            )
             for path in profile_paths:
                 source = path.read_text(encoding="utf-8")
-                try:
-                    profile_matches.append((path, *_discover_dynamic_anchor(
-                        source, template["profile_picker_anchor"], "Profile settings"
-                    )))
-                except RuntimeError as error:
-                    if "found 0" not in str(error):
-                        raise
-                    continue
+                for match in re.finditer(profile_pattern, source):
+                    values = {
+                        token: match.group(group)
+                        for token, group in profile_groups.items()
+                    }
+                    profile_fallback_matches.append(
+                        (path, match.group(0), values, match.start())
+                    )
+                    # The actual Profile settings body is the one repeated
+                    # shape owned by a header-bearing settings container. New
+                    # builds reuse the short children array in unrelated cards.
+                    context = source[max(0, match.start() - 250):match.start()]
+                    if "header:" not in context:
+                        continue
+                    identifier = r"[A-Za-z_$][A-Za-z0-9_$]*"
+                    container_pattern = re.compile(
+                        rf"{identifier}=\(0,{identifier}\.jsxs\)\({identifier},"
+                        rf"\{{ref:{identifier},header:{identifier},{re.escape(match.group(0))}\}}\)"
+                    )
+                    window_start = max(0, match.start() - 250)
+                    window = source[window_start:match.end() + 8]
+                    containers = list(container_pattern.finditer(window))
+                    if len(containers) != 1:
+                        continue
+                    container = containers[0]
+                    full_anchor = container.group(0)
+                    full_start = window_start + container.start()
+                    profile_matches.append((path, full_anchor, values, full_start))
+            if not profile_matches and len(profile_fallback_matches) == 1:
+                profile_matches = profile_fallback_matches
             if len(profile_matches) != 1:
                 raise RuntimeError(
                     f"could not safely infer Profile settings asset (found {len(profile_matches)})"
@@ -980,10 +1238,22 @@ def discover_renderer_profile(extracted: Path) -> dict[str, str]:
                 profile_replacement = profile_replacement.replace(
                     "(0,$.jsx)", f"(0,{_nearby_jsx_alias(profile_path.read_text(encoding='utf-8'), profile_start)}.jsx)"
                 )
+            short_profile_anchor = _replace_dynamic_identifiers(
+                template["profile_picker_anchor"], profile_values
+            )
+            if profile_anchor != short_profile_anchor:
+                if profile_anchor.count(short_profile_anchor) != 1:
+                    raise RuntimeError("could not safely expand the Profile settings anchor")
+                profile_replacement = profile_anchor.replace(
+                    short_profile_anchor, profile_replacement, 1
+                )
             dynamic["profile_picker_anchor"] = profile_anchor
             dynamic["profile_picker_replacement"] = profile_replacement
 
-            plugin_paths = list(assets.glob("plugins-settings-*.js"))
+            plugin_paths = [
+                path for path in assets.glob("plugins-settings-*.js")
+                if not path.name.startswith("plugins-settings-row-")
+            ]
             plugin_matches: list[tuple[Path, str, dict[str, str], int]] = []
             for path in plugin_paths:
                 source = path.read_text(encoding="utf-8")
@@ -1472,6 +1742,7 @@ def patch(
             "platform": "windows",
             "source": str(source),
             "sourceAsarSha256": actual_hash,
+            "appServerCompatibilityProfile": app_server_compatibility_profile(actual_hash, renderer_profile),
             "rendererUi": "windows-renderer-patches-v3-browser-login",
             "profile": str(router_profile_directory()),
         }

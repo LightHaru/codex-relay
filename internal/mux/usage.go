@@ -21,6 +21,157 @@ import (
 // returned to or visible in the renderer.
 const usageStatusURL = "https://chatgpt.com/backend-api/wham/usage"
 
+const usageQuotaCacheTTL = 10 * time.Second
+
+// usageQuotaSignal is the small, credential-free projection used by routing.
+// The native Usage response contains billing details that must remain scoped
+// to the settings UI; the scheduler needs only the explicit allow/deny flags
+// and the two quota windows.
+type usageQuotaSignal struct {
+	Allowed      *bool
+	LimitReached *bool
+	RateLimits   *RateLimits
+	ObservedAt   int64
+}
+
+type usageQuotaCacheEntry struct {
+	Signal    usageQuotaSignal
+	ExpiresAt int64
+}
+
+func decodeUsageQuotaSignal(status json.RawMessage) (usageQuotaSignal, bool) {
+	var payload struct {
+		RateLimit *struct {
+			Allowed       *bool `json:"allowed"`
+			LimitReached  *bool `json:"limit_reached"`
+			PrimaryWindow *struct {
+				UsedPercent   float64 `json:"used_percent"`
+				WindowSeconds *int64  `json:"limit_window_seconds"`
+				ResetAt       *int64  `json:"reset_at"`
+			} `json:"primary_window"`
+			SecondaryWindow *struct {
+				UsedPercent   float64 `json:"used_percent"`
+				WindowSeconds *int64  `json:"limit_window_seconds"`
+				ResetAt       *int64  `json:"reset_at"`
+			} `json:"secondary_window"`
+		} `json:"rate_limit"`
+		ReachedType any `json:"rate_limit_reached_type"`
+	}
+	if json.Unmarshal(status, &payload) != nil || payload.RateLimit == nil {
+		return usageQuotaSignal{}, false
+	}
+	toWindow := func(input *struct {
+		UsedPercent   float64 `json:"used_percent"`
+		WindowSeconds *int64  `json:"limit_window_seconds"`
+		ResetAt       *int64  `json:"reset_at"`
+	}) *RateLimitWindow {
+		if input == nil {
+			return nil
+		}
+		var minutes *int64
+		if input.WindowSeconds != nil {
+			value := *input.WindowSeconds / 60
+			minutes = &value
+		}
+		return &RateLimitWindow{
+			UsedPercent: input.UsedPercent, WindowDurationMins: minutes,
+			ResetsAt: cloneInt64Pointer(input.ResetAt),
+		}
+	}
+	signal := usageQuotaSignal{
+		Allowed:      cloneBoolPointer(payload.RateLimit.Allowed),
+		LimitReached: cloneBoolPointer(payload.RateLimit.LimitReached),
+		RateLimits: &RateLimits{
+			Primary:              toWindow(payload.RateLimit.PrimaryWindow),
+			Secondary:            toWindow(payload.RateLimit.SecondaryWindow),
+			RateLimitReachedType: payload.ReachedType,
+		},
+	}
+	return signal, true
+}
+
+func cloneBoolPointer(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneInt64Pointer(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func usageQuotaSignalHasCapacity(signal usageQuotaSignal) bool {
+	if signal.LimitReached != nil && *signal.LimitReached {
+		return false
+	}
+	if signal.Allowed != nil && !*signal.Allowed {
+		return false
+	}
+	if signal.RateLimits != nil {
+		for _, window := range []*RateLimitWindow{signal.RateLimits.Primary, signal.RateLimits.Secondary} {
+			if window != nil && window.UsedPercent >= 100 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (m *Multiplexer) usageQuotaSignal(ctx context.Context, account state.Account) (usageQuotaSignal, error) {
+	now := time.Now()
+	if m.now != nil {
+		now = m.now()
+	}
+	m.quotaMu.RLock()
+	cached, ok := m.usageQuotaCache[account.ID]
+	m.quotaMu.RUnlock()
+	if ok && cached.ExpiresAt > now.UnixMilli() {
+		return cached.Signal, nil
+	}
+	endpoint := m.usageEndpoint
+	if endpoint == "" {
+		endpoint = usageStatusURL
+	}
+	client := m.profileClient
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
+	status, err := fetchUsageStatus(ctx, client, endpoint, filepath.Join(account.CodexHome, "auth.json"))
+	if err != nil {
+		return usageQuotaSignal{}, err
+	}
+	signal, ok := decodeUsageQuotaSignal(status)
+	if !ok {
+		return usageQuotaSignal{}, fmt.Errorf("usage response has no quota signal")
+	}
+	observed := time.Now()
+	if m.now != nil {
+		observed = m.now()
+	}
+	signal.ObservedAt = observed.UnixMilli()
+	m.quotaMu.Lock()
+	if m.usageQuotaCache == nil {
+		m.usageQuotaCache = make(map[string]usageQuotaCacheEntry)
+	}
+	m.usageQuotaCache[account.ID] = usageQuotaCacheEntry{
+		Signal: signal, ExpiresAt: observed.Add(usageQuotaCacheTTL).UnixMilli(),
+	}
+	m.quotaMu.Unlock()
+	return signal, nil
+}
+
+func (m *Multiplexer) invalidateUsageQuotaSignal(accountID string) {
+	m.quotaMu.Lock()
+	delete(m.usageQuotaCache, accountID)
+	m.quotaMu.Unlock()
+}
+
 // UsageStatusAccount is the account-scoped part of the Usage & billing
 // response. Usage is intentionally kept as the native JSON object instead of
 // being converted into a guessed aggregate: new billing fields can therefore
@@ -110,22 +261,11 @@ func (m *Multiplexer) UsageStatus(ctx context.Context) (json.RawMessage, error) 
 // omit them, and the app-server routing layer remains responsible for handling
 // a real quota rejection and retrying on another subscription.
 func usagePayloadHasCapacity(status json.RawMessage) bool {
-	var payload struct {
-		RateLimit *struct {
-			Allowed      *bool `json:"allowed"`
-			LimitReached *bool `json:"limit_reached"`
-		} `json:"rate_limit"`
-	}
-	if err := json.Unmarshal(status, &payload); err != nil || payload.RateLimit == nil {
+	signal, ok := decodeUsageQuotaSignal(status)
+	if !ok {
 		return true
 	}
-	if payload.RateLimit.Allowed != nil {
-		return *payload.RateLimit.Allowed
-	}
-	if payload.RateLimit.LimitReached != nil {
-		return !*payload.RateLimit.LimitReached
-	}
-	return true
+	return usageQuotaSignalHasCapacity(signal)
 }
 
 // UsageStatusAll fetches the native Usage payload for every enabled

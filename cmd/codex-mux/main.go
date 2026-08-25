@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -73,11 +74,12 @@ func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	multiplexer, err := mux.New(mux.Options{
-		RealExecutable: realExecutable,
-		RealArgs:       args,
-		Environment:    os.Environ(),
-		Store:          store,
-		Output:         os.Stdout,
+		RealExecutable:       realExecutable,
+		RealArgs:             args,
+		Environment:          os.Environ(),
+		CompatibilityProfile: resolveCompatibilityProfile(realExecutable),
+		Store:                store,
+		Output:               os.Stdout,
 	})
 	if err != nil {
 		return err
@@ -131,6 +133,25 @@ func run() error {
 	}
 	cancel()
 	return scanner.Err()
+}
+
+func resolveCompatibilityProfile(realExecutable string) string {
+	manifestPath := filepath.Join(filepath.Dir(realExecutable), "..", "codex-relay.json")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return "unknown"
+	}
+	var manifest struct {
+		AppServerCompatibilityProfile string `json:"appServerCompatibilityProfile"`
+	}
+	if json.Unmarshal(data, &manifest) != nil {
+		return "unknown"
+	}
+	profile := strings.TrimSpace(manifest.AppServerCompatibilityProfile)
+	if profile == "" {
+		return "unknown"
+	}
+	return profile
 }
 
 // resolvePrimaryCodexHome separates the Windows Relay copy from the official
@@ -209,13 +230,34 @@ func isInteractiveAppServer(args []string) bool {
 		if argument != "app-server" {
 			continue
 		}
-		if index+1 < len(args) {
-			switch args[index+1] {
-			case "daemon", "proxy", "generate-ts", "generate-json-schema", "help":
-				return false
-			}
+		return !hasAppServerToolingSubcommand(args, index)
+	}
+	return false
+}
+
+func hasAppServerToolingSubcommand(args []string, commandIndex int) bool {
+	for index := commandIndex + 1; index < len(args); index++ {
+		argument := args[index]
+		if argument == "--" {
+			return false
 		}
-		return true
+		if argument == "-c" || argument == "--config" || argument == "--listen" ||
+			argument == "--code-mode-host" || argument == "--ws-auth" ||
+			argument == "--ws-token-file" || argument == "--ws-token-sha256" ||
+			argument == "--ws-shared-secret-file" || argument == "--ws-issuer" ||
+			argument == "--ws-audience" || argument == "--ws-max-clock-skew-seconds" {
+			index++
+			continue
+		}
+		if strings.HasPrefix(argument, "-") {
+			continue
+		}
+		switch argument {
+		case "daemon", "proxy", "generate-ts", "generate-json-schema", "help":
+			return true
+		default:
+			return false
+		}
 	}
 	return false
 }

@@ -173,29 +173,112 @@ checkout để Router thay wrapper mới, rồi mở lại Router.
   `%USERPROFILE%\.codex-mux\accounts\...` và yêu cầu đăng nhập lại. Relay chỉ
   xoá liên kết chủ chat trong metadata của chính Router; file credential và
   history của Codex gốc vẫn được giữ nguyên.
-- **Chat mới không bị khóa vào Primary.** Router đọc quota ngắn/dài ở mọi tài
-  khoản đã kết nối, loại tài khoản đã hết cửa sổ hạn mức, rồi chia chat mới
-  theo round-robin nghiêm ngặt giữa các tài khoản còn quota. Tài khoản có phần
-  trăm thấp hơn không còn bị dồn toàn bộ chat cho đến khi hết lượt.
-- Router giữ nguyên tài khoản đang xử lý một cuộc hội thoại để các lượt tiếp
-  theo vẫn có đủ ngữ cảnh.
-- Nếu tài khoản đang xử lý hết hạn mức, Router chuyển cuộc hội thoại sang tài
-  khoản phụ phù hợp. Router sao chép bản history cục bộ của chat vào kho Codex
-  riêng của tài khoản phụ, tiếp tục đúng chat đó và lưu tài khoản mới đang xử
-  lý. History gốc không bị sửa. Quy tắc này áp dụng cho chat cũ đã thuộc Relay
+- **Chat mới không bị khóa vào Primary.** Router đọc cả cửa sổ quota ngắn và
+  dài, loại tài khoản đã cạn hoặc đang bị circuit breaker cô lập, giữ một phần
+  quota dự phòng thấp và phân bổ bằng weighted-deficit round-robin. Con trỏ,
+  deficit và reservation được lưu xuống đĩa nên restart không làm mất tính công
+  bằng hoặc cấp cùng một quota cho hai lượt đang chạy.
+- Relay đối chiếu hai nguồn quota cho từng tài khoản tách biệt: snapshot
+  `account/rateLimits/read` của app-server và Usage native. Cờ
+  `allowed`/`limit_reached` không được phép che một cửa sổ đang 100%; ngược lại,
+  lỗi `usageLimitExceeded` từ một lượt thật luôn mạnh hơn cache. Circuit chỉ đưa
+  tài khoản trở lại pool khi thấy kỳ reset mới có dung lượng hoặc một lượt thử
+  probation đã thành công.
+- Chính sách mặc định là **Balanced**: Router có thể chọn worker phù hợp cho mỗi
+  lượt, nhưng lượt đầu tiên của task mới luôn ở worker đã tạo task. Từ lượt kế
+  tiếp, Router chỉ có thể đổi worker tại ranh giới sau khi lượt trước đã hoàn
+  tất và rollout chuẩn đã tồn tại. Menu Relay còn
+  có **Sticky** (giữ worker nếu còn dùng được) và **Rotate** (đổi worker sau mỗi
+  lượt hoàn tất). Không chính sách nào được chuyển tài khoản giữa một command,
+  approval, hook hay tool đang chạy.
+- Mỗi task có một `generation`, tối đa một `TurnAttempt` đang hoạt động và một
+  bản lịch sử chuẩn trong **Relay Memory**. `Relay Controller` chỉ điều khiển cấu
+  hình; `Current Task Route` mới là tài khoản thực thi lượt hiện tại.
+- Nếu task có **Goal**, Relay đọc state Goal thật từ app-server nguồn và khôi
+  phục/kiểm tra objective, trạng thái và ngân sách token trên worker đích trước
+  khi commit đổi owner. Goal bị `usageLimited` sẽ trở lại `active` khi sang
+  worker đã xác nhận còn quota; phần ngân sách còn lại được giữ an toàn. Nếu
+  chính app-server tự tạo lượt Goal tiếp theo mà không có `turn/start` từ UI,
+  Relay vẫn nhận diện lỗi quota ở `turn/completed`, chuyển tại ranh giới bền
+  vững đó và không phát lại command/tool của lượt cũ.
+- Nếu worker đang xử lý hết hạn mức trước khi tạo tác dụng phụ, Router chuyển
+  task sang tài khoản phù hợp bằng journal `PREPARED → COPIED → RESUMED →
+  COMMITTED`. Relay checkpoint rollout vào kho chuẩn, kiểm tra SHA-256/prefix,
+  chỉ chép suffix mới khi có thể, materialize nguyên tử sang worker đích, resume
+  thành công rồi mới tăng generation và đổi owner. History nguồn không bị sửa.
+  Quy tắc này áp dụng cho chat cũ đã thuộc Relay
   nhưng chưa có mapping; Relay tìm rollout trong các home Relay trước khi
   chuyển sang tài khoản còn quota. Nếu state cũ còn trỏ tới rollout trong
   `sessions` của Codex gốc, khi người dùng mở đúng chat đó trong Relay, Relay chỉ chép
   một file rollout vào home riêng của tài khoản được chọn; credential/cấu hình
   không được nhập và file nguồn không bị sửa.
+- Nếu quota lỗi sau khi command/file/tool đã bắt đầu, Router **không phát lại
+  tự động**. Task chuyển sang `recovery required`; sau khi xem lại kết quả người
+  dùng có thể xác nhận trong panel Relay để cho phép lượt tiếp theo. Cách này
+  ngăn command hoặc thay đổi file bị chạy hai lần.
 - Nếu lỗi là **“Selected model is at capacity”**, Router giữ nguyên model và
   toàn bộ payload của lượt chat, thử lại tối đa 3 lần với chờ ngắn tăng dần trên
   chính tài khoản đó. Nó không tự đổi model và không trừ quota tài khoản khác
   chỉ vì model đang bận.
 
-Nói ngắn gọn: tạo `New chat` mới thì Router chia theo quota còn lại; đang chat
-thì Router giữ ngữ cảnh ở tài khoản đang sở hữu chat, chỉ chuyển khi quota thật
-sự cạn hoặc upstream trả lỗi hạn mức.
+Nói ngắn gọn: một task có chung bộ nhớ Relay nhưng mỗi lượt chỉ có đúng một
+worker. Router có thể đổi worker liền mạch giữa các lượt đã hoàn tất; không chạy
+song song hai tài khoản trên cùng task và không replay tác dụng phụ chưa rõ kết
+quả.
+
+### Chính sách định tuyến và theo dõi task
+
+Mở menu tài khoản Relay để xem hai dòng riêng biệt:
+
+- **Relay Controller**: tài khoản điều khiển cấu hình/UI chung.
+- **Current Task Route**: worker, generation và trạng thái recovery của task
+  đang mở.
+
+Ba nút **Sticky**, **Balanced** và **Rotate** đổi chính sách toàn Relay. API local
+tương ứng gồm `GET /v1/router/status`, `GET /v1/thread-route`, `GET
+/v1/routing/decisions`, `PUT /v1/routing/policy` và stream `/v1/events`; tất cả
+đều cần token cài đặt và chỉ bind loopback.
+
+#### Routing Inspector: biết task thật sự chạy qua tài khoản nào
+
+Trong một task Relay, ngay phía trên composer có dòng **Đang chạy qua**. Dòng
+này hiển thị worker thực sự của lượt hiện tại, không phải Primary/Relay
+Controller. Chọn **Chi tiết định tuyến** để mở panel nằm trong luồng nội dung;
+panel không che task, không chèn vào sidebar và không thay Settings shell.
+
+Các nhãn có ý nghĩa riêng:
+
+- **Tài khoản đang sở hữu task** giữ canonical generation hiện tại.
+- **Tài khoản thực thi hiện tại** đang xử lý logical turn; khi không có lượt
+  đang chạy, Relay ghi rõ **Hiện không có lượt nào đang chạy**.
+- **Lượt hoàn tất gần nhất qua** là worker hoàn thành lượt trước.
+- **Quota gần nhất ghi nhận ở** chỉ được xác nhận khi snapshot mới hơn cho thấy
+  quota giảm đo được.
+- **Tài khoản dự kiến (chưa chạy)** là preview cho lượt kế tiếp. Việc mở hoặc
+  refresh panel không tăng dispatch count, không đổi cursor/deficit, không tạo
+  reservation và không làm scheduler chọn khác đi.
+
+Mục **Vì sao chọn tài khoản** hiển thị score, quota đã xác nhận và reason code
+được chuẩn hóa. Ví dụ: `selected_highest_score` là điểm khả dụng cao nhất;
+`eligible_lower_score` vẫn có thể dùng nhưng điểm thấp hơn;
+`skipped_depleted`, `skipped_cooldown`, `skipped_open_circuit`,
+`skipped_disconnected`, `skipped_disabled`, `skipped_unknown_quota` và
+`skipped_stale_quota` giải thích vì sao một worker bị bỏ qua. Balanced có thể
+dùng một tài khoản nhiều lượt liên tiếp khi quota, deficit và reservation của
+tài khoản đó tạo score tốt hơn; đây không phải chế độ luân phiên cứng.
+
+Mục **Dòng thời gian định tuyến** ghi event ID, thời gian, generation, worker,
+reservation, completion, quota attribution và các phase handoff. Một handoff
+thành công có nguồn → đích, reason và `COMMITTED`; nếu lỗi xảy ra sau
+command/tool/hook/approval hoặc sửa file, Relay dừng ở `recovery required` và
+không phát lại mù quáng. Timeline chỉ lưu hash request và lý do đã làm sạch;
+không lưu prompt, Goal objective, nội dung file, tool arguments, token hay
+đường dẫn tuyệt đối.
+
+> `500% / 500%` nghĩa là năm subscription biệt lập đang cung cấp tối đa 500
+> điểm phần trăm **dung lượng định tuyến**. Đây không phải một subscription
+> OpenAI 500%, không gộp hóa đơn/số dư, và mỗi request vẫn chạy bằng đúng một
+> subscription.
 
 ### Chọn Primary và quản lý tài khoản
 
@@ -210,7 +293,9 @@ sự cạn hoặc upstream trả lỗi hạn mức.
    đang giữ chat, hộp xác nhận sẽ nói rõ số chat bị ảnh hưởng và chỉ xóa liên kết
    định tuyến, không xóa file history gốc.
 
-Mục **Usage remaining** cộng phần quota đã đọc được từ các tài khoản. Nếu một
+Mục **Pool quota dùng chung** cộng phần quota đã đọc được từ các tài khoản:
+`5` subscription đầy đủ hiển thị `500% / 500%`; nếu tổng phần còn lại là
+`155%` thì hiển thị `155% / 500%`, không lấy trung bình thành `31%`. Nếu một
 tài khoản chưa trả quota, giao diện vẫn hiển thị tổng phần đã biết và ghi
 **Updating quota…** hoặc **Quota unavailable**; nó không biến dữ liệu thiếu thành
 `0%` hay hiện dấu `–` gây hiểu nhầm.
@@ -223,12 +308,13 @@ trả thời gian reset, Router ghi rõ là chưa có dữ liệu thay vì tự 
 
 Trang native `Settings` → `Usage & billing` vẫn là trang gốc và vẫn giữ nguyên
 sidebar, bố cục, menu điều hướng cùng các thao tác billing của Codex. Relay chỉ
-chèn thêm một panel **All connected subscriptions** vào đúng phần nội dung của
+chèn thêm panel **Pool quota dùng chung** vào đúng phần nội dung của
 trang con này; panel không dùng `position: fixed`, không phủ lên Settings và
-không tạo mục mới trong sidebar. Panel hiển thị từng tài khoản bằng home và
-credential Relay riêng, gồm plan, credits, các cửa sổ quota, thời điểm reset,
-reset credit và trạng thái lỗi riêng của tài khoản. Nếu một tài khoản lỗi,
-những tài khoản còn lại vẫn hiển thị.
+không tạo mục mới trong sidebar. Thông tin chính là pool cộng dồn; chi tiết
+từng worker nằm trong mục **Chẩn đoán worker** có thể mở ra, gồm plan, credits,
+các cửa sổ quota, thời điểm reset, reset credit và trạng thái lỗi. Mỗi worker
+vẫn dùng home/credential Relay riêng. Pool không gộp token, hóa đơn hay reset
+credit của OpenAI; nó chỉ cung cấp một bộ lập lịch và bộ nhớ task chung.
 
 Mở **Account settings** trong menu Relay vẫn cho phép quản lý Primary, gỡ
 subscription và xem nhanh **Usage limit resets** theo từng tài khoản. Nút
@@ -399,7 +485,8 @@ Nếu chỉ có bản Router mới, hãy dùng nút **Cập nhật ngay** trong 
 sẽ tự tải, kiểm tra, khởi động lại và mở lại. Khi chính ChatGPT/Codex chính
 thức cập nhật, không ghi đè trực tiếp lên bản Router đang hoạt động. Trước
 tiên, xem [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md). Hiện Router đã giữ
-hồ sơ cho các gói `26.810.7004.0`, `26.818.2441.0` và `26.818.3698.0`. Nếu phiên bản
+hồ sơ cho các gói `26.810.7004.0`, `26.818.2441.0`, `26.818.3698.0` và
+`26.818.4152.0`, `26.818.5229.0`, `26.818.5345.0`, `26.818.8289.0`. Nếu phiên bản
 ứng dụng gốc đã được kiểm tra, chạy lại bộ cài:
 
 | Nền tảng | Cách tạo lại Router |
@@ -455,7 +542,8 @@ python scripts/test_patch_windows.py
 
 Bộ kiểm tra gồm Go test/vet, kiểm tra JavaScript và UI, công cụ patch Python,
 bộ cài Windows, các điểm tương thích giao diện và thông tin phát hành. Xem
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) nếu cần chi tiết kỹ thuật về bộ
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) và
+[docs/SHARED-MEMORY-ROUTER.md](docs/SHARED-MEMORY-ROUTER.md) nếu cần chi tiết kỹ thuật về bộ
 điều phối nhiều tài khoản.
 
 ## Giới hạn hiện tại
@@ -472,6 +560,17 @@ bộ cài Windows, các điểm tương thích giao diện và thông tin phát 
   khoản.
 - Một tài khoản chỉ được Router chọn khi hợp lệ, bật, đã kết nối và còn hạn
   mức.
+- Chỉ manifest được tạo từ đúng `app.asar` đã review mới bật handoff xuyên tài
+  khoản. Nếu profile thiếu hoặc không nhận diện, UI vẫn cho thấy policy người
+  dùng đã chọn nhưng **policy hiệu lực** tự hạ về Sticky; Router không thử copy
+  history/resume mạo hiểm.
+- Chưa profile nào chứng minh resume an toàn cho một lượt đang làm dở. Relay có
+  thể đổi worker giữa hai lượt đã hoàn tất và retry lỗi quota trước output/tác
+  dụng phụ; sau command, tool, hook, approval hoặc sửa file thì task bắt buộc
+  vào `recovery required`, không phát lại mù quáng.
+- Test tự động chỉ dùng app-server giả và home tạm. Live E2E Windows cần người
+  vận hành cho phép rõ ràng vì có thể phải rebuild/restart Relay đang cài và có
+  nguy cơ tiêu quota thật.
 
 ## Ghi công, giấy phép và đóng góp
 

@@ -1,0 +1,324 @@
+#!/usr/bin/env python3
+"""Permission-gated real app-server probe for installed Codex Relay.
+
+The probe never reads credentials. It starts an already-installed Codex or
+Relay app-server, sends one minimal text turn, and emits a sanitized summary.
+It is intentionally excluded from `npm run check` because it consumes real
+subscription quota and may create one persisted test thread.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import queue
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import Any
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--executable", required=True, type=Path)
+    parser.add_argument("--codex-home", type=Path)
+    parser.add_argument("--cwd", required=True, type=Path)
+    parser.add_argument("--prompt", required=True)
+    parser.add_argument("--thread-id")
+    parser.add_argument(
+        "--goal-objective",
+        help="optional short objective to set before the turn and verify afterwards",
+    )
+    parser.add_argument(
+        "--verify-goal-objective",
+        help="verify an existing goal after the turn without setting it first",
+    )
+    parser.add_argument("--timeout", type=float, default=90.0)
+    parser.add_argument(
+        "--confirm-real-quota",
+        action="store_true",
+        help="required acknowledgement that this sends one real model turn",
+    )
+    return parser.parse_args()
+
+
+def reader(stream: Any, output: queue.Queue[dict[str, Any]]) -> None:
+    for line in iter(stream.readline, ""):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            output.put(json.loads(line))
+        except json.JSONDecodeError:
+            output.put({"_nonJson": line[:200]})
+
+
+def stderr_reader(stream: Any, output: queue.Queue[str]) -> None:
+    for line in iter(stream.readline, ""):
+        line = line.strip()
+        if line:
+            output.put(line[:300])
+
+
+def send(process: subprocess.Popen[str], message: dict[str, Any]) -> None:
+    assert process.stdin is not None
+    process.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
+    process.stdin.flush()
+
+
+def wait_for(
+    output: queue.Queue[dict[str, Any]],
+    predicate: Any,
+    timeout: float,
+    observed: list[dict[str, Any]],
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            message = output.get(timeout=min(0.5, max(0.01, deadline - time.monotonic())))
+        except queue.Empty:
+            continue
+        observed.append(message)
+        if predicate(message):
+            return message
+    raise TimeoutError("timed out waiting for an app-server response")
+
+
+def response_id_is(expected: int):
+    return lambda message: message.get("id") == expected and "method" not in message
+
+
+def thread_id_from_response(message: dict[str, Any]) -> str:
+    result = message.get("result") or {}
+    thread = result.get("thread") or {}
+    return str(thread.get("id") or result.get("threadId") or result.get("thread_id") or "")
+
+
+def notification_thread_id(message: dict[str, Any]) -> str:
+    params = message.get("params") or {}
+    return str(
+        params.get("threadId")
+        or params.get("thread_id")
+        or ((params.get("turn") or {}).get("threadId"))
+        or ""
+    )
+
+
+def wait_for_terminal(
+    output: queue.Queue[dict[str, Any]],
+    thread_id: str,
+    timeout: float,
+    observed: list[dict[str, Any]],
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    first_error: dict[str, Any] | None = None
+    error_at = 0.0
+    while time.monotonic() < deadline:
+        if first_error is not None and time.monotonic() - error_at >= 10.0:
+            return first_error
+        try:
+            message = output.get(timeout=min(0.5, max(0.01, deadline - time.monotonic())))
+        except queue.Empty:
+            continue
+        observed.append(message)
+        if notification_thread_id(message) != thread_id:
+            continue
+        if message.get("method") == "error" and first_error is None:
+            # app-server can emit an error before the authoritative failed
+            # turn/completed event. During a handoff, a late source-generation
+            # error can also precede a successful target completion. Keep it as
+            # a bounded fallback instead of terminating the probe immediately.
+            first_error = message
+            error_at = time.monotonic()
+            continue
+        if message.get("method") != "turn/completed":
+            continue
+        params = message.get("params") or {}
+        turn = params.get("turn") or {}
+        if str(turn.get("status") or params.get("status") or "").lower() in {
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted",
+        }:
+            return message
+    if first_error is not None:
+        return first_error
+    raise TimeoutError("timed out waiting for a terminal turn notification")
+
+
+def sanitized_error(message: dict[str, Any]) -> str:
+    value: Any = message.get("error")
+    if value is None:
+        params = message.get("params") or {}
+        value = params.get("error") or ((params.get("turn") or {}).get("error"))
+    if isinstance(value, dict):
+        value = value.get("message") or value.get("codexErrorInfo") or value.get("code")
+    text = str(value or "")
+    lowered = text.lower()
+    if "usage" in lowered or "rate limit" in lowered or "quota" in lowered:
+        return "quota_exhausted"
+    if "capacity" in lowered:
+        return "model_capacity"
+    return "none" if not text else "other"
+
+
+def main() -> int:
+    args = parse_args()
+    if not args.confirm_real_quota:
+        raise SystemExit("refusing real turn without --confirm-real-quota")
+    if args.goal_objective and args.verify_goal_objective:
+        raise SystemExit("choose either --goal-objective or --verify-goal-objective")
+    executable = args.executable.resolve(strict=True)
+    cwd = args.cwd.resolve(strict=True)
+    environment = os.environ.copy()
+    if args.codex_home is not None:
+        home = args.codex_home.resolve(strict=True)
+        environment["CODEX_HOME"] = str(home)
+        environment["CODEX_SQLITE_HOME"] = str(home)
+
+    process = subprocess.Popen(
+        [str(executable), "app-server", "--stdio"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+        env=environment,
+    )
+    assert process.stdout is not None and process.stderr is not None
+    output: queue.Queue[dict[str, Any]] = queue.Queue()
+    errors: queue.Queue[str] = queue.Queue()
+    threading.Thread(target=reader, args=(process.stdout, output), daemon=True).start()
+    threading.Thread(target=stderr_reader, args=(process.stderr, errors), daemon=True).start()
+    observed: list[dict[str, Any]] = []
+    thread_id = args.thread_id or ""
+    try:
+        send(process, {
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {"name": "codex-relay-e2e", "title": "Codex Relay E2E", "version": "0.4.1"},
+                "capabilities": {"experimentalApi": True},
+            },
+        })
+        initialized = wait_for(output, response_id_is(1), args.timeout, observed)
+        if initialized.get("error") is not None:
+            raise RuntimeError("initialize failed")
+        send(process, {"method": "initialized"})
+
+        if thread_id:
+            send(process, {
+                "id": 2,
+                "method": "thread/resume",
+                "params": {"threadId": thread_id, "cwd": str(cwd), "approvalPolicy": "never", "sandbox": "read-only"},
+            })
+            resumed = wait_for(output, response_id_is(2), args.timeout, observed)
+            if resumed.get("error") is not None:
+                raise RuntimeError("thread resume failed")
+        else:
+            send(process, {
+                "id": 2,
+                "method": "thread/start",
+                "params": {"cwd": str(cwd), "approvalPolicy": "never", "sandbox": "read-only", "ephemeral": False},
+            })
+            started = wait_for(output, response_id_is(2), args.timeout, observed)
+            if started.get("error") is not None:
+                raise RuntimeError("thread start failed")
+            thread_id = thread_id_from_response(started)
+            if not thread_id:
+                raise RuntimeError("thread/start returned no thread ID")
+
+        next_id = 3
+        goal_set_ok: bool | None = None
+        if args.goal_objective:
+            send(process, {
+                "id": next_id,
+                "method": "thread/goal/set",
+                "params": {
+                    "threadId": thread_id,
+                    "objective": args.goal_objective,
+                    "status": "active",
+                    "tokenBudget": None,
+                },
+            })
+            goal_set = wait_for(output, response_id_is(next_id), args.timeout, observed)
+            goal_set_ok = goal_set.get("error") is None
+            if not goal_set_ok:
+                raise RuntimeError("thread goal set failed")
+            next_id += 1
+
+        turn_request_id = next_id
+        send(process, {
+            "id": turn_request_id,
+            "method": "turn/start",
+            "params": {
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": args.prompt}],
+                "cwd": str(cwd),
+                "approvalPolicy": "never",
+            },
+        })
+        turn_response = wait_for(output, response_id_is(turn_request_id), args.timeout, observed)
+        terminal = turn_response if turn_response.get("error") is not None else wait_for_terminal(
+            output, thread_id, args.timeout, observed
+        )
+        expected_goal_objective = args.goal_objective or args.verify_goal_objective
+        goal_present_after: bool | None = None
+        goal_status_after: str | None = None
+        goal_objective_matches: bool | None = None
+        if expected_goal_objective:
+            next_id += 1
+            send(process, {
+                "id": next_id,
+                "method": "thread/goal/get",
+                "params": {"threadId": thread_id},
+            })
+            goal_get = wait_for(output, response_id_is(next_id), args.timeout, observed)
+            goal = (goal_get.get("result") or {}).get("goal")
+            goal_present_after = isinstance(goal, dict)
+            if goal_present_after:
+                goal_status_after = str(goal.get("status") or "")
+                goal_objective_matches = goal.get("objective") == expected_goal_objective
+        methods = [str(message.get("method")) for message in observed if message.get("method")]
+        item_types = sorted({
+            str(((message.get("params") or {}).get("item") or {}).get("type"))
+            for message in observed
+            if str(message.get("method") or "").startswith("item/")
+        })
+        result = {
+            "threadId": thread_id,
+            "turnAccepted": turn_response.get("error") is None,
+            "terminalMethod": terminal.get("method") or "response-error",
+            "terminalErrorCategory": sanitized_error(terminal if terminal.get("method") else turn_response),
+            "goalSet": goal_set_ok,
+            "goalPresentAfter": goal_present_after,
+            "goalStatusAfter": goal_status_after,
+            "goalObjectiveMatches": goal_objective_matches,
+            "observedMethods": sorted(set(methods)),
+            "observedItemTypes": item_types,
+            "stderrLineCount": errors.qsize(),
+        }
+        print(json.dumps(result, indent=2))
+        return 0
+    finally:
+        if process.stdin is not None:
+            process.stdin.close()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

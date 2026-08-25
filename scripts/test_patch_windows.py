@@ -39,10 +39,14 @@ from patch_windows import (
     SELECTED_USAGE_REPLACEMENT,
     STORE_26_818_3698_RENDERER_PROFILE,
     STORE_26_818_4152_RENDERER_PROFILE,
+    STORE_26_818_5229_RENDERER_PROFILE,
+    STORE_26_818_5345_RENDERER_PROFILE,
+    STORE_26_818_8289_RENDERER_PROFILE,
     STOP_ROUTER_PROCESSES_SCRIPT,
     USAGE_STATUS_ANCHOR,
     USAGE_STATUS_REPLACEMENT,
     WINDOWS_RENDERER_PROFILES,
+    app_server_compatibility_profile,
     default_destination,
     default_source,
     create_desktop_shortcut,
@@ -62,6 +66,11 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class WindowsRendererPatchTests(unittest.TestCase):
+    def test_unknown_profile_fails_closed_for_safe_handoff(self) -> None:
+        self.assertEqual(app_server_compatibility_profile("not-reviewed", None), "unknown")
+        actual_hash, profile = next(iter(WINDOWS_RENDERER_PROFILES.items()))
+        self.assertEqual(app_server_compatibility_profile(actual_hash, profile), f"windows-reviewed-{actual_hash}")
+
     def make_renderer(self, root: Path, profile=None) -> Path:
         profile = profile or {
             "profile_query_anchor": PROFILE_QUERY_ANCHOR,
@@ -181,7 +190,7 @@ class WindowsRendererPatchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             assets = self.make_renderer(root, CURRENT_RENDERER_PROFILE)
-            self.assertEqual(len(WINDOWS_RENDERER_PROFILES), 4)
+            self.assertEqual(len(WINDOWS_RENDERER_PROFILES), 7)
             patch_windows_feature_bundles(root, CURRENT_RENDERER_PROFILE)
             self.assert_replacements(assets, CURRENT_RENDERER_PROFILE)
 
@@ -204,6 +213,47 @@ class WindowsRendererPatchTests(unittest.TestCase):
             self.assertIn("CodexMuxWindows.consumeRateLimitReset", initial)
             self.assertIn("codex-mux-reset-picker", initial)
             self.assertNotIn("F_.safeGet(`/wham/usage`", initial)
+
+    def test_patches_the_store_26_818_5229_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            assets = self.make_renderer(root, STORE_26_818_5229_RENDERER_PROFILE)
+            patch_windows_feature_bundles(root, STORE_26_818_5229_RENDERER_PROFILE)
+            self.assert_replacements(assets, STORE_26_818_5229_RENDERER_PROFILE)
+            initial = next(assets.glob("app-initial-*.js")).read_text(encoding="utf-8")
+            self.assertIn("f0.useSyncExternalStore", initial)
+            self.assertIn("CodexMuxWindows.consumeRateLimitReset", initial)
+
+    def test_patches_the_store_26_818_5345_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            assets = self.make_renderer(root, STORE_26_818_5345_RENDERER_PROFILE)
+            patch_windows_feature_bundles(root, STORE_26_818_5345_RENDERER_PROFILE)
+            self.assert_replacements(assets, STORE_26_818_5345_RENDERER_PROFILE)
+            self.assertEqual(
+                app_server_compatibility_profile(
+                    "819b966c725fe9d80a9fd54d0949cc447464c983380dd4ee458437e963713bf1",
+                    STORE_26_818_5345_RENDERER_PROFILE,
+                ),
+                "windows-reviewed-819b966c725fe9d80a9fd54d0949cc447464c983380dd4ee458437e963713bf1",
+            )
+
+    def test_patches_the_store_26_818_8289_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            assets = self.make_renderer(root, STORE_26_818_8289_RENDERER_PROFILE)
+            patch_windows_feature_bundles(root, STORE_26_818_8289_RENDERER_PROFILE)
+            self.assert_replacements(assets, STORE_26_818_8289_RENDERER_PROFILE)
+            initial = next(assets.glob("app-initial-*.js")).read_text(encoding="utf-8")
+            self.assertIn("d0.useSyncExternalStore", initial)
+            self.assertIn("CodexMuxWindows.consumeRateLimitReset", initial)
+            self.assertEqual(
+                app_server_compatibility_profile(
+                    "e2f04d6aa921d07981b42368df0a28a8bebe8cd21375d4a1f9286757b51c1313",
+                    STORE_26_818_8289_RENDERER_PROFILE,
+                ),
+                "windows-reviewed-e2f04d6aa921d07981b42368df0a28a8bebe8cd21375d4a1f9286757b51c1313",
+            )
 
     def test_discovers_a_profile_when_minifier_aliases_roll_forward(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -452,18 +502,22 @@ class WindowsRendererPatchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             assets = Path(directory) / "webview" / "assets"
             assets.mkdir(parents=True)
-            for source in (
+            sources = [
                 next(source_assets.glob("app-initial-*.js")),
                 next(source_assets.glob("profile-*.js")),
-                next(source_assets.glob("plugins-settings-*.js")),
-            ):
+                *source_assets.glob("plugins-settings-*.js"),
+            ]
+            for source in sources:
                 shutil.copy2(source, assets / source.name)
             initial_source = next(assets.glob("app-initial-*.js")).read_text(encoding="utf-8")
-            renderer_profile = (
-                CURRENT_RENDERER_PROFILE
-                if CURRENT_RENDERER_PROFILE["profile_query_anchor"] in initial_source
-                else None
+            renderer_profile = next(
+                (
+                    profile for profile in WINDOWS_RENDERER_PROFILES.values()
+                    if profile["profile_query_anchor"] in initial_source
+                ),
+                None,
             )
+            self.assertIsNotNone(renderer_profile, "supplied renderer is not a reviewed exact profile")
             patch_windows_feature_bundles(Path(directory), renderer_profile)
             self.assert_replacements(assets, renderer_profile)
 

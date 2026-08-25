@@ -9,6 +9,98 @@ same semantic templates and requires every feature anchor to match exactly
 once. Ambiguous or incomplete discovery still stops; the flag is not a
 blind compatibility bypass.
 
+## Release 0.4.5 — smart quota evidence and autonomous Goal failover
+
+This release changes the version-neutral Router core and adds no renderer
+bundle anchor. Quota snapshots are read through the reviewed
+`account/rateLimits/read` method and cross-checked with the already supported
+native Usage endpoint. Missing Usage fields fall back to app-server data;
+explicit deny, exhausted windows, and real turn rejections fail closed.
+
+The generated schema from Windows Store Codex `26.818.8289.0` / `codex-cli
+0.149.0-alpha.4.3` confirms
+`turn/completed` carries `threadId`, a `Turn`, and a structured `TurnError` with
+camelCase `codexErrorInfo`. Relay also accepts the snake_case persisted spelling
+used by rollout events and a terminal error with an omitted status, while
+inspecting only the error object so ordinary task text cannot trigger quota
+failover. Goal continuations without renderer `turn/start` use the existing
+reviewed `thread/read`, `thread/resume`, `thread/goal/get`, and
+`thread/goal/set` contract at a completed boundary. Older profiles that lack
+Goal methods retain the existing no-goal fallback; unknown profiles remain
+Sticky and never attempt cross-account migration.
+
+## Release 0.4.4 — locked rollout generations on Windows
+
+Windows can deny an atomic rename when an idle target app-server still holds
+its previous rollout without delete sharing. Relay keeps atomic replacement as
+the normal path. On access denied it installs the already stable, hash-verified
+canonical checkpoint under a unique sibling rollout name inside the same
+managed target sessions directory and resumes that exact path. The prior locked
+file remains unchanged. Ownership still cannot commit until `thread/read`
+returns a target-managed path whose SHA-256 and size equal the checkpoint.
+
+Relay also sends a task-scoped `thread/unsubscribe` before materialization and
+after a successful ownership transfer. If the target retains stale in-memory
+state and rejects path resume, Relay can restart only the idle app-server child
+for that subscription and retry the exact path once. This process is a child of
+Codex Relay; the native Microsoft Store Codex process is outside the managed
+child set. Reviewed older builds that reject the optional path field retain the
+strictly verified ID-only fallback documented for 0.4.3.
+
+## Release 0.4.3 — canonical path resume
+
+Current app-server schemas allow a non-empty rollout `path` on
+`thread/resume`. Relay uses that field only after it has materialized and
+hash-verified the canonical JSONL inside the isolated target home. This avoids
+trusting a stale target SQLite row that may still map the same thread ID to the
+former native Codex home. The response is accepted only when `thread/read`
+returns a target-managed path whose hash and size match the checkpoint.
+Reviewed older profiles that reject the optional path field use the existing
+ID-only retry and the same strict post-resume verifier.
+
+## Release 0.4.2 — deterministic fair-share routing
+
+This maintenance release changes only the Router's version-neutral scheduling
+and preview ordering. It adds no renderer bundle anchor and changes no
+app-server protocol shape. Store `26.818.5345.0` (`app.asar` SHA-256
+`819b966c725fe9d80a9fd54d0949cc447464c983380dd4ee458437e963713bf1`)
+was unpacked and its Relay-owned anchors were confirmed byte-for-byte identical
+to the reviewed `26.818.5229.0` profile; it is now an exact profile with its own
+fixture. The reviewed older Windows profiles remain available, and unknown upstream bundles
+continue to fail closed to Sticky whenever safe cross-account handoff cannot be
+verified.
+
+## Release 0.4.1 — explainable routing
+
+The Routing Inspector is implemented in the existing version-neutral Windows
+bridge and consumes the token-protected control projection. It adds no renderer
+bundle anchor and changes no app-server protocol request, so the five reviewed
+0.4.0 profiles remain the compatibility set. Exact-anchor fixtures for the
+current Store `26.818.5229.0` profile and every reviewed older profile remain
+release gates. Unknown profiles continue to expose the requested policy while
+showing effective Sticky and `policy_downgraded_unknown_profile`; the inspector
+does not claim that an unsafe handoff is available.
+
+## Release 0.4.0 — shared-memory Router v2
+
+The current worktree replaces v1's in-memory strict round-robin/permanently
+sticky model with the state-v2 scheduler and handoff protocol in
+[`SHARED-MEMORY-ROUTER.md`](SHARED-MEMORY-ROUTER.md). Renderer compatibility
+anchors remain fail-closed and unchanged: routing state/scheduling is below the
+app-server protocol, while the Windows bridge adds only version-neutral local
+status/policy calls. Reviewed older app-server shapes continue through the
+absolute/home-relative/archived/extended-path adapters and ID-only resume
+fallback. A missing/unknown manifest profile disables every cross-account
+copy/resume and makes the effective policy Sticky. It may continue the current
+owner normally, but it never claims safe handoff or incomplete-turn recovery.
+
+This feature release is validated with temporary homes, fake app-server
+workers, seven exact Windows renderer fixtures, and the matrix in
+[`TEST-MATRIX.md`](TEST-MATRIX.md). The permission-gated protocol E2E was also
+completed with real subscriptions on Store `26.818.5229.0`; visual desktop
+placement remains a manual operator check. Historical release sections below
+remain accurate for their published versions.
+
 ## Release 0.3.12
 
 The current Windows Store profile keeps the native Settings → Usage & billing
@@ -195,6 +287,47 @@ into structural discovery; discovery itself remains fail-closed on ambiguity.
 | Microsoft Store package | `OpenAI.Codex_26.818.3698.0_x64__2p2nqsd0c76g0` |
 | ChatGPT executable file version | `151.0.7922.170` |
 | `app.asar` SHA-256 | `1eb70e2aa26f2408a3e65817f0974e137b1a7ff6e52e43a184154bd4db2074d1` |
+
+### Previous reviewed Store profile
+
+| Component | Tested value |
+| --- | --- |
+| Platform | Windows x64 |
+| Microsoft Store package | `OpenAI.Codex_26.818.4152.0_x64__2p2nqsd0c76g0` |
+| `app.asar` SHA-256 | `10ca5c476ec300f27079184726498a6e8f13ad25b9b443661288eccf4d930ef4` |
+
+### Latest reviewed Store profile
+
+| Component | Tested value |
+| --- | --- |
+| Platform | Windows x64 |
+| Microsoft Store package | `OpenAI.Codex_26.818.5229.0_x64__2p2nqsd0c76g0` |
+| ChatGPT executable file version | `151.0.7922.170` |
+| `app.asar` SHA-256 | `c5d839bc9b122b7ef2a2f0f45186b3e5895923de5b6cef5253c936fe670c0479` |
+
+### Active reviewed Store profile
+
+| Component | Tested value |
+| --- | --- |
+| Platform | Windows x64 |
+| Microsoft Store package | `OpenAI.Codex_26.818.8289.0_x64__2p2nqsd0c76g0` |
+| ChatGPT executable file version | `151.0.7922.170` |
+| Codex CLI | `0.149.0-alpha.4.3` |
+| `app.asar` SHA-256 | `e2f04d6aa921d07981b42368df0a28a8bebe8cd21375d4a1f9286757b51c1313` |
+
+The renderer changed minifier aliases in the profile query, Usage request,
+Plugins request, and reset-sheet component. All 18 Relay-owned patch sites were
+structurally discovered in the unpacked ASAR, reviewed for exactly one match,
+recorded as a dedicated profile, and exercised by the release fixture. The
+generated app-server schema retains the structured `usageLimitExceeded`,
+`thread/resume` path, rate-limit window, and Goal status contracts used by
+smart routing.
+
+The installer writes `appServerCompatibilityProfile` only for one of these
+seven exact hashes. Structural discovery with `--allow-untested-source` may
+prove renderer anchors for a developer build, but it intentionally writes the
+app-server profile as `unknown`; Shared-Memory cross-account handoff therefore
+stays disabled until that hash is reviewed and recorded.
 
 The Windows patcher checks the recorded ASAR hash before copying the Store app.
 It injects a local renderer asset, expands the renderer CSP only with the

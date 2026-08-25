@@ -3,6 +3,256 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/) and
 this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.4.5] - 2026-08-25
+
+### Fixed
+
+- Quota routing now cross-checks each isolated app-server snapshot with that
+  subscription's native Usage response. Explicit `allowed`/`limit_reached`
+  signals and both quota windows are evaluated together; `allowed=true` can no
+  longer make a still-100%-used window eligible.
+- A real upstream `usageLimitExceeded` rejection now has higher precedence than
+  cached Usage data and immediately invalidates that account's quota cache.
+  Duplicate `error` plus `turn/completed` notifications count as one circuit
+  failure instead of extending cooldown twice.
+- Open quota circuits remember the blocking reset generation. A fresh snapshot
+  from the same epoch remains probationary, while a newer reset epoch with
+  confirmed capacity safely returns the account to the pool. A successful
+  probation turn remains the fallback recovery proof for older Codex builds.
+- Goal-owned turns that start inside app-server are now recognized even when no
+  renderer `turn/start` exists. At a terminal quota failure, Relay transfers
+  the exact durable rollout and Goal state to another eligible worker without
+  replaying the failed turn or any earlier command/tool side effect.
+- Canonical checkpoints query the source app-server's exact active rollout
+  path. Disk fallback now selects the newest sibling generation, preventing a
+  locked stale Windows rollout from replacing newer task history during
+  failover.
+
+### Validation
+
+- Added regressions for conflicting Usage flags/windows, explicit quota deny,
+  reset-generation circuit recovery, camelCase and snake_case quota errors,
+  harmless user text containing “quota”, duplicate terminal events, autonomous
+  Goal failover without `turn/start` replay, and newest-generation history
+  selection.
+- Verified against the generated app-server schema from Codex Windows
+  Store `26.818.8289.0` (`codex-cli 0.149.0-alpha.4.3`) and the isolated
+  multi-account Usage payload shape. Its changed renderer aliases are recorded
+  under an exact reviewed profile with an exact-anchor fixture.
+
+## [0.4.4] - 2026-08-25
+
+### Fixed
+
+- Windows handoffs no longer fail when the target app-server retains a
+  non-delete-sharing handle to an older rollout. Relay first attempts the
+  normal atomic replacement, then installs the already verified canonical
+  checkpoint as a unique immutable sibling generation when Windows returns
+  access denied.
+- The exact installed generation is passed to `thread/resume` and remains
+  subject to the existing target-home, SHA-256, and size verification before
+  ownership can commit. The locked old rollout is neither modified nor treated
+  as authoritative.
+- Relay asks target and former source workers to release stale task handles.
+  If a target still rejects the exact path, Relay may restart only that idle,
+  Router-owned app-server child and retry once. The native Store Codex process
+  is never targeted.
+
+### Validation
+
+- Added a deterministic Windows-permission regression proving that a locked
+  destination preserves its old bytes while the canonical bytes are installed
+  in a discoverable sibling rollout.
+- Re-ran canonical-path, legacy path-unsupported, failed-resume rollback, and
+  goal-transfer integration coverage.
+- Completed a real affected-task handoff from Subscription 4 to Subscription 2:
+  ownership committed at generation 8, the turn completed, and the target
+  rollout matched the canonical checkpoint by path containment, SHA-256, and
+  size. See `docs/evidence/v0.4.4-locked-rollout-e2e-2026-08-25.md`.
+
+## [0.4.3] - 2026-08-25
+
+### Fixed
+
+- Cross-account resume now prefers the exact canonical rollout materialized
+  inside the target subscription home. This overrides a stale Codex
+  `state_5.sqlite` row that still points the same thread ID at the former native
+  `.codex` sessions directory and prevents the repeated
+  `existing chat history is outside the source sessions directory` failure.
+- Post-resume verification remains fail-closed: the returned path must resolve
+  inside the target worker's managed history root and its SHA-256 and size must
+  equal the committed canonical checkpoint. Older app-server builds that reject
+  path-based resume retain the verified ID-only compatibility fallback.
+
+### Validation
+
+- Added an integration regression with a stale external target index plus a
+  valid target-home replica; the handoff must resume by the replica path and
+  commit before the turn is dispatched.
+- Added a compatibility regression proving that a reviewed path-unsupported
+  app-server can still use ID-only resume only when target-path verification
+  succeeds.
+
+## [0.4.2] - 2026-08-24
+
+### Fixed
+
+- Balanced routing now uses one deterministic tie-break contract for both the
+  real scheduler and its read-only next-worker preview. Normalized service
+  (`dispatches / current quota weight`) prevents a historically overused,
+  low-quota worker from jumping back ahead of underused full-quota workers;
+  weighted deficit smooths rotation inside the least-served tier.
+- The preview no longer disagrees with the next real dispatch when candidates
+  have equal quota-weighted scores.
+
+### Validation
+
+- Added a five-subscription anti-starvation regression: all five full-quota
+  workers must receive one dispatch before any worker repeats.
+- Added a mixed-pool regression proving that four unused 100% workers are
+  selected before a previously active worker with 31% remaining.
+- Added a persisted-history regression matching the production imbalance and
+  proving that a 26% worker with five prior dispatches cannot outrank 100%
+  workers with one dispatch merely because it retained old deficit credit.
+
+## [0.4.1] - 2026-08-24
+
+### Added
+
+- A versioned, null-safe routing explainability contract on the existing
+  token-protected Router status and thread-route APIs. It distinguishes Relay
+  Controller, current task owner, active turn worker, last completed worker,
+  last quota-consuming worker, previous worker, and the next-candidate preview.
+- Per-worker eligibility, health/circuit state, confirmed quota windows,
+  freshness, reservation/dispatch data, scheduler deficit and normalized score
+  components with fixed selected/skipped reason codes.
+- A bounded per-task route timeline derived from the authoritative decision,
+  turn and handoff journals. Stable event IDs deduplicate reservations, worker
+  selection, completion, rollback, quota attribution, handoff phases, recovery
+  and circuit events across refreshes and restarts.
+- Truthful before/after quota attribution. Relay reports a confirmed consuming
+  worker only when a newer upstream snapshot shows a measurable decrease;
+  unchanged, stale, unavailable or reset-crossing snapshots remain explicitly
+  unconfirmed.
+- An expandable, keyboard-accessible Routing Inspector beside the native task
+  composer. The compact row shows the actual worker, mode, last worker,
+  confirmed quota and next preview; expanded sections explain selection,
+  skipped accounts, timeline, handoff generations and the additive pool.
+- Session-deduplicated, non-blocking notifications for real quota failover,
+  handoff failure, recovery-required, all-depleted and safe policy downgrade
+  events.
+
+### Changed
+
+- Sticky and Rotate previews now reflect their real next-turn semantics without
+  mutating cursor, deficits, dispatch counts, reservations, ownership, handoff
+  state or circuit state. Balanced preview remains score ordered.
+- The pool projection now includes its oldest confirmed quota timestamp and
+  explicitly identifies the number of eligible, depleted and unknown workers.
+- Handoff journals retain a fixed reason code and safe explanation so source,
+  target and generation changes remain verifiable after restart.
+- English and Vietnamese community copy now explains that `500%` is routing
+  capacity across five isolated subscriptions, never one merged OpenAI plan or
+  billing balance.
+
+### Security
+
+- Explainability projections redact full email/username fields, absolute rollout
+  paths and arbitrary stored errors. Decisions, health and handoff reasons are
+  converted to bounded Router-owned text before they reach renderer JSON or SSE.
+- No prompt, Goal objective, tool arguments, file contents, OAuth material,
+  cookies, passwords, `auth.json`, workspace path or control token is added to
+  the timeline or quota-attribution ledger.
+
+### Validation
+
+- Added deterministic Go tests for non-mutating preview, worker-role separation,
+  fixed skipped reasons, handoff source/target/generation, stable event IDs,
+  reservation rollback, truthful quota attribution and hostile diagnostic data.
+- Added Windows renderer tests for the bilingual expandable inspector, owner /
+  active / last / preview separation and one-toast-per-event behavior while
+  retaining the native Settings shell and in-flow Usage & billing panel.
+
+## [0.4.0] - 2026-08-23
+
+### Added
+
+- Canonical Relay Memory with per-task route, null-safe goal checkpoint,
+  append-only turn/decision ledgers, migration journals, generation
+  checkpoints, and an incrementally materialized authoritative rollout.
+- Persistent quota-weighted deficit scheduling with atomic reservations,
+  low-water reserve, fresh-known-quota priority, probation fallback, restart-
+  safe cursor/deficits, exact failed-dispatch rollback, account health, and a
+  refresh-gated circuit breaker.
+- Per-thread turn coordination, side-effect/idempotency evidence, one active
+  worker per logical turn, generation-based late-event suppression, and
+  recovery-required handling when blind replay would risk duplicate commands or
+  file edits.
+- Transactional `PREPARED → COPIED → RESUMED → COMMITTED` handoff with stable
+  rollout snapshots, prefix-verified incremental append, SHA-256/size checks,
+  target `thread/read` identity verification, atomic owner commit, and startup
+  rollback for interrupted phases.
+- Sticky, Balanced, and Rotate-every-completed-turn policies; token-protected
+  router status/thread route/decision/policy/recovery APIs; sanitized routing
+  SSE; and account-skipped/circuit/handoff/turn events.
+- Native-flow Windows route controls in the profile menu and task composer.
+  Relay Controller and Current Task Route are distinct, and current worker,
+  generation, effective policy, next candidate, handoff, and recovery state
+  refresh over SSE without overlaying Settings or the sidebar.
+- A pool-first quota contract and UI: five connected subscriptions contribute
+  a maximum of `500%`, confirmed remaining quota is added (for example
+  `155% / 500%`), and per-worker rows are collapsed under diagnostics. Upstream
+  credentials and entitlements remain isolated while tasks consume the pool
+  through the scheduler.
+- A complete 48-row fixture test matrix, Windows junction/reparse-point escape
+  protection, exact reviewed-manifest capability gating, and fail-closed Sticky
+  behavior for missing or unknown app-server profiles.
+
+### Changed
+
+- State schema v1 owner maps migrate to v2 routes/scheduler/journals with a
+  retained v1 backup, atomic writes, last-valid backup recovery, and dual owner
+  compatibility for the transition release.
+- New and existing task turns now share the persistent scheduler. One logical
+  turn keeps the same reservation across selection, handoff, send, retry, and
+  completion, so an abandoned candidate cannot retain dispatch credit.
+- Routing diagnostics persist request hashes and fixed failure categories
+  instead of raw prompts, paths, file contents, or arbitrary upstream errors.
+- The Windows installer emits safe-handoff capability only for one of the five
+  exact reviewed ASAR hashes, including Store profiles `26.818.4152.0` and
+  `26.818.5229.0`.
+
+### Fixed
+
+- A new task's first turn stays on the worker that accepted `thread/start`.
+  Balanced/Rotate handoff begins only after a completed-turn boundary, when an
+  authoritative rollout exists, preventing a first-turn `history_not_found`
+  race.
+- App-server tooling subcommands such as `generate-json-schema` bypass the
+  interactive sandbox argument rewrite, so installer/profile discovery works
+  with current and older reviewed Codex builds.
+- A `userMessage` item is no longer treated as visible assistant output. A
+  quota rejection after user input but before assistant output or side effects
+  can therefore fail over safely; genuine assistant output still fails closed
+  to recovery-required.
+- Active Goal state is transferred explicitly during a committed worker
+  handoff because `thread/goal/*` state is app-server-local rather than part of
+  the rollout alone. The target verifies the objective/status before ownership
+  commits; `usageLimited` becomes `active` on a capacity-bearing target, and a
+  token budget is reduced by already consumed tokens to preserve its remaining
+  safety bound.
+
+### Security
+
+- Source and target history validation rejects Windows junction/reparse-point
+  escapes as well as POSIX symlinks, traversal, non-regular files, and rollout
+  files over 1 GiB.
+- Official Codex and Relay credentials remain isolated: each child retains a
+  separate `CODEX_HOME`, `CODEX_SQLITE_HOME`, app-server, callback, and
+  `auth.json`; Canonical Relay Memory never stores tokens or cookies.
+
+Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.4.0
+
 ## [0.3.12] - 2026-08-22
 
 ### Added
@@ -291,7 +541,13 @@ Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.7
 - Loopback-only, token-authenticated diagnostic UI states.
 - Source-only CI, draft release automation, security documentation, and smoke tests.
 
-[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.3.12...HEAD
+[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.4.5...HEAD
+[0.4.5]: https://github.com/LightHaru/codex-relay/releases/tag/v0.4.5
+[0.4.4]: https://github.com/LightHaru/codex-relay/releases/tag/v0.4.4
+[0.4.3]: https://github.com/LightHaru/codex-relay/releases/tag/v0.4.3
+[0.4.2]: https://github.com/LightHaru/codex-relay/releases/tag/v0.4.2
+[0.4.1]: https://github.com/LightHaru/codex-relay/releases/tag/v0.4.1
+[0.4.0]: https://github.com/LightHaru/codex-relay/releases/tag/v0.4.0
 [0.3.12]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.12
 [0.3.11]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.11
 [0.3.10]: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.10

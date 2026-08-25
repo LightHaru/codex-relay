@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-const stateVersion = 1
+const stateVersion = 2
 
 type Account struct {
 	ID         string `json:"id"`
@@ -34,9 +34,17 @@ type Account struct {
 }
 
 type persistedState struct {
-	Version     int               `json:"version"`
-	Accounts    []Account         `json:"accounts"`
-	ThreadOwner map[string]string `json:"threadOwner"`
+	Version      int                            `json:"version"`
+	Accounts     []Account                      `json:"accounts"`
+	ThreadOwner  map[string]string              `json:"threadOwner,omitempty"`
+	ThreadRoutes map[string]ThreadRoute         `json:"threadRoutes"`
+	Scheduler    SchedulerState                 `json:"scheduler"`
+	Health       map[string]AccountHealth       `json:"accountHealth"`
+	Attempts     map[string]TurnAttempt         `json:"turnAttempts"`
+	Handoffs     map[string]Handoff             `json:"handoffs"`
+	Checkpoints  map[string]CanonicalCheckpoint `json:"canonicalCheckpoints"`
+	Decisions    []RoutingDecision              `json:"routingDecisions"`
+	Capabilities map[string]AccountCapability   `json:"accountCapabilities"`
 }
 
 // Store persists only routing metadata. OAuth credentials and conversation
@@ -52,6 +60,14 @@ type Store struct {
 	legacyPrimaryCodexHome string
 	accounts               []Account
 	owners                 map[string]string
+	routes                 map[string]ThreadRoute
+	scheduler              SchedulerState
+	health                 map[string]AccountHealth
+	attempts               map[string]TurnAttempt
+	handoffs               map[string]Handoff
+	checkpoints            map[string]CanonicalCheckpoint
+	decisions              []RoutingDecision
+	capabilities           map[string]AccountCapability
 }
 
 func Open(root, primaryCodexHome string) (*Store, error) {
@@ -86,6 +102,13 @@ func open(root, primaryCodexHome, legacyPrimaryHome string, isolatedPrimary bool
 		primaryCodexHome:       primaryCodexHome,
 		legacyPrimaryCodexHome: strings.TrimSpace(legacyPrimaryHome),
 		owners:                 make(map[string]string),
+		routes:                 make(map[string]ThreadRoute),
+		scheduler:              defaultSchedulerState(),
+		health:                 make(map[string]AccountHealth),
+		attempts:               make(map[string]TurnAttempt),
+		handoffs:               make(map[string]Handoff),
+		checkpoints:            make(map[string]CanonicalCheckpoint),
+		capabilities:           make(map[string]AccountCapability),
 	}
 	stateNeedsSave := false
 	data, err := os.ReadFile(store.path)
@@ -93,14 +116,48 @@ func open(root, primaryCodexHome, legacyPrimaryHome string, isolatedPrimary bool
 	case err == nil:
 		var persisted persistedState
 		if err := json.Unmarshal(data, &persisted); err != nil {
-			return nil, fmt.Errorf("read state: %w", err)
+			backupData, backupErr := os.ReadFile(store.path + ".backup")
+			if backupErr != nil || json.Unmarshal(backupData, &persisted) != nil {
+				return nil, fmt.Errorf("read state: %w", err)
+			}
+			data = backupData
+			stateNeedsSave = true
 		}
-		if persisted.Version != stateVersion {
+		if persisted.Version != 1 && persisted.Version != stateVersion {
 			return nil, fmt.Errorf("unsupported state version %d", persisted.Version)
 		}
 		store.accounts = persisted.Accounts
 		if persisted.ThreadOwner != nil {
 			store.owners = persisted.ThreadOwner
+		}
+		if persisted.ThreadRoutes != nil {
+			store.routes = persisted.ThreadRoutes
+		}
+		store.scheduler = normalizeScheduler(persisted.Scheduler)
+		if persisted.Health != nil {
+			store.health = persisted.Health
+		}
+		if persisted.Attempts != nil {
+			store.attempts = persisted.Attempts
+		}
+		if persisted.Handoffs != nil {
+			store.handoffs = persisted.Handoffs
+		}
+		if persisted.Checkpoints != nil {
+			store.checkpoints = persisted.Checkpoints
+		}
+		store.decisions = persisted.Decisions
+		if persisted.Capabilities != nil {
+			store.capabilities = persisted.Capabilities
+		}
+		if persisted.Version == 1 {
+			if err := writeMigrationBackup(store.path, data); err != nil {
+				return nil, err
+			}
+			for threadID, accountID := range store.owners {
+				store.routes[threadID] = ThreadRoute{ThreadID: threadID, AccountID: accountID, Generation: 1, UpdatedAt: time.Now().UnixMilli()}
+			}
+			stateNeedsSave = true
 		}
 	case errors.Is(err, os.ErrNotExist):
 		store.accounts = []Account{{
@@ -196,6 +253,7 @@ func (s *Store) migrateLegacyAccountHomesLocked(legacyPrimaryHome string) (bool,
 		for threadID, owner := range s.owners {
 			if owner == account.ID {
 				delete(s.owners, threadID)
+				delete(s.routes, threadID)
 			}
 		}
 	}
@@ -462,8 +520,8 @@ func (s *Store) DiscardProvisionalAccount(id string) (Account, error) {
 		if account.Controller || samePath(account.CodexHome, s.primaryCodexHome) {
 			return Account{}, errors.New("the Relay primary account cannot be discarded")
 		}
-		for threadID, ownerID := range s.owners {
-			if ownerID == id {
+		for threadID, route := range s.routes {
+			if route.AccountID == id {
 				return Account{}, fmt.Errorf(
 					"account %q owns thread %q and cannot be discarded", id, threadID,
 				)
@@ -523,15 +581,21 @@ func (s *Store) RemoveAccount(id string, force bool) (Account, error) {
 		for threadID, ownerID := range s.owners {
 			previousOwners[threadID] = ownerID
 		}
+		previousRoutes := make(map[string]ThreadRoute, len(s.routes))
+		for threadID, route := range s.routes {
+			previousRoutes[threadID] = route
+		}
 		s.accounts = append(slices.Clone(s.accounts[:index]), s.accounts[index+1:]...)
 		if force {
 			for _, threadID := range owned {
 				delete(s.owners, threadID)
+				delete(s.routes, threadID)
 			}
 		}
 		if err := s.saveLocked(); err != nil {
 			s.accounts = previousAccounts
 			s.owners = previousOwners
+			s.routes = previousRoutes
 			return Account{}, err
 		}
 		return account, nil
@@ -542,6 +606,9 @@ func (s *Store) RemoveAccount(id string, force bool) (Account, error) {
 func (s *Store) ThreadOwner(threadID string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if route, ok := s.routes[threadID]; ok {
+		return route.AccountID, true
+	}
 	owner, ok := s.owners[threadID]
 	return owner, ok
 }
@@ -553,18 +620,57 @@ func (s *Store) SetThreadOwner(threadID, accountID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.owners[threadID] == accountID {
-		return nil
+		if route, ok := s.routes[threadID]; ok && route.AccountID == accountID {
+			return nil
+		}
 	}
+	previousOwner, ownerExisted := s.owners[threadID]
+	previousRoute, routeExisted := s.routes[threadID]
 	s.owners[threadID] = accountID
-	return s.saveLocked()
+	route := s.routes[threadID]
+	route.ThreadID = threadID
+	if route.Generation == 0 {
+		route.Generation = 1
+	} else if route.AccountID != "" && route.AccountID != accountID {
+		route.PreviousAccountID = route.AccountID
+		route.Generation++
+		route.HistoryGeneration = route.Generation
+		route.ConsecutiveOwnerTurns = 0
+	}
+	route.AccountID = accountID
+	if route.HistoryGeneration == 0 {
+		route.HistoryGeneration = route.Generation
+	}
+	if !route.Policy.Valid() {
+		route.Policy = s.scheduler.Policy
+	}
+	if route.CurrentState == "" {
+		route.CurrentState = "idle"
+	}
+	route.UpdatedAt = time.Now().UnixMilli()
+	s.routes[threadID] = route
+	if err := s.saveLocked(); err != nil {
+		if ownerExisted {
+			s.owners[threadID] = previousOwner
+		} else {
+			delete(s.owners, threadID)
+		}
+		if routeExisted {
+			s.routes[threadID] = previousRoute
+		} else {
+			delete(s.routes, threadID)
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *Store) ThreadCounts() map[string]int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	counts := make(map[string]int)
-	for _, accountID := range s.owners {
-		counts[accountID]++
+	for _, route := range s.routes {
+		counts[route.AccountID]++
 	}
 	return counts
 }
@@ -576,8 +682,8 @@ func (s *Store) ThreadIDsForAccount(accountID string) []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := make([]string, 0)
-	for threadID, ownerID := range s.owners {
-		if ownerID == accountID {
+	for threadID, route := range s.routes {
+		if route.AccountID == accountID {
 			result = append(result, threadID)
 		}
 	}
@@ -586,9 +692,17 @@ func (s *Store) ThreadIDsForAccount(accountID string) []string {
 
 func (s *Store) saveLocked() error {
 	persisted := persistedState{
-		Version:     stateVersion,
-		Accounts:    s.accounts,
-		ThreadOwner: s.owners,
+		Version:      stateVersion,
+		Accounts:     s.accounts,
+		ThreadOwner:  s.owners,
+		ThreadRoutes: s.routes,
+		Scheduler:    s.scheduler,
+		Health:       s.health,
+		Attempts:     s.attempts,
+		Handoffs:     s.handoffs,
+		Checkpoints:  s.checkpoints,
+		Decisions:    s.decisions,
+		Capabilities: s.capabilities,
 	}
 	data, err := json.MarshalIndent(persisted, "", "  ")
 	if err != nil {
@@ -601,8 +715,36 @@ func (s *Store) saveLocked() error {
 	if err := os.Chmod(temporary, 0o600); err != nil {
 		return fmt.Errorf("secure state: %w", err)
 	}
+	if current, readErr := os.ReadFile(s.path); readErr == nil && json.Valid(current) {
+		backupTemporary := s.path + ".backup.tmp"
+		if err := os.WriteFile(backupTemporary, current, 0o600); err != nil {
+			return fmt.Errorf("write state backup: %w", err)
+		}
+		if err := os.Chmod(backupTemporary, 0o600); err != nil {
+			return fmt.Errorf("secure state backup: %w", err)
+		}
+		if err := renameStateFile(backupTemporary, s.path+".backup"); err != nil {
+			return fmt.Errorf("commit state backup: %w", err)
+		}
+	}
 	if err := renameStateFile(temporary, s.path); err != nil {
 		return fmt.Errorf("commit state: %w", err)
+	}
+	return nil
+}
+
+func writeMigrationBackup(path string, data []byte) error {
+	backup := path + ".v1.backup"
+	if _, err := os.Stat(backup); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect state backup: %w", err)
+	}
+	if err := os.WriteFile(backup, data, 0o600); err != nil {
+		return fmt.Errorf("backup v1 state: %w", err)
+	}
+	if err := os.Chmod(backup, 0o600); err != nil {
+		return fmt.Errorf("secure v1 state backup: %w", err)
 	}
 	return nil
 }

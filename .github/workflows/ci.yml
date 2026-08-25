@@ -33,6 +33,9 @@ jobs:
       - name: Test Go packages
         run: go test ./...
 
+      - name: Race-test routing state and control packages
+        run: go test -race ./internal/state ./internal/mux ./internal/control
+
       - name: Vet Go packages
         run: go vet ./...
 

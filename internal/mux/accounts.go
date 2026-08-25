@@ -21,7 +21,58 @@ const (
 	routingMinimumWindow       = time.Minute
 	routingResetBonusPerCredit = 0.15
 	routingResetBonusCreditCap = 3
+	fairShareScoreEpsilon      = 0.000001
 )
+
+func fairShareNormalizedService(dispatches uint64, weight float64) float64 {
+	return float64(dispatches) / math.Max(weight, 0.01)
+}
+
+// fairShareCandidateRanksBefore is the single deterministic ordering contract
+// used by both the mutating scheduler and the read-only UI preview. Normalized
+// service (dispatches divided by current quota weight) prevents a historically
+// hot, low-quota worker from retaining priority over underused full workers.
+// Weighted deficit then provides smooth short-term rotation inside the least-
+// served tier, followed by stable age and identity tie-breaks.
+func fairShareCandidateRanksBefore(
+	scoreA float64,
+	weightA float64,
+	dispatchesA uint64,
+	lastSelectedAtA int64,
+	createdAtA int64,
+	idA string,
+	scoreB float64,
+	weightB float64,
+	dispatchesB uint64,
+	lastSelectedAtB int64,
+	createdAtB int64,
+	idB string,
+) bool {
+	serviceA := fairShareNormalizedService(dispatchesA, weightA)
+	serviceB := fairShareNormalizedService(dispatchesB, weightB)
+	if serviceA+fairShareScoreEpsilon < serviceB {
+		return true
+	}
+	if serviceB+fairShareScoreEpsilon < serviceA {
+		return false
+	}
+	if scoreA > scoreB+fairShareScoreEpsilon {
+		return true
+	}
+	if scoreB > scoreA+fairShareScoreEpsilon {
+		return false
+	}
+	if dispatchesA != dispatchesB {
+		return dispatchesA < dispatchesB
+	}
+	if lastSelectedAtA != lastSelectedAtB {
+		return lastSelectedAtA < lastSelectedAtB
+	}
+	if createdAtA != createdAtB {
+		return createdAtA < createdAtB
+	}
+	return idA < idB
+}
 
 type RateLimitWindow struct {
 	UsedPercent        float64 `json:"usedPercent"`
@@ -55,12 +106,16 @@ type AccountSnapshot struct {
 	// not returned data yet from one whose windows are genuinely at 0% left.
 	// The UI uses this flag to avoid presenting missing data as a fake 100% or a
 	// confusing dash.
-	RateLimitAvailable bool            `json:"rateLimitAvailable"`
-	RateLimitError     string          `json:"rateLimitError,omitempty"`
-	ThreadCount        int             `json:"threadCount"`
-	Error              string          `json:"error,omitempty"`
-	CreatedAt          int64           `json:"createdAt"`
-	RawAccount         json.RawMessage `json:"-"`
+	RateLimitAvailable   bool            `json:"rateLimitAvailable"`
+	RateLimitsObservedAt int64           `json:"rateLimitsObservedAt,omitempty"`
+	RateLimitError       string          `json:"rateLimitError,omitempty"`
+	QuotaAllowed         *bool           `json:"quotaAllowed,omitempty"`
+	QuotaLimitReached    *bool           `json:"quotaLimitReached,omitempty"`
+	QuotaSource          string          `json:"quotaSource,omitempty"`
+	ThreadCount          int             `json:"threadCount"`
+	Error                string          `json:"error,omitempty"`
+	CreatedAt            int64           `json:"createdAt"`
+	RawAccount           json.RawMessage `json:"-"`
 }
 
 type RouteReason struct {
@@ -150,6 +205,9 @@ func (m *Multiplexer) AddAccount(ctx context.Context, label string) (AccountSnap
 }
 
 func (m *Multiplexer) UpdateAccount(ctx context.Context, id string, label *string, enabled *bool) (AccountSnapshot, error) {
+	if enabled != nil && !*enabled && m.accountHasActiveTurn(id) {
+		return AccountSnapshot{}, errors.New("wait for this subscription's active task turn to complete before disabling it")
+	}
 	if _, err := m.store.UpdateAccount(id, label, enabled); err != nil {
 		return AccountSnapshot{}, err
 	}
@@ -175,6 +233,12 @@ func (m *Multiplexer) SetPrimary(ctx context.Context, id string) (AccountSnapsho
 func (m *Multiplexer) SetPrimaryAndRestart(ctx context.Context, id string) (PrimaryChange, error) {
 	m.accountMutationMu.Lock()
 	defer m.accountMutationMu.Unlock()
+	m.turnMu.Lock()
+	activeTurns := len(m.activeTurns)
+	m.turnMu.Unlock()
+	if activeTurns > 0 {
+		return PrimaryChange{}, fmt.Errorf("wait for %d active task turn(s) to complete before changing Relay Controller", activeTurns)
+	}
 
 	account, ok := m.store.Account(id)
 	if !ok {
@@ -236,6 +300,9 @@ func (m *Multiplexer) RemoveAccount(ctx context.Context, id string, force bool) 
 	if len(m.store.Accounts()) <= 1 {
 		return AccountSnapshot{}, errors.New("at least one subscription must remain")
 	}
+	if m.accountHasActiveTurn(id) {
+		return AccountSnapshot{}, errors.New("wait for this subscription's active task turn to complete before removing it")
+	}
 	if !force {
 		owned := m.store.ThreadIDsForAccount(id)
 		if len(owned) > 0 {
@@ -267,6 +334,17 @@ func (m *Multiplexer) RemoveAccount(ctx context.Context, id string, force bool) 
 	}
 	m.publish(Event{Type: "account-removed", AccountID: id, Message: "Subscription removed"})
 	return AccountSnapshot{ID: removed.ID, Label: removed.Label, Enabled: removed.Enabled, Controller: removed.Controller, CreatedAt: removed.CreatedAt}, nil
+}
+
+func (m *Multiplexer) accountHasActiveTurn(accountID string) bool {
+	m.turnMu.Lock()
+	defer m.turnMu.Unlock()
+	for _, active := range m.activeTurns {
+		if active.route.accountID == accountID {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Multiplexer) ThreadAccount(ctx context.Context, threadID string) (AccountSnapshot, error) {
@@ -470,16 +548,41 @@ func (m *Multiplexer) accountSnapshotWithProfile(ctx context.Context, accountID 
 				if json.Unmarshal(rateResponse.Result, &rateResult) == nil {
 					snapshot.RateLimits = &rateResult.RateLimits
 					snapshot.RateLimitAvailable = true
+					snapshot.RateLimitsObservedAt = m.now().UnixMilli()
 					snapshot.NextRateLimitResetAt = earliestRateLimitResetAt(snapshot.RateLimits)
+					snapshot.QuotaSource = "app-server"
 				} else {
 					snapshot.RateLimitError = "quota data could not be read"
 				}
 			} else {
 				snapshot.RateLimitError = "quota data is temporarily unavailable"
 			}
+			// Cross-check the app-server snapshot with the same authenticated
+			// Usage resource used by the native billing page. This gives routing
+			// explicit allowed/limit_reached signals and also repairs stale window
+			// data after an upstream reset. The direct result is cached briefly so
+			// renderer polling does not amplify network traffic.
+			if usageSignal, usageErr := m.usageQuotaSignal(ctx, account); usageErr == nil {
+				snapshot.QuotaAllowed = cloneBoolPointer(usageSignal.Allowed)
+				snapshot.QuotaLimitReached = cloneBoolPointer(usageSignal.LimitReached)
+				if usageSignal.RateLimits != nil &&
+					(usageSignal.RateLimits.Primary != nil || usageSignal.RateLimits.Secondary != nil) {
+					snapshot.RateLimits = usageSignal.RateLimits
+					snapshot.RateLimitAvailable = true
+					snapshot.RateLimitsObservedAt = usageSignal.ObservedAt
+					snapshot.NextRateLimitResetAt = earliestRateLimitResetAt(snapshot.RateLimits)
+				}
+				if snapshot.QuotaSource == "app-server" {
+					snapshot.QuotaSource = "app-server+usage"
+				} else {
+					snapshot.QuotaSource = "usage"
+				}
+				snapshot.RateLimitError = ""
+			}
 		}
 	}
 	m.applyRateLimitPreview(&snapshot)
+	m.observeAccountQuotaSnapshot(snapshot)
 	return snapshot, nil
 }
 
@@ -544,55 +647,87 @@ func (m *Multiplexer) chooseAccount(ctx context.Context) (state.Account, RouteRe
 	return m.chooseFairShareFromSnapshots(snapshots, nil)
 }
 
+func (m *Multiplexer) chooseAccountReserved(ctx context.Context, excluded map[string]struct{}, reservationID string) (state.Account, RouteReason, error) {
+	snapshots := m.accountSnapshots(ctx, false)
+	return m.chooseFairShareFromSnapshotsReserved(snapshots, excluded, reservationID)
+}
+
 func (m *Multiplexer) chooseAccountExcluding(ctx context.Context, excluded map[string]struct{}) (state.Account, RouteReason, error) {
 	snapshots := m.accountSnapshots(ctx, false)
 	return m.chooseAccountFromSnapshots(ctx, snapshots, excluded)
 }
 
-// chooseFairShareFromSnapshots selects a new-chat owner from the connected
-// subscriptions that still have capacity. The selector is deliberately
-// round-robin by dispatch count: quota percentage is used to decide whether an
-// account can enter the pool, not to keep routing every new chat to the account
-// with the lowest current usage. That keeps traffic spread across the pool and
-// gives each subscription a chance to reach the same reset window. Accounts
-// whose quota is temporarily unknown remain last-resort candidates and are
-// never allowed to displace a connected account with known capacity.
+// chooseFairShareFromSnapshots uses a persistent weighted-deficit round robin.
+// Quota determines both eligibility and weight, while the persisted deficit
+// prevents a process restart or concurrent request burst from resetting the
+// fairness cursor. Unknown or stale quota is a last-resort pool and the final
+// low-water reserve is preserved whenever another account has safe capacity.
 func (m *Multiplexer) chooseFairShareFromSnapshots(
 	snapshots []AccountSnapshot,
 	excluded map[string]struct{},
 ) (state.Account, RouteReason, error) {
+	return m.chooseFairShareFromSnapshotsReserved(snapshots, excluded, "")
+}
+
+func (m *Multiplexer) chooseFairShareFromSnapshotsReserved(
+	snapshots []AccountSnapshot,
+	excluded map[string]struct{},
+	reservationID string,
+) (state.Account, RouteReason, error) {
 	type candidate struct {
 		account       state.Account
 		reason        RouteReason
-		dispatchCount uint64
 		knownCapacity bool
+		remaining     float64
+		weight        float64
 	}
 	candidates := make([]candidate, 0, len(snapshots))
+	now := time.Now()
+	if m.now != nil {
+		now = m.now()
+	}
+	reservationContext := state.Reservation{}
+	if reservationID != "" {
+		reservationContext = m.store.Scheduler().Reservations[reservationID]
+	}
+	publishSkipped := func(accountID, reason string) {
+		m.publish(Event{
+			Type: "account-skipped", ThreadID: reservationContext.ThreadID,
+			AttemptID: reservationContext.AttemptID, AccountID: accountID,
+			Message: reason,
+		})
+	}
 	for _, snapshot := range snapshots {
-		if _, skip := excluded[snapshot.ID]; skip || !accountHasCapacity(snapshot) {
+		if _, skip := excluded[snapshot.ID]; skip {
+			publishSkipped(snapshot.ID, "excluded for this logical turn")
+			continue
+		}
+		if !accountHasCapacity(snapshot) {
+			publishSkipped(snapshot.ID, "worker is disconnected, unsupported, or depleted")
+			continue
+		}
+		if !m.accountCircuitAllows(snapshot, now) {
+			publishSkipped(snapshot.ID, "quota circuit is open pending a confirmed refresh")
 			continue
 		}
 		account, ok := m.store.Account(snapshot.ID)
 		if !ok {
+			publishSkipped(snapshot.ID, "worker state is unavailable")
 			continue
 		}
 		reason := routeReasonForSnapshot(snapshot)
+		remaining, known := routableRemainingPercent(snapshot, now)
 		candidates = append(candidates, candidate{
 			account: account, reason: reason,
-			knownCapacity: snapshot.RateLimits != nil && snapshot.RateLimitAvailable,
+			knownCapacity: known,
+			remaining:     remaining,
+			weight:        math.Max(remaining/100, 0.01),
 		})
 	}
 	if len(candidates) == 0 {
 		return state.Account{}, RouteReason{}, errNoSubscriptionCapacity
 	}
 
-	// Read and increment counters under one lock so two simultaneous new-chat
-	// requests cannot both observe the same tie-break value.
-	m.allocationMu.Lock()
-	defer m.allocationMu.Unlock()
-	for index := range candidates {
-		candidates[index].dispatchCount = m.newThreadDispatch[candidates[index].account.ID]
-	}
 	known := make([]candidate, 0, len(candidates))
 	for _, entry := range candidates {
 		if entry.knownCapacity {
@@ -600,24 +735,165 @@ func (m *Multiplexer) chooseFairShareFromSnapshots(
 		}
 	}
 	if len(known) > 0 {
+		for _, entry := range candidates {
+			if !entry.knownCapacity {
+				publishSkipped(entry.account.ID, "confirmed quota is preferred over probation quota")
+			}
+		}
 		candidates = known
+		const lowWaterReservePercent = 5.0
+		safe := make([]candidate, 0, len(candidates))
+		for _, entry := range candidates {
+			if entry.remaining >= lowWaterReservePercent {
+				safe = append(safe, entry)
+			}
+		}
+		if len(safe) > 0 {
+			for _, entry := range candidates {
+				if entry.remaining < lowWaterReservePercent {
+					publishSkipped(entry.account.ID, "low-water quota reserve is protected")
+				}
+			}
+			candidates = safe
+		}
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
-		left, right := candidates[i], candidates[j]
-		if left.dispatchCount != right.dispatchCount {
-			return left.dispatchCount < right.dispatchCount
+		if candidates[i].account.CreatedAt != candidates[j].account.CreatedAt {
+			return candidates[i].account.CreatedAt < candidates[j].account.CreatedAt
 		}
-		if left.reason.ThreadCount != right.reason.ThreadCount {
-			return left.reason.ThreadCount < right.reason.ThreadCount
-		}
-		return left.account.CreatedAt < right.account.CreatedAt
+		return candidates[i].account.ID < candidates[j].account.ID
 	})
-	selected := &candidates[0]
-	m.newThreadDispatch[selected.account.ID]++
-	score := float64(selected.dispatchCount)
-	selected.reason.FairShareScore = &score
-	selected.reason.NewThreadDispatches = selected.dispatchCount + 1
+
+	selectedIndex := -1
+	selectedScore := 0.0
+	var dispatch uint64
+	err := m.store.UpdateScheduler(func(scheduler *state.SchedulerState) error {
+		rollbackReservation := func(reservation state.Reservation) {
+			if reservation.DispatchCharged {
+				for accountID, delta := range reservation.DispatchDelta {
+					scheduler.Deficits[accountID] -= delta
+					if math.Abs(scheduler.Deficits[accountID]) < 0.000000001 {
+						delete(scheduler.Deficits, accountID)
+					}
+				}
+				if scheduler.Cursor > 0 {
+					scheduler.Cursor--
+				}
+			}
+			if reservation.DispatchCounted {
+				if scheduler.Dispatches[reservation.AccountID] <= 1 {
+					delete(scheduler.Dispatches, reservation.AccountID)
+				} else {
+					scheduler.Dispatches[reservation.AccountID]--
+				}
+				if scheduler.LastSelectedAt[reservation.AccountID] == reservation.SelectedAt {
+					if reservation.PreviousSelectedAt == 0 {
+						delete(scheduler.LastSelectedAt, reservation.AccountID)
+					} else {
+						scheduler.LastSelectedAt[reservation.AccountID] = reservation.PreviousSelectedAt
+					}
+				}
+			}
+		}
+		// A logical turn may be re-selected after the first candidate proves
+		// unavailable before dispatch. Replace its previous scheduler charge
+		// atomically so the abandoned candidate cannot retain deficit/cursor
+		// credit and the same turn never counts as two dispatches.
+		if reservationID != "" {
+			if previous, ok := scheduler.Reservations[reservationID]; ok {
+				rollbackReservation(previous)
+				delete(scheduler.Reservations, reservationID)
+			}
+		}
+		for id, reservation := range scheduler.Reservations {
+			if reservation.ExpiresAt <= now.UnixMilli() {
+				rollbackReservation(reservation)
+				delete(scheduler.Reservations, id)
+			}
+		}
+		totalWeight := 0.0
+		dispatchDelta := make(map[string]float64, len(candidates))
+		for index := range candidates {
+			entry := &candidates[index]
+			totalWeight += entry.weight
+			scheduler.Deficits[entry.account.ID] += entry.weight
+			dispatchDelta[entry.account.ID] += entry.weight
+			reserved := 0.0
+			for _, reservation := range scheduler.Reservations {
+				if reservation.AccountID == entry.account.ID {
+					reserved += reservation.Weight
+				}
+			}
+			score := scheduler.Deficits[entry.account.ID] - reserved
+			if selectedIndex < 0 || fairShareCandidateRanksBefore(
+				score,
+				entry.weight,
+				scheduler.Dispatches[entry.account.ID],
+				scheduler.LastSelectedAt[entry.account.ID],
+				entry.account.CreatedAt,
+				entry.account.ID,
+				selectedScore,
+				candidates[selectedIndex].weight,
+				scheduler.Dispatches[candidates[selectedIndex].account.ID],
+				scheduler.LastSelectedAt[candidates[selectedIndex].account.ID],
+				candidates[selectedIndex].account.CreatedAt,
+				candidates[selectedIndex].account.ID,
+			) {
+				selectedIndex, selectedScore = index, score
+			}
+		}
+		if selectedIndex < 0 || totalWeight <= 0 {
+			return errNoSubscriptionCapacity
+		}
+		scheduler.Deficits[candidates[selectedIndex].account.ID] -= totalWeight
+		dispatchDelta[candidates[selectedIndex].account.ID] -= totalWeight
+		scheduler.Cursor++
+		dispatch = scheduler.Cursor
+		selectedAccountID := candidates[selectedIndex].account.ID
+		previousSelectedAt := scheduler.LastSelectedAt[selectedAccountID]
+		selectedAt := now.UnixMilli()
+		scheduler.Dispatches[selectedAccountID]++
+		scheduler.LastSelectedAt[selectedAccountID] = selectedAt
+		if reservationID != "" {
+			scheduler.Reservations[reservationID] = state.Reservation{
+				ID: reservationID, AccountID: selectedAccountID,
+				Weight: 1, ExpiresAt: now.Add(2 * time.Minute).UnixMilli(),
+				DispatchCharged: true, DispatchDelta: dispatchDelta,
+				DispatchCounted: true, SelectedAt: selectedAt, PreviousSelectedAt: previousSelectedAt,
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return state.Account{}, RouteReason{}, err
+	}
+	selected := &candidates[selectedIndex]
+	m.markHalfOpenIfReady(selected.account.ID, now)
+	selected.reason.FairShareScore = &selectedScore
+	selected.reason.NewThreadDispatches = dispatch
 	return selected.account, selected.reason, nil
+}
+
+func routableRemainingPercent(snapshot AccountSnapshot, now time.Time) (float64, bool) {
+	if snapshot.RateLimits == nil {
+		return 1, false
+	}
+	if snapshot.RateLimitsObservedAt > 0 && now.Sub(time.UnixMilli(snapshot.RateLimitsObservedAt)) > 2*time.Minute {
+		return 1, false
+	}
+	remaining := 100.0
+	seen := false
+	for _, window := range []*RateLimitWindow{snapshot.RateLimits.Primary, snapshot.RateLimits.Secondary} {
+		if window == nil {
+			continue
+		}
+		seen = true
+		value := math.Max(0, 100-window.UsedPercent)
+		if value < remaining {
+			remaining = value
+		}
+	}
+	return remaining, seen
 }
 
 func (m *Multiplexer) chooseAccountFromSnapshots(ctx context.Context, snapshots []AccountSnapshot, excluded map[string]struct{}) (state.Account, RouteReason, error) {

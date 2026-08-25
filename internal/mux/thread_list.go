@@ -47,16 +47,7 @@ func (m *Multiplexer) aggregateThreadList(request protocol.Message) {
 			}
 		}
 	}
-	threads := make([]map[string]any, 0, len(candidates)+len(withoutID))
-	for threadID, threadCandidates := range candidates {
-		selected := chooseThreadCandidate(m.store, threadID, threadCandidates)
-		threads = append(threads, selected.thread)
-		// The persisted assignment is authoritative when both the source and
-		// the migrated copy are visible. This prevents the concurrent account
-		// list responses from moving a failed-over chat back to Primary.
-		_ = m.store.SetThreadOwner(threadID, selected.account.ID)
-	}
-	threads = append(threads, withoutID...)
+	threads := mergeThreadCandidates(m.store, candidates, withoutID)
 	sortThreads(threads)
 	encoded, err := json.Marshal(map[string]any{"data": threads, "nextCursor": nil})
 	if err != nil {
@@ -64,6 +55,22 @@ func (m *Multiplexer) aggregateThreadList(request protocol.Message) {
 		return
 	}
 	m.write(protocol.Success(request.ID, encoded))
+}
+
+func mergeThreadCandidates(store *state.Store, candidates map[string][]threadCandidate, withoutID []map[string]any) []map[string]any {
+	threads := make([]map[string]any, 0, len(candidates)+len(withoutID))
+	for threadID, threadCandidates := range candidates {
+		selected := chooseThreadCandidate(store, threadID, threadCandidates)
+		threads = append(threads, selected.thread)
+		// The persisted assignment is authoritative when both the source and
+		// the migrated copy are visible. This prevents the concurrent account
+		// list responses from moving a failed-over chat back to Primary.
+		if _, assigned := store.ThreadOwner(threadID); !assigned {
+			_ = store.SetThreadOwner(threadID, selected.account.ID)
+		}
+	}
+	threads = append(threads, withoutID...)
+	return threads
 }
 
 func chooseThreadCandidate(store *state.Store, threadID string, candidates []threadCandidate) threadCandidate {
