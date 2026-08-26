@@ -103,9 +103,10 @@ quota failover.
 - The installed manifest is `0.5.0` with the reviewed Store hash above and the
   `windows-reviewed-*` compatibility profile.
 - The live control API reported one selected authority (the selected Aira
-  account), four connected quota sources, pool `healthy`, 400% maximum, 347%
-  confirmed remaining, 53% confirmed used, four known, zero unknown, four
-  available, zero depleted, and zero active leases at the observation point.
+  account), four connected quota sources, pool `healthy`, 400% maximum, 341%
+  confirmed remaining, 59% confirmed used, four known, zero unknown, four
+  available, zero depleted, and zero active leases at the final observation
+  point.
 - The selected `/v1/usage` payload carried the Aira authority identity, while
   `/v1/usage/all` returned four account entries with zero collection errors.
 - Every Relay account config points `CODEX_HOME` at its Relay-owned home. The
@@ -125,10 +126,10 @@ official app.
 
 The permission-gated read-only quota probe reached all four currently
 configured Relay source homes and exited `0`; every source returned a valid
-quota response with `rateLimitReachedType: null`. The observed primary used
-percentages were `18%`, `0%`, `0%`, `0%`; secondary used percentages were `3%`,
-`16%`, `16%`, `2%`. This proves quota visibility and source isolation, not a
-quota rejection transition.
+quota response with `rateLimitReachedType: null`. The final observed primary
+used percentages were `25%`, `0%`, `0%`, `0%`; secondary used percentages were
+`4%`, `16%`, `16%`, `2%`. This proves quota visibility and source isolation,
+not a quota rejection transition.
 
 No real-account A→B, B→C or C→D quota rejection was induced in this run. No
 live long-session chat, existing-chat resume, archived-chat continuation or
