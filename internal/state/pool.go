@@ -53,6 +53,63 @@ type QuotaEvidence struct {
 	AuthState    string   `json:"authenticationState,omitempty"`
 }
 
+// PoolError is the last credential-free error observed while serving the
+// unified Relay API. It is deliberately attached to the pool rather than to
+// an account so the native client can explain a failed request without
+// exposing which private credential source was selected behind the API.
+type PoolError struct {
+	Code       string `json:"code"`
+	HTTPStatus int    `json:"httpStatus,omitempty"`
+	Message    string `json:"message"`
+	OccurredAt int64  `json:"occurredAt"`
+}
+
+const (
+	maxPoolErrorCodeLength    = 80
+	maxPoolErrorMessageLength = 320
+)
+
+func sanitizePoolErrorCode(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > maxPoolErrorCodeLength {
+		return "relay_pool_error"
+	}
+	for _, character := range value {
+		if (character < 'a' || character > 'z') &&
+			(character < 'A' || character > 'Z') &&
+			(character < '0' || character > '9') &&
+			character != '_' && character != '-' && character != '.' {
+			return "relay_pool_error"
+		}
+	}
+	return value
+}
+
+func sanitizePoolErrorMessage(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	if value == "" {
+		return "Relay Pool request failed"
+	}
+	runes := []rune(value)
+	if len(runes) > maxPoolErrorMessageLength {
+		return string(runes[:maxPoolErrorMessageLength])
+	}
+	return value
+}
+
+func normalizePoolError(value *PoolError) *PoolError {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	copy.Code = sanitizePoolErrorCode(copy.Code)
+	copy.Message = sanitizePoolErrorMessage(copy.Message)
+	if copy.HTTPStatus < 0 {
+		copy.HTTPStatus = 0
+	}
+	return &copy
+}
+
 func (e QuotaEvidence) ExplicitlyDepleted() bool {
 	if e.LimitReached || (e.Allowed != nil && !*e.Allowed) {
 		return true
@@ -134,6 +191,7 @@ type PoolState struct {
 	Health            string                           `json:"health"`
 	FailoverCount     uint64                           `json:"failoverCount"`
 	LastTransition    PoolTransition                   `json:"lastTransition,omitempty"`
+	LastError         *PoolError                       `json:"lastError,omitempty"`
 }
 
 type TaskRecord struct {
@@ -257,6 +315,7 @@ func normalizePoolState(value PoolState, accounts []Account) PoolState {
 	if _, exists := accountIDs[value.ActiveSourceID]; !exists {
 		value.ActiveSourceID = ""
 	}
+	value.LastError = normalizePoolError(value.LastError)
 	value.SourceOrder = order
 	recomputePoolMetrics(&value)
 	return value
@@ -333,6 +392,10 @@ func clonePoolState(value PoolState) PoolState {
 	for id, lease := range value.ActiveLeases {
 		lease.ExcludedSources = slices.Clone(lease.ExcludedSources)
 		value.ActiveLeases[id] = lease
+	}
+	if value.LastError != nil {
+		lastError := *value.LastError
+		value.LastError = &lastError
 	}
 	return value
 }
@@ -448,6 +511,52 @@ func (s *Store) UpdatePool(expectedRevision uint64, update func(*PoolState) erro
 		return previous, err
 	}
 	return clonePoolState(s.pool), nil
+}
+
+// RecordPoolError persists a bounded, credential-free explanation for the
+// latest failed Relay request. Callers must pass a safe message; this method
+// still strips control characters and limits the length before persistence so
+// an upstream response can never turn into unbounded UI/state data.
+func (s *Store) RecordPoolError(code string, httpStatus int, message string) error {
+	if s == nil {
+		return errors.New("pool state is unavailable")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	previous := clonePoolState(s.pool)
+	now := time.Now().UnixMilli()
+	s.pool.LastError = normalizePoolError(&PoolError{
+		Code: code, HTTPStatus: httpStatus, Message: message, OccurredAt: now,
+	})
+	s.pool.Revision++
+	if err := s.saveLocked(); err != nil {
+		s.pool = previous
+		return err
+	}
+	return nil
+}
+
+// ClearPoolError removes a stale request failure after a subsequent Relay
+// request completes successfully. The event stream still carries the
+// original failure toast, while the Usage & billing surface reflects the
+// current healthy state instead of a historical error.
+func (s *Store) ClearPoolError() error {
+	if s == nil {
+		return errors.New("pool state is unavailable")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pool.LastError == nil {
+		return nil
+	}
+	previous := clonePoolState(s.pool)
+	s.pool.LastError = nil
+	s.pool.Revision++
+	if err := s.saveLocked(); err != nil {
+		s.pool = previous
+		return err
+	}
+	return nil
 }
 
 func sourceEligible(source CredentialSourceState) bool {
@@ -868,6 +977,11 @@ func (s *Store) CompletePoolLease(leaseID string) error {
 		s.pool.Health = "healthy"
 		s.pool.Revision++
 	}
+	// A successful request supersedes any previous terminal error. The
+	// failure remains available through the already-published router-error
+	// event, but the Usage & billing surface should not keep showing stale
+	// diagnostics after the pool has recovered.
+	s.pool.LastError = nil
 	recomputePoolMetrics(&s.pool)
 	s.pool.ActiveLeases[leaseID] = lease
 	delete(s.pool.ActiveLeases, leaseID)

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/LightHaru/codex-relay/internal/backend"
 	"github.com/LightHaru/codex-relay/internal/protocol"
@@ -80,6 +81,30 @@ func TestSafeProtocolErrorKeepsRelayDetailButRedactsArbitraryText(t *testing.T) 
 	detail, code = safeProtocolError(protocol.Failure(protocol.StringID("request"), -32002, "secret upstream diagnostic C:\\Users\\ADMIN\\.codex\\auth.json"))
 	if detail != "the selected subscription must sign in again" || code != -32002 || strings.Contains(detail, "auth.json") {
 		t.Fatalf("arbitrary protocol error was not reduced safely: detail=%q code=%d", detail, code)
+	}
+}
+
+func TestUnifiedProtocolErrorUsesRecentPoolCauseForNative32600(t *testing.T) {
+	multiplexer, store := newCoordinatorTestMux(t)
+	multiplexer.gatewayBaseURL = "http://127.0.0.1:48124/v1"
+	multiplexer.gatewayToken = "relay-test-token"
+	if err := store.RecordPoolError("pool_exhausted", 429, "Relay Pool has exhausted every usable quota source"); err != nil {
+		t.Fatal(err)
+	}
+	events, unsubscribe := multiplexer.SubscribeEvents()
+	defer unsubscribe()
+	multiplexer.publishProtocolError(protocol.Message{Method: "turn/completed", Params: []byte(`{"turn":{"error":{"code":-32600,"message":"exceeded retry limit, last status: 429 Too Many Requests"}}}`)}, "thread-1")
+	select {
+	case event := <-events:
+		if event.Type != "router-error" || !strings.Contains(event.Message, "Relay Pool has exhausted every usable quota source") {
+			t.Fatalf("native wrapper hid recent pool cause: %#v", event)
+		}
+		data, ok := event.Data.(map[string]any)
+		if !ok || data["poolCode"] != "pool_exhausted" || data["httpStatus"] != 429 {
+			t.Fatalf("pool diagnostics were not attached: %#v", event.Data)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for router-error event")
 	}
 }
 

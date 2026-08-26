@@ -286,12 +286,13 @@ test("Usage & billing shows a bounded account error instead of an exclamation-on
       { accountId: "secondary", connected: true, error: "fetch usage: status 429" },
     ],
   }, host, { resetRenderVersion: 1 }, 1, {
-    status: { pool: { connectedSubscriptions: 2, maximumPercent: 200, confirmedRemainingPercent: 100, knownSubscriptions: 1, unknownSubscriptions: 1, availableSubscriptions: 1, health: "degraded" } },
+    status: { pool: { connectedSubscriptions: 2, maximumPercent: 200, confirmedRemainingPercent: 100, knownSubscriptions: 1, unknownSubscriptions: 1, availableSubscriptions: 1, health: "degraded", lastError: { code: "upstream_http_error", httpStatus: 502, message: "Relay Pool model service rejected the request" } } },
   });
   const text = collectText(host);
   assert.match(text, /Susan/);
   assert.match(text, /Error/);
   assert.match(text, /fetch usage: status 429/);
+  assert.match(text, /Last Relay request issue: Relay Pool model service rejected the request \(HTTP 502; code upstream_http_error\)/);
 });
 
 test("a stale browser-login poll cannot close a newer sign-in dialog", () => {

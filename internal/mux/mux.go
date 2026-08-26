@@ -1701,9 +1701,26 @@ func (m *Multiplexer) publishProtocolError(message protocol.Message, threadID st
 	if detail == "" {
 		return
 	}
+	poolError := (*state.PoolError)(nil)
+	if m.unifiedPoolEnabled() {
+		detail, poolError = m.preferRecentPoolError(detail, code)
+	}
 	stamp := time.Now().UnixNano()
 	if m.now != nil {
 		stamp = m.now().UnixNano()
+	}
+	data := map[string]any{
+		"code":   code,
+		"method": message.Method,
+	}
+	if poolError != nil {
+		// Keep the native numeric code for compatibility while exposing the
+		// bounded Relay classification to diagnostics. The renderer uses the
+		// message, so a native -32600 wrapper can no longer hide a pool 429.
+		data["poolCode"] = poolError.Code
+		if poolError.HTTPStatus > 0 {
+			data["httpStatus"] = poolError.HTTPStatus
+		}
 	}
 	event := Event{
 		ID:        fmt.Sprintf("router-error:%d", stamp),
@@ -1711,12 +1728,57 @@ func (m *Multiplexer) publishProtocolError(message protocol.Message, threadID st
 		ThreadID:  strings.TrimSpace(threadID),
 		Timestamp: stamp / int64(time.Millisecond),
 		Message:   detail,
-		Data: map[string]any{
-			"code":   code,
-			"method": message.Method,
-		},
+		Data:      data,
 	}
 	m.publish(event)
+}
+
+// preferRecentPoolError bridges the two protocol layers used by the unified
+// gateway. A native app-server may collapse an HTTP 429 returned by the local
+// Gateway into a generic JSON-RPC -32600 or "exceeded retry limit" message.
+// The Gateway has already persisted a bounded pool error by that point, so
+// prefer it while it is recent. This keeps the public error credential-free
+// and tells the operator whether the failure was pool exhaustion, auth, or an
+// upstream transport problem instead of showing only an exclamation mark.
+func (m *Multiplexer) preferRecentPoolError(detail string, nativeCode int) (string, *state.PoolError) {
+	if m == nil || m.store == nil {
+		return detail, nil
+	}
+	pool := m.store.PoolState()
+	last := pool.LastError
+	if last == nil || strings.TrimSpace(last.Message) == "" || last.OccurredAt <= 0 {
+		return detail, nil
+	}
+	now := time.Now()
+	if m.now != nil {
+		now = m.now()
+	}
+	// LastError is cleared after a successful Gateway request. A short grace
+	// period covers the app-server's failed turn/completed notification while
+	// avoiding reuse of an unrelated error from an older task.
+	age := now.UnixMilli() - last.OccurredAt
+	if age < 0 || age > 30_000 {
+		return detail, nil
+	}
+	lower := strings.ToLower(strings.TrimSpace(detail))
+	generic := lower == "relay request failed" ||
+		strings.HasPrefix(lower, "relay request failed (code") ||
+		strings.Contains(lower, "exceeded retry limit") ||
+		strings.Contains(lower, "too many requests")
+	if !generic && nativeCode != -32600 {
+		return detail, nil
+	}
+	parts := []string{last.Message}
+	if last.HTTPStatus > 0 && !strings.Contains(strings.ToLower(last.Message), "http ") {
+		parts = append(parts, fmt.Sprintf("HTTP %d", last.HTTPStatus))
+	}
+	if last.Code != "" && !strings.Contains(strings.ToLower(last.Message), strings.ToLower(last.Code)) {
+		parts = append(parts, "code "+last.Code)
+	}
+	if len(parts) == 1 {
+		return parts[0], last
+	}
+	return fmt.Sprintf("%s (%s)", parts[0], strings.Join(parts[1:], "; ")), last
 }
 
 // safeProtocolError extracts a stable error reason without forwarding account

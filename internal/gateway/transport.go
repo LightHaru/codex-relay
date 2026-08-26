@@ -99,7 +99,7 @@ func PrimeCredentialSources(store *state.Store) error {
 
 func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if t.Store == nil {
-		writePoolError(writer, http.StatusServiceUnavailable, "Relay Pool state is unavailable")
+		t.fail(writer, http.StatusServiceUnavailable, "pool_state_unavailable", "Relay Pool state is unavailable")
 		return
 	}
 	if request.Method != http.MethodPost || request.URL.Path != "/v1/responses" {
@@ -107,12 +107,12 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 		return
 	}
 	if !t.authorized(request) {
-		writePoolError(writer, http.StatusUnauthorized, "Relay Pool transport authentication failed")
+		t.fail(writer, http.StatusUnauthorized, "transport_authentication_failed", "Relay Pool transport authentication failed")
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(request.Body, maxRequestBytes+1))
 	if err != nil || len(body) > maxRequestBytes {
-		writePoolError(writer, http.StatusRequestEntityTooLarge, "Relay Pool request is too large")
+		t.fail(writer, http.StatusRequestEntityTooLarge, "request_too_large", "Relay Pool request is too large")
 		return
 	}
 	leaseID := firstHeader(request, "X-Client-Request-Id", "X-Request-Id")
@@ -125,7 +125,15 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 		LogicalTurnID: logicalTurnID, ThreadID: request.Header.Get("Thread-Id"),
 	}, t.leaseTTL())
 	if err != nil {
-		writePoolError(writer, http.StatusTooManyRequests, "Relay Pool has exhausted every usable quota source")
+		code := "pool_exhausted"
+		message := "Relay Pool has exhausted every usable quota source"
+		status := http.StatusTooManyRequests
+		if strings.Contains(strings.ToLower(err.Error()), "already has active lease") {
+			code = "logical_turn_already_active"
+			message = "Relay Pool already has an active request for this logical turn"
+			status = http.StatusConflict
+		}
+		t.fail(writer, status, code, message)
 		return
 	}
 	stopHeartbeat := make(chan struct{})
@@ -144,7 +152,7 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 			if errors.As(dispatchErr, &credentialErr) {
 				if t.DisableFailover {
 					_ = t.Store.AbortPoolLease(lease.LeaseID, "compatibility-profile-unknown")
-					writePoolError(writer, http.StatusServiceUnavailable, "Relay Pool compatibility profile requires review")
+					t.fail(writer, http.StatusServiceUnavailable, "compatibility_profile_review", "Relay Pool compatibility profile requires review")
 					return
 				}
 				lease, err = t.Store.MarkPoolSourceUnavailable(lease.LeaseID, lease.SourceID, "credential source requires attention")
@@ -152,11 +160,11 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 					continue
 				}
 				_ = t.Store.AbortPoolLease(lease.LeaseID, "pool-depleted")
-				writePoolError(writer, http.StatusTooManyRequests, "Relay Pool has exhausted every usable quota source")
+				t.fail(writer, http.StatusTooManyRequests, "pool_exhausted", "Relay Pool has exhausted every usable quota source")
 				return
 			}
 			_ = t.Store.AbortPoolLease(lease.LeaseID, "transport-error")
-			writePoolError(writer, http.StatusBadGateway, "Relay Pool could not reach the model service (transport error)")
+			t.fail(writer, http.StatusBadGateway, "upstream_transport_error", "Relay Pool could not reach the model service (transport error)")
 			return
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
@@ -166,7 +174,7 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 				if isCredentialResponse(response.StatusCode, responseBody) {
 					if t.DisableFailover {
 						_ = t.Store.AbortPoolLease(lease.LeaseID, "compatibility-profile-unknown")
-						writePoolError(writer, http.StatusServiceUnavailable, "Relay Pool compatibility profile requires review")
+						t.fail(writer, http.StatusServiceUnavailable, "compatibility_profile_review", "Relay Pool compatibility profile requires review")
 						return
 					}
 					lease, err = t.Store.MarkPoolSourceUnavailable(lease.LeaseID, lease.SourceID, "credential source authentication failed")
@@ -174,22 +182,22 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 						continue
 					}
 					_ = t.Store.AbortPoolLease(lease.LeaseID, "pool-depleted")
-					writePoolError(writer, http.StatusTooManyRequests, "Relay Pool has exhausted every usable quota source")
+					t.fail(writer, http.StatusTooManyRequests, "pool_exhausted", "Relay Pool has exhausted every usable quota source")
 					return
 				}
 				_ = t.Store.AbortPoolLease(lease.LeaseID, "upstream-error")
-				writePoolError(writer, http.StatusBadGateway, safeUpstreamHTTPError(response.StatusCode, responseBody))
+				t.fail(writer, http.StatusBadGateway, "upstream_http_error", safeUpstreamHTTPError(response.StatusCode, responseBody))
 				return
 			}
 			if t.DisableFailover {
 				_ = t.Store.AbortPoolLease(lease.LeaseID, "compatibility-profile-unknown")
-				writePoolError(writer, http.StatusServiceUnavailable, "Relay Pool compatibility profile requires review")
+				t.fail(writer, http.StatusServiceUnavailable, "compatibility_profile_review", "Relay Pool compatibility profile requires review")
 				return
 			}
 			lease, err = t.Store.MarkPoolQuotaRejected(lease.LeaseID, lease.SourceID, "structured upstream quota rejection", 0)
 			if err != nil {
 				_ = t.Store.AbortPoolLease(lease.LeaseID, "pool-depleted")
-				writePoolError(writer, http.StatusTooManyRequests, "Relay Pool has exhausted every usable quota source")
+				t.fail(writer, http.StatusTooManyRequests, "pool_exhausted", "Relay Pool has exhausted every usable quota source")
 				return
 			}
 			continue
@@ -197,7 +205,7 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 		if !isSSE(response.Header) {
 			response.Body.Close()
 			_ = t.Store.AbortPoolLease(lease.LeaseID, "unsupported-response")
-			writePoolError(writer, http.StatusBadGateway, fmt.Sprintf("Relay Pool model service returned an unsupported response (content type %q)", safeContentType(response.Header.Get("Content-Type"))))
+			t.fail(writer, http.StatusBadGateway, "unsupported_upstream_response", fmt.Sprintf("Relay Pool model service returned an unsupported response (content type %q)", safeContentType(response.Header.Get("Content-Type"))))
 			return
 		}
 		lease, _ = t.Store.MarkPoolLeaseProgress(lease.LeaseID, state.PoolLeaseAccepted, false, false)
@@ -206,23 +214,28 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 			_ = t.Store.CompletePoolLease(lease.LeaseID)
 			return
 		}
-		if errors.Is(streamErr, errLateQuotaRejection) || errors.Is(streamErr, errCommittedStreamFailure) {
+		if errors.Is(streamErr, errLateQuotaRejection) {
+			t.recordPoolError("stream_quota_after_output", http.StatusOK, "Relay Pool stopped safely after output began; retry the next turn to continue without replaying side effects.")
+			return
+		}
+		if errors.Is(streamErr, errCommittedStreamFailure) {
+			t.recordPoolError("stream_recovery_required", http.StatusOK, "Relay Pool stopped safely after output began; retry the next turn to continue without replaying side effects.")
 			return
 		}
 		if !errors.Is(streamErr, errEarlyQuotaRejection) {
 			_ = t.Store.AbortPoolLease(lease.LeaseID, "stream-error")
-			writePoolError(writer, http.StatusBadGateway, "Relay Pool stream ended before completion (upstream stream error)")
+			t.fail(writer, http.StatusBadGateway, "upstream_stream_error", "Relay Pool stream ended before completion (upstream stream error)")
 			return
 		}
 		if t.DisableFailover {
 			_ = t.Store.AbortPoolLease(lease.LeaseID, "compatibility-profile-unknown")
-			writePoolError(writer, http.StatusServiceUnavailable, "Relay Pool compatibility profile requires review")
+			t.fail(writer, http.StatusServiceUnavailable, "compatibility_profile_review", "Relay Pool compatibility profile requires review")
 			return
 		}
 		lease, err = t.Store.MarkPoolQuotaRejected(lease.LeaseID, result.SourceID, "structured stream quota rejection", 0)
 		if err != nil {
 			_ = t.Store.AbortPoolLease(lease.LeaseID, "pool-depleted")
-			writePoolError(writer, http.StatusTooManyRequests, "Relay Pool has exhausted every usable quota source")
+			t.fail(writer, http.StatusTooManyRequests, "pool_exhausted", "Relay Pool has exhausted every usable quota source")
 			return
 		}
 	}
@@ -449,7 +462,15 @@ func readSSEEvent(reader *bufio.Reader) ([]byte, error) {
 
 func classifySSEEvent(event []byte) (category string, visible, sideEffect bool) {
 	lower := strings.ToLower(string(event))
-	if (strings.Contains(lower, "quota") || strings.Contains(lower, "usage_limit") || strings.Contains(lower, "rate_limit")) &&
+	// Providers do not use one stable error code for a streaming quota
+	// rejection. In particular, ChatGPT can return HTTP 200 followed by a
+	// response.failed event whose only useful signal is the human-readable
+	// “You've hit your usage limit” message. Treat both code-style and
+	// message-style limit markers as pre-output quota failures so the exact
+	// request can continue through the next source in the same pool.
+	if (strings.Contains(lower, "quota") || strings.Contains(lower, "usage_limit") || strings.Contains(lower, "usage limit") ||
+		strings.Contains(lower, "rate_limit") || strings.Contains(lower, "rate limit") || strings.Contains(lower, "limit_reached") ||
+		strings.Contains(lower, "too many requests") || strings.Contains(lower, "insufficient_quota")) &&
 		(strings.Contains(lower, "response.failed") || strings.Contains(lower, "error")) {
 		return "quota", false, false
 	}
@@ -561,10 +582,26 @@ func isSSE(header http.Header) bool {
 	return strings.Contains(strings.ToLower(header.Get("Content-Type")), "text/event-stream")
 }
 
+func (t *Transport) recordPoolError(code string, status int, message string) {
+	if t == nil || t.Store == nil {
+		return
+	}
+	_ = t.Store.RecordPoolError(code, status, message)
+}
+
+func (t *Transport) fail(writer http.ResponseWriter, status int, code, message string) {
+	t.recordPoolError(code, status, message)
+	writePoolErrorCode(writer, status, code, message)
+}
+
 func writePoolError(writer http.ResponseWriter, status int, message string) {
+	writePoolErrorCode(writer, status, "relay_pool_unavailable", message)
+}
+
+func writePoolErrorCode(writer http.ResponseWriter, status int, code, message string) {
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(status)
 	_ = json.NewEncoder(writer).Encode(map[string]any{"error": map[string]any{
-		"type": "relay_pool_error", "code": "relay_pool_unavailable", "message": message,
+		"type": "relay_pool_error", "code": code, "message": message,
 	}})
 }

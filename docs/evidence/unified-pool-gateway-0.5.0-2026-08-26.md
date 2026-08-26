@@ -48,8 +48,9 @@ account IDs, prompts, model output, or full history paths.
   provides the all-account billing view used only inside the native Usage &
   billing content page.
 - Account snapshot errors, pool HTTP errors and protocol errors are bounded to
-  an actionable reason/code. The renderer receives a Relay error event/toast;
-  it no longer relies on a lone exclamation mark.
+  an actionable reason/code. If app-server wraps a pool HTTP 429 as JSON-RPC
+  `-32600`, the renderer receives the recent pool cause, HTTP status and Relay
+  code in its event/toast; it no longer relies on a lone exclamation mark.
 - Unknown compatibility profiles keep the single Relay API but disable
   credential failover and fail closed with a sanitized pool error.
 - An upstream HTTP 401 quarantines only the affected credential source and
@@ -102,9 +103,9 @@ quota failover.
   `Codex Relay.lnk` shortcut, and preserved the pool ledger/source homes.
 - The installed manifest is `0.5.0` with the reviewed Store hash above and the
   `windows-reviewed-*` compatibility profile.
-- The live control API reported one selected authority (the selected Aira
-  account), four connected quota sources, pool `healthy`, 400% maximum, 341%
-  confirmed remaining, 59% confirmed used, four known, zero unknown, four
+- The live control API reported one selected Relay authority, four connected
+  quota sources, pool `healthy`, 400% maximum, 330% confirmed remaining, 70%
+  confirmed used, four known, zero unknown, four
   available, zero depleted, and zero active leases at the final observation
   point.
 - The selected `/v1/usage` payload carried the Aira authority identity, while
@@ -122,13 +123,24 @@ fake credentials (featured-plugin HTTP 401, PowerShell shell snapshot support,
 and Windows long plugin paths). They did not fail the Relay test or alter the
 official app.
 
-## Read-only live-account evidence — LIVE PENDING for failover
+## Authorized real-account smoke — PASS (normal turn only)
+
+Four short, harmless turns were sent through the installed Relay app-server and
+Gateway, one per currently configured isolated source home. Each run returned
+`turnAccepted=true`, `turn/completed`, no terminal error, and exit code `0`.
+The temporary homes were removed after the run. These are real provider turns,
+so they consumed a small amount of the corresponding subscriptions' quota.
+They prove credential validity and the normal Relay path for all four sources;
+they do not prove failover because no source returned a live 429/usage-limit
+rejection.
+
+## Read-only live-account evidence — PASS for visibility; failover LIVE PENDING
 
 The permission-gated read-only quota probe reached all four currently
 configured Relay source homes and exited `0`; every source returned a valid
 quota response with `rateLimitReachedType: null`. The final observed primary
-used percentages were `25%`, `0%`, `0%`, `0%`; secondary used percentages were
-`4%`, `16%`, `16%`, `2%`. This proves quota visibility and source isolation,
+used percentages were `36%`, `0%`, `0%`, `0%`; secondary used percentages were
+`6%`, `16%`, `16%`, `2%`. This proves quota visibility and source isolation,
 not a quota rejection transition.
 
 No real-account A→B, B→C or C→D quota rejection was induced in this run. No
@@ -137,6 +149,33 @@ Goal continuation is marked `PASS`. The next authorized run must use a
 genuinely depleted source first, then record each structured rejection,
 pool/lease revision, canonical hash/size, same thread/session/Goal identity,
 duplicate/lost-output assertions and the final exit code.
+
+## Streaming quota regression — PASS
+
+The working-tree patch reproduces the provider shape that caused the reported
+"quota còn 200% nhưng request lỗi" symptom: HTTP 200 followed by
+`response.failed` whose only error text is `You've hit your usage limit`.
+The gateway now classifies that event before output, retries the identical
+request in the same unified pool, marks only the rejected source depleted and
+clears the transient error after the fallback completes. Terminal errors are
+persisted as bounded `pool.lastError` data and are rendered inside the native
+Usage & billing content column.
+
+Validation completed after reinstalling the independent Windows Relay:
+
+- `go test ./internal/state ./internal/gateway ./internal/mux -count=1` — PASS.
+- Native `-32600`/retry-limit error projection unit test — PASS; the recent
+  bounded pool cause is included in the Relay event.
+- `node --test ui/test-windows-router-menu.cjs` — 29/29 PASS; full JavaScript
+  suite — 32/32 PASS.
+- Installed `codex.real.exe` unified-pool E2E — PASS, one task authority,
+  message-only A→B failover plus B→C→D quota fixture, 20 logical turns and
+  identical pre-output request bodies.
+- Read-only quota probe — PASS for all four configured source homes; no source
+  reported `rateLimitReachedType`.
+- Final live Relay status — `healthy`, 4 connected, 400% maximum, 330%
+  confirmed remaining, 4 known, 0 unknown, 4 available, 0 depleted and 0
+  active leases.
 
 Read-only probe (does not print credentials or raw provider JSON):
 

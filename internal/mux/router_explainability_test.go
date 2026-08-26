@@ -132,6 +132,9 @@ func TestUnifiedPoolStatusPublishesOnePoolWithoutCredentialSources(t *testing.T)
 	pool := newRoutingTestPool(t, 20, 20, 30, 30)
 	pool.multiplexer.gatewayBaseURL = "http://127.0.0.1:1/v1"
 	pool.multiplexer.gatewayToken = "local-test-token"
+	if err := pool.store.RecordPoolError("upstream_http_error", 502, "Relay Pool model service rejected the request"); err != nil {
+		t.Fatal(err)
+	}
 
 	status := pool.multiplexer.RouterStatus(context.Background())
 	if status.ContractVersion != 2 || status.StateVersion != state.PoolSchemaVersion {
@@ -139,6 +142,9 @@ func TestUnifiedPoolStatusPublishesOnePoolWithoutCredentialSources(t *testing.T)
 	}
 	if status.Pool.PoolID != state.DefaultPoolID || status.Pool.RoutingCapacityOnly {
 		t.Fatalf("unified pool projection = %#v", status.Pool)
+	}
+	if status.Pool.LastError == nil || status.Pool.LastError.Code != "upstream_http_error" || status.Pool.LastError.HTTPStatus != 502 {
+		t.Fatalf("unified pool did not project the bounded last error: %#v", status.Pool.LastError)
 	}
 	if len(status.Accounts) != 0 || len(status.AccountRoutes) != 0 || len(status.AccountHealth) != 0 || len(status.Capabilities) != 0 || len(status.EligiblePool) != 0 || status.NextCandidate != nil || len(status.Handoffs) != 0 || len(status.Timeline) != 0 {
 		t.Fatalf("unified public status exposed source-level routing state: %#v", status)

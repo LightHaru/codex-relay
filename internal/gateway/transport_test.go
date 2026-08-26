@@ -287,6 +287,38 @@ func TestTransportRetriesEarlyStreamQuotaButNotLateQuota(t *testing.T) {
 	}
 }
 
+func TestTransportRetriesMessageOnlyStreamingUsageLimit(t *testing.T) {
+	store, ids := gatewayTestStore(t, 2)
+	var used []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		account := request.Header.Get("ChatGPT-Account-ID")
+		used = append(used, account)
+		writer.Header().Set("Content-Type", "text/event-stream")
+		if account == "upstream-1" {
+			// This is the provider shape that previously slipped through the
+			// classifier: HTTP 200 plus a response.failed event with only a
+			// human-readable usage-limit message and no machine code.
+			_, _ = io.WriteString(writer, "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"You've hit your usage limit. Try again later.\"}}}\n\n")
+			return
+		}
+		_, _ = io.WriteString(writer, successfulSSE())
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{Store: store, UpstreamURL: upstream.URL, Client: upstream.Client()})
+	defer gateway.Close()
+	status, body := sendGatewayRequest(t, gateway, "message-only-stream-quota")
+	if status != http.StatusOK || !strings.Contains(body, "response.completed") || fmt.Sprint(used) != "[upstream-1 upstream-2]" {
+		t.Fatalf("message-only stream quota was not retried: status=%d used=%v body=%q", status, used, body)
+	}
+	p := store.PoolState()
+	if p.Sources[ids[0]].MembershipState != state.SourceDepleted || p.ActiveSourceID != ids[1] {
+		t.Fatalf("message-only stream quota did not quarantine first source: %#v", p)
+	}
+	if p.LastError != nil {
+		t.Fatalf("successful fallback retained a stale pool error: %#v", p.LastError)
+	}
+}
+
 func TestTransportSanitizesNonQuotaUpstreamErrors(t *testing.T) {
 	store, _ := gatewayTestStore(t, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -306,6 +338,10 @@ func TestTransportSanitizesNonQuotaUpstreamErrors(t *testing.T) {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("sanitized error leaked %q: %s", forbidden, body)
 		}
+	}
+	lastError := store.PoolState().LastError
+	if lastError == nil || lastError.Code != "upstream_http_error" || lastError.HTTPStatus != http.StatusBadGateway || !strings.Contains(lastError.Message, "HTTP 500") {
+		t.Fatalf("terminal upstream error was not recorded for diagnostics: %#v", lastError)
 	}
 }
 

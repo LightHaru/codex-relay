@@ -41,7 +41,7 @@ prove that:
 | --- | --- | --- |
 | Responses custom provider | `wire_api=responses`, local base URL, SSE | Keep one Relay API in safe mode; disable credential failover |
 | Stable thread/session headers | IDs are forwarded to one gateway lease | Reject request without retry |
-| Structured quota rejection | HTTP/SSE machine-readable quota signal | Mark source depleted and retry pre-output |
+| Structured or message-only quota rejection | HTTP/SSE quota code or a `response.failed` message such as `usage limit`/`rate limit` | Mark source depleted and retry pre-output |
 | Generic timeout/network error | Not quota evidence | Return sanitized transport error |
 | Partial stream continuation | Must be proven by upstream primitive | Recovery-required; never replay |
 | Thread/history resume | Authority home and checkpoint path verify | Recovery-required; no source move |
@@ -64,7 +64,8 @@ not bypass compatibility checks.
 
 The repository contains deterministic state/gateway tests and a real installed
 `codex.real.exe` test with a fake upstream. Those prove the one-authority and
-same-request A→B→C→D mechanics, not real account quota consumption. Real-account
-transitions must be recorded separately as `LIVE PASS` only when each rejection
-and subsequent source is observed without token/PII disclosure. Otherwise use
-`LIVE PENDING`.
+same-request A→B→C→D mechanics. Authorized real-account smoke turns separately
+prove credential validity and normal routing, but must not be described as
+failover evidence. A real-account transition is `LIVE PASS` only when each
+provider rejection and subsequent source is observed without token/PII
+disclosure; otherwise use `LIVE PENDING`.

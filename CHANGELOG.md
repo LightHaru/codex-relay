@@ -20,6 +20,14 @@ this project uses [Semantic Versioning](https://semver.org/).
   upstream fixture, plus bilingual documentation for installation, security,
   compatibility and evidence reporting.
 
+### Fixed
+
+- Streaming `response.failed` events that report only a human-readable
+  `usage limit`/`rate limit` message now trigger the same pre-output retry as
+  structured quota codes. The pool status also retains a bounded error code
+  and message so Usage & billing can explain a terminal Relay failure instead
+  of leaving the native UI with only an exclamation mark.
+
 ### Changed
 
 - Usage & billing and task badges now show one aggregate pool rather than
@@ -33,8 +41,9 @@ this project uses [Semantic Versioning](https://semver.org/).
 
 - Go state, gateway and mux suites pass, including CAS/concurrency, migration,
   rollback, sanitization, task lease persistence and real app-server E2E.
-- Live real-account A→B→C→D quota evidence is intentionally not claimed until
-  an authorized run records it with a sanitized report.
+- Four authorized real-account Relay smoke turns passed through isolated source
+  homes. No source returned a live quota rejection in that run, so real
+  A→B→C→D depletion evidence remains intentionally unclaimed.
 
 Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.0
 

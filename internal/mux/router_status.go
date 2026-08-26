@@ -38,21 +38,22 @@ type RouterStatus struct {
 // schedulable quota as one additive pool: five fully available subscriptions
 // report 500/500%.
 type PoolStatus struct {
-	PoolID                    string  `json:"poolId"`
-	Revision                  uint64  `json:"revision"`
-	Health                    string  `json:"health"`
-	ActiveLeaseCount          int     `json:"activeLeaseCount"`
-	ConnectedSubscriptions    int     `json:"connectedSubscriptions"`
-	MaximumPercent            float64 `json:"maximumPercent"`
-	ConfirmedRemainingPercent float64 `json:"confirmedRemainingPercent"`
-	ConfirmedUsedPercent      float64 `json:"confirmedUsedPercent"`
-	KnownSubscriptions        int     `json:"knownSubscriptions"`
-	UnknownSubscriptions      int     `json:"unknownSubscriptions"`
-	AvailableSubscriptions    int     `json:"availableSubscriptions"`
-	DepletedSubscriptions     int     `json:"depletedSubscriptions"`
-	NextResetAt               int64   `json:"nextResetAt,omitempty"`
-	QuotaUpdatedAt            int64   `json:"quotaUpdatedAt,omitempty"`
-	RoutingCapacityOnly       bool    `json:"routingCapacityOnly"`
+	PoolID                    string           `json:"poolId"`
+	Revision                  uint64           `json:"revision"`
+	Health                    string           `json:"health"`
+	ActiveLeaseCount          int              `json:"activeLeaseCount"`
+	ConnectedSubscriptions    int              `json:"connectedSubscriptions"`
+	MaximumPercent            float64          `json:"maximumPercent"`
+	ConfirmedRemainingPercent float64          `json:"confirmedRemainingPercent"`
+	ConfirmedUsedPercent      float64          `json:"confirmedUsedPercent"`
+	KnownSubscriptions        int              `json:"knownSubscriptions"`
+	UnknownSubscriptions      int              `json:"unknownSubscriptions"`
+	AvailableSubscriptions    int              `json:"availableSubscriptions"`
+	DepletedSubscriptions     int              `json:"depletedSubscriptions"`
+	NextResetAt               int64            `json:"nextResetAt,omitempty"`
+	QuotaUpdatedAt            int64            `json:"quotaUpdatedAt,omitempty"`
+	RoutingCapacityOnly       bool             `json:"routingCapacityOnly"`
+	LastError                 *state.PoolError `json:"lastError,omitempty"`
 }
 
 type RoutingScoreComponents struct {
@@ -246,6 +247,7 @@ func (m *Multiplexer) unifiedPoolStatus() PoolStatus {
 	result := PoolStatus{
 		PoolID: pool.PoolID, Revision: pool.Revision, Health: pool.Health,
 		ActiveLeaseCount: len(pool.ActiveLeases), RoutingCapacityOnly: false,
+		LastError: pool.LastError,
 	}
 	for _, sourceID := range pool.SourceOrder {
 		source, ok := pool.Sources[sourceID]

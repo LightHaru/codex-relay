@@ -176,7 +176,15 @@ func TestUnifiedGatewayUsesOneTaskAuthorityAndFailsOverInsideRequest(t *testing.
 		sourceCalls[source]++
 		call := sourceCalls[source]
 		upstreamMu.Unlock()
-		if source == "source-a" || ((source == "source-b" || source == "source-c") && call == 3) {
+		if source == "source-a" {
+			// Exercise the real provider failure shape that motivated this
+			// regression test: a successful HTTP response followed by a
+			// message-only streaming usage-limit failure.
+			writer.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(writer, "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"You've hit your usage limit. Try again later.\"}}}\n\n")
+			return
+		}
+		if (source == "source-b" || source == "source-c") && call == 3 {
 			writer.Header().Set("Content-Type", "application/json")
 			writer.WriteHeader(http.StatusTooManyRequests)
 			_, _ = io.WriteString(writer, `{"error":{"code":"usage_limit_reached"}}`)

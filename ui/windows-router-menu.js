@@ -74,6 +74,7 @@
       poolHealth: "Health", activeRequests: "Active requests", quotaKnownSources: "Quota-known sources",
       quotaTiming: "Quota timing", nextPoolReset: "Next pool reset", quotaChecked: "Quota checked",
       unknownQuotaCount: "Unknown quota", noResetReported: "No reset reported", waitingQuotaEvidence: "Waiting for quota evidence",
+      lastError: "Last Relay request issue",
     },
     vi: {
       title: "Định tuyến Relay", controller: "Tài khoản điều khiển Relay", current: "Tài khoản chạy task hiện tại",
@@ -104,6 +105,7 @@
       poolHealth: "Tình trạng", activeRequests: "Request đang chạy", quotaKnownSources: "Nguồn đã xác nhận quota",
       quotaTiming: "Thời gian quota", nextPoolReset: "Lần reset pool kế tiếp", quotaChecked: "Quota được kiểm tra lúc",
       unknownQuotaCount: "Quota chưa rõ", noResetReported: "Chưa có thời gian reset", waitingQuotaEvidence: "Đang chờ bằng chứng quota",
+      lastError: "Lỗi request Relay gần nhất",
     },
   };
 
@@ -1738,6 +1740,16 @@
       });
     append(details, operational, timing);
     section.append(details);
+    const lastError = status?.lastError;
+    const lastErrorMessage = normalize(lastError?.message).slice(0, 320);
+    if (lastErrorMessage) {
+      const suffixParts = [];
+      if (Number(lastError?.httpStatus) > 0) suffixParts.push(`HTTP ${Number(lastError.httpStatus)}`);
+      const lastErrorCode = normalize(lastError?.code).slice(0, 80);
+      if (lastErrorCode) suffixParts.push(`code ${lastErrorCode}`);
+      const suffix = suffixParts.length > 0 ? ` (${suffixParts.join("; ")})` : "";
+      section.append(make("div", "codex-mux-win-usage-error", `${routingText("lastError")}: ${lastErrorMessage}${suffix}`));
+    }
     const usageAccounts = make("div", "codex-mux-win-usage-accounts");
     const collectionEntries = new Map(
       (Array.isArray(collection?.accounts) ? collection.accounts : [])

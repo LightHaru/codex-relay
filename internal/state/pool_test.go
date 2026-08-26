@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -145,6 +146,55 @@ func TestPoolProjectionTracksQuotaEvidenceAndHealth(t *testing.T) {
 	}
 	if pool.Health != "warming" {
 		t.Fatalf("unknown quota evidence produced health=%q", pool.Health)
+	}
+}
+
+func TestPoolErrorIsBoundedPersistedAndClearedAfterRecovery(t *testing.T) {
+	root := t.TempDir()
+	primaryHome := filepath.Join(root, "primary")
+	store, err := Open(filepath.Join(root, "mux"), primaryHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	longMessage := strings.Repeat("provider detail ", 40) + "\nsecret-newline"
+	if err := store.RecordPoolError("upstream_http_error", 502, longMessage); err != nil {
+		t.Fatal(err)
+	}
+	first := store.PoolState()
+	if first.LastError == nil || first.LastError.Code != "upstream_http_error" || first.LastError.HTTPStatus != 502 {
+		t.Fatalf("pool error was not recorded: %#v", first.LastError)
+	}
+	if len([]rune(first.LastError.Message)) > maxPoolErrorMessageLength || strings.ContainsAny(first.LastError.Message, "\r\n") {
+		t.Fatalf("pool error was not bounded: %#v", first.LastError)
+	}
+	first.LastError.Message = "mutated caller copy"
+	if store.PoolState().LastError.Message == "mutated caller copy" {
+		t.Fatal("PoolState returned a mutable LastError alias")
+	}
+
+	reopened, err := Open(filepath.Join(root, "mux"), primaryHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.PoolState().LastError == nil || reopened.PoolState().LastError.Code != "upstream_http_error" {
+		t.Fatalf("pool error was not persisted: %#v", reopened.PoolState().LastError)
+	}
+	if err := reopened.ClearPoolError(); err != nil {
+		t.Fatal(err)
+	}
+	if reopened.PoolState().LastError != nil {
+		t.Fatalf("pool error was not cleared: %#v", reopened.PoolState().LastError)
+	}
+}
+
+func TestPoolErrorRejectsUnsafeCodeAndDefaultsEmptyMessage(t *testing.T) {
+	store, _ := newPoolTestStore(t)
+	if err := store.RecordPoolError("bad code/with secret", 0, "\n\t"); err != nil {
+		t.Fatal(err)
+	}
+	errorState := store.PoolState().LastError
+	if errorState == nil || errorState.Code != "relay_pool_error" || errorState.Message != "Relay Pool request failed" {
+		t.Fatalf("unsafe pool error was not normalized: %#v", errorState)
 	}
 }
 
