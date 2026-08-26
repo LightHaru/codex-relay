@@ -142,3 +142,31 @@ func TestThreadIDParserSupportsReviewedProtocolShapes(t *testing.T) {
 		}
 	}
 }
+
+func TestUnifiedManagementErrorsDoNotPublishPublicRouterError(t *testing.T) {
+	multiplexer := &Multiplexer{gatewayBaseURL: "http://127.0.0.1:48124/v1", gatewayToken: "test-token"}
+	for _, method := range []string{
+		"account/read",
+		"account/rateLimits/read",
+		"app/list",
+		"mcpServerStatus/list",
+		"plugin/list",
+	} {
+		if multiplexer.shouldPublishRoutedProtocolError(method) {
+			t.Fatalf("unified management method %q should not publish router-error", method)
+		}
+	}
+	if !multiplexer.shouldPublishRoutedProtocolError("turn/start") {
+		t.Fatal("task turn failures must remain visible")
+	}
+}
+
+func TestUnifiedUnscopedStartupErrorDoesNotPublishPublicRouterError(t *testing.T) {
+	multiplexer := &Multiplexer{gatewayBaseURL: "http://127.0.0.1:48124/v1", gatewayToken: "test-token"}
+	if multiplexer.shouldPublishNotificationProtocolError("") {
+		t.Fatal("unscoped unified startup error should not publish router-error")
+	}
+	if !multiplexer.shouldPublishNotificationProtocolError("thread-1") {
+		t.Fatal("thread-scoped task error must remain visible")
+	}
+}

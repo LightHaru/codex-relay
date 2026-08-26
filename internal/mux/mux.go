@@ -607,13 +607,34 @@ func activeBoundMethod(method string) bool {
 func managementScopedMethod(method string) bool {
 	return strings.HasPrefix(method, "account/") ||
 		strings.HasPrefix(method, "mcpServer/") ||
-		strings.HasPrefix(method, "plugin/")
+		strings.HasPrefix(method, "mcpServerStatus/") ||
+		strings.HasPrefix(method, "plugin/") ||
+		strings.HasPrefix(method, "app/")
 }
 
 func managementInboundMethod(method string) bool {
 	return method == "account/login/completed" || method == "account/updated" ||
 		method == "account/rateLimits/updated" || strings.HasPrefix(method, "mcpServer/") ||
 		strings.HasPrefix(method, "plugin/")
+}
+
+// shouldPublishRoutedProtocolError keeps management-plane failures out of the
+// public Relay error stream in unified-pool mode. Account, plugin, app, and
+// MCP requests are issued while the native UI is warming or refreshing its
+// settings; the native response is still forwarded to that UI, and account
+// diagnostics remain available through the control API. Emitting a
+// router-error for those background requests makes the desktop app show a
+// misleading toast even though the user has not started a task.
+func (m *Multiplexer) shouldPublishRoutedProtocolError(method string) bool {
+	return !m.unifiedPoolEnabled() || !managementScopedMethod(method)
+}
+
+// shouldPublishNotificationProtocolError applies the same startup-noise
+// guard to app-server error notifications. Task/turn failures carry a thread
+// ID and remain visible; unscoped errors are management/initialization noise
+// in unified mode and must not be presented as a failed user request.
+func (m *Multiplexer) shouldPublishNotificationProtocolError(threadID string) bool {
+	return !m.unifiedPoolEnabled() || strings.TrimSpace(threadID) != ""
 }
 
 func (m *Multiplexer) unifiedPoolEnabled() bool {
@@ -1568,7 +1589,8 @@ func (m *Multiplexer) handleInbound(inbound backend.Inbound) {
 			// inspectable: the stock UI may reduce an app-server failure to a lone
 			// exclamation mark, so publish a bounded Relay error for the local
 			// status surface and toast.
-			if message.Error != nil && !isModelCapacityResponse(message) {
+			if message.Error != nil && !isModelCapacityResponse(message) &&
+				m.shouldPublishRoutedProtocolError(route.method) {
 				m.publishProtocolError(message, threadIDFromParams(route.message.Params))
 			}
 			m.learnThreadOwner(route, inbound.AccountID, message.Result)
@@ -1602,10 +1624,10 @@ func (m *Multiplexer) handleInbound(inbound backend.Inbound) {
 		return
 	}
 	if message.Method == "error" || (message.Method == "turn/completed" && protocolNotificationHasError(message)) {
-		if !isUsageLimitNotification(message) {
-			m.publishProtocolError(message, threadIDFromTurnNotification(message.Params))
-		}
 		threadID := threadIDFromTurnNotification(message.Params)
+		if !isUsageLimitNotification(message) && m.shouldPublishNotificationProtocolError(threadID) {
+			m.publishProtocolError(message, threadID)
+		}
 		if threadID != "" && isUsageLimitNotification(message) && !m.unifiedPoolEnabled() {
 			if active, ok := m.takeActiveTurnForFailure(threadID, inbound.AccountID); ok {
 				m.recordAccountFailure(inbound.AccountID, "quota rejected active turn")

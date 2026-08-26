@@ -51,6 +51,11 @@ account IDs, prompts, model output, or full history paths.
   an actionable reason/code. If app-server wraps a pool HTTP 429 as JSON-RPC
   `-32600`, the renderer receives the recent pool cause, HTTP status and Relay
   code in its event/toast; it no longer relies on a lone exclamation mark.
+- Unified startup management errors are no longer projected as public
+  `router-error` toasts: account, app, plugin, and MCP response failures stay
+  on their native settings request, while task/turn failures remain visible.
+  Regression tests cover both routed management responses and unscoped
+  initialization notifications.
 - Unknown compatibility profiles keep the single Relay API but disable
   credential failover and fail closed with a sanitized pool error.
 - An upstream HTTP 401 quarantines only the affected credential source and

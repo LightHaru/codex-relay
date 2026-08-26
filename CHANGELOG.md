@@ -27,6 +27,12 @@ this project uses [Semantic Versioning](https://semver.org/).
   structured quota codes. The pool status also retains a bounded error code
   and message so Usage & billing can explain a terminal Relay failure instead
   of leaving the native UI with only an exclamation mark.
+- Background management and initialization failures (`account/*`,
+  `app/*`, plugin, and MCP refreshes) no longer appear as public Relay error
+  toasts when the app is merely starting. The native response is still
+  forwarded to the requesting settings surface, and the bounded diagnostic
+  remains available in Relay account/Usage status; task- and turn-scoped
+  failures still show their actionable error notification.
 
 ### Changed
 
