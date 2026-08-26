@@ -8,7 +8,7 @@ account IDs, prompts, model output, or full history paths.
 | Item | Value |
 | --- | --- |
 | Version | `0.5.0` (installed and working tree) |
-| Source commit | `fce9fce` (`main`, pushed to `origin`) |
+| Source commit | `f9afd86` (`main`, implementation commit) |
 | Pool schema | `3` |
 | Public contract | Router/route contract `2` in unified mode |
 | Installed source | Microsoft Store Codex `26.818.8289.0` |
