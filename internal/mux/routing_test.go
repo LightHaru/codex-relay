@@ -1,11 +1,15 @@
 package mux
 
 import (
+	"bytes"
 	"encoding/json"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/LightHaru/codex-relay/internal/backend"
 	"github.com/LightHaru/codex-relay/internal/protocol"
+	"github.com/LightHaru/codex-relay/internal/state"
 )
 
 func TestIsUsageLimitResponseRecognizesStructuredError(t *testing.T) {
@@ -168,5 +172,49 @@ func TestUnifiedUnscopedStartupErrorDoesNotPublishPublicRouterError(t *testing.T
 	}
 	if !multiplexer.shouldPublishNotificationProtocolError("thread-1") {
 		t.Fatal("thread-scoped task error must remain visible")
+	}
+}
+
+func TestUnifiedSecondaryManagementResponseReachesRendererWithoutToast(t *testing.T) {
+	root := t.TempDir()
+	store, err := state.Open(filepath.Join(root, "mux"), filepath.Join(root, "primary"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondary, err := store.AddAccount("Subscription 2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	multiplexer := &Multiplexer{
+		gatewayBaseURL: "http://127.0.0.1:48124/v1",
+		gatewayToken:   "test-token",
+		store:          store,
+		output:         &output,
+		externalRoutes: make(map[string]externalRoute),
+		events:         make(map[chan Event]struct{}),
+	}
+	events, unsubscribe := multiplexer.SubscribeEvents()
+	defer unsubscribe()
+	id := protocol.StringID("app-list-1")
+	request := protocol.Request("app/list", id, json.RawMessage(`{}`))
+	multiplexer.externalRoutes[protocol.RequestIDKey(id)] = externalRoute{
+		accountID: secondary.ID,
+		method:    request.Method,
+		message:   request,
+	}
+	failure := protocol.Failure(id, -32600, "background refresh failed")
+	raw, err := protocol.Encode(failure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	multiplexer.handleInbound(backend.Inbound{AccountID: secondary.ID, Message: failure, Raw: raw})
+	if !bytes.Contains(output.Bytes(), raw) {
+		t.Fatalf("secondary management response was not forwarded: %s", output.String())
+	}
+	select {
+	case event := <-events:
+		t.Fatalf("management response emitted public router-error: %#v", event)
+	default:
 	}
 }

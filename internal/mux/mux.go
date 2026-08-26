@@ -1529,7 +1529,13 @@ func (m *Multiplexer) inboundLoop(ctx context.Context) {
 
 func (m *Multiplexer) handleInbound(inbound backend.Inbound) {
 	message := inbound.Message
-	if m.unifiedPoolEnabled() && inbound.AccountID != m.taskAuthorityID() && !managementInboundMethod(message.Method) {
+	// Responses are correlated with an external route below, so they must be
+	// accepted from a management-only child as well as from the public task
+	// authority. Without this exception, scoped app/MCP/plugin responses from a
+	// selected secondary subscription were discarded before the renderer could
+	// receive them, which surfaced as a generic startup/settings error.
+	if m.unifiedPoolEnabled() && inbound.AccountID != m.taskAuthorityID() &&
+		message.Method != "" && !managementInboundMethod(message.Method) {
 		return
 	}
 	if isVisibleOutputNotification(message.Method, message.Params) {
