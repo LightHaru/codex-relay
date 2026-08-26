@@ -1,182 +1,135 @@
-# Architecture
+# Unified Pool Gateway architecture
 
-> The routing core now uses the v2 shared-memory scheduler, generation and
-> transactional handoff design documented in
-> [`SHARED-MEMORY-ROUTER.md`](SHARED-MEMORY-ROUTER.md). Where older wording below
-> describes strict round-robin or permanently sticky ownership, the v2 document
-> is authoritative.
+## Product boundary
 
-The independently built desktop uses bundle identifier `app.cdxmux.multi`; its
-Computer Use helper uses `com.cdxmux.sky.CUAService`. Neither identifier is used
-by the official ChatGPT installation. These identifiers and the `.codex-mux`
-state directory remain stable across the product rename so existing macOS
-privacy grants, connected accounts, and persisted thread routes continue to
-work.
+Codex Relay exposes one logical gateway to the desktop client. The public
+contract has one Relay API, one identity (`relay`), one task authority, one
+thread/session identity, one Goal state and one canonical history. Connected
+ChatGPT subscriptions are credential sources only. They are never public task
+owners and a credential transition is never a chat move.
 
-Codex Relay replaces the copied app's bundled `codex` executable
-with a small Go multiplexer and keeps the original binary beside it as
-`codex.real`.
+```text
+Codex client
+    │ POST /v1/responses (local custom provider)
+    ▼
+RelayGatewayWorker
+    ├── TaskAuthority (one app-server connection)
+    ├── PoolQuotaLedger (state v3)
+    ├── canonical Relay Memory
+    └── hidden credential transport
+          ├── source A
+          ├── source B
+          ├── source C
+          └── source D
+```
 
-## Request routing
+The per-source app-server processes that remain in the process table are
+management-only children for sign-in, account settings and quota probes. They
+do not receive ordinary thread, turn, Goal, tool or approval traffic. The
+single task authority is the only child receiving the public task stream.
 
-The desktop app opens one JSON-RPC app-server connection to the multiplexer.
-The multiplexer starts one real app-server child for every enabled account,
-each with its own `CODEX_HOME` and `CODEX_SQLITE_HOME`.
+## Components
 
-New threads use persistent weighted-deficit round robin across enabled,
-connected subscriptions with capacity in every reported quota window. Fresh
-short/long quota sets the weight, a low-water reserve protects the final 5%,
-active reservations prevent over-allocation, and unknown quota remains a
-last-resort pool. Deficits and cursor survive restart.
-Quota eligibility fuses the isolated child's `account/rateLimits/read` result
-with that account's authenticated native Usage projection. A 100%-used window
-or explicit deny is ineligible even if another flag says `allowed=true`.
-Observed turn rejection is the strongest signal and invalidates cached Usage;
-an open circuit closes from a newer reset generation with confirmed capacity,
-or from a successful half-open probation turn when an older build exposes no
-stable reset generation.
-The controller/Primary owns shared Relay configuration but is not a routing
-lock for new chats. On Windows, it is never used as a bridge to the Store app's
-native home. Once a thread ID is known, `state.json` persists its owner.
-Requests, responses, approvals, and notifications are rewritten only as needed
-to preserve one coherent desktop session. The initial `initialize` handshake is
-sent to all children concurrently so one disconnected account cannot block the
-whole desktop connection.
+### RelayGatewayWorker
 
-Worker selection follows Sticky, Balanced (default), or Rotate policies and is
-evaluated only at completed-turn boundaries. A change checkpoints canonical
-Relay Memory, incrementally materializes the rollout, resumes the target, and
-only then advances ownership generation. A legacy/unassigned thread that is already in a Relay-owned home is
-located from that home before the same failover path is applied. If a known
-thread still points at the former native Store `sessions` directory, Relay may
-read and copy that single rollout into the selected Relay home before resume;
-it never reads native credentials/configuration, starts a child there, or edits
-the source file. Store-only history is not scanned or imported in bulk.
+The worker owns the client connection, thread and session IDs, logical turn IDs,
+Goal lifecycle, tool/approval callbacks, canonical history and output stream.
+It starts one loopback listener with a random bearer token. The custom provider
+configuration is installed only in the authority home:
 
-Each logical turn has a persistent attempt ID and request hash. The per-thread
-coordinator rejects a second active `turn/start`, keeps approval/tool callbacks
-bound to the child that created them, and suppresses late notifications from a
-superseded route generation. Immediate or pre-side-effect quota rejection can
-select a new worker once; a quota failure after visible output or a side effect
-marks the task `recovery-required`.
-Goal continuations may originate inside app-server without a renderer
-`turn/start`. A quota-failed terminal Goal turn is therefore deduplicated by
-thread/turn/account and handed off from its completed rollout boundary; no
-previous request, command, or tool side effect is replayed.
+- `model_provider = relay_pool`;
+- `base_url = http://127.0.0.1:<random>/v1`;
+- `wire_api = responses`;
+- `env_key` is the loopback token;
+- upstream credentials are never written into the authority configuration.
 
-The handoff journal uses `PREPARED`, `COPIED`, `RESUMED`, `COMMITTED`,
-`FAILED`, and `ROLLED_BACK`. Source ownership remains authoritative through
-resume and `thread/read` verification. Relay compares the target thread ID,
-rollout SHA-256, and size before one atomic state transition advances owner and
-generation. Startup rolls any uncommitted phase back to the source generation,
-which is safe because resume alone never authorizes target output.
-Checkpointing first asks the loaded source child for its exact rollout path.
-When only disk recovery is available, matching locked-file sibling generations
-are ranked by modification generation rather than lexical filename so a stale
-original cannot replace newer history.
+Public `RouterStatus` and `ThreadRouteStatus` contract v2 return the stable pool
+identity and aggregate state. Source IDs, emails, worker lists, candidates,
+handoffs and raw error text are management/diagnostic data, not normal task
+protocol data.
 
-For the distinct upstream error `Selected model is at capacity`, the mux keeps
-the exact original `turn/start` request (including `model`) and retries it on
-the same account at most three times with short exponential backoff. This is
-intentionally separate from quota failover: a busy model must not silently
-change the selected model or consume a different subscription.
+### PoolQuotaLedger
 
-## Account isolation
+`state.PoolState` is the single source of routing truth. It stores pool ID and
+revision, source membership/evidence, active source, active leases, normalized
+headroom, reset metadata, health, failover count and the last transition. The
+per-source evidence remains private so the ledger can make an informed choice:
+`allowed`, limit reached, short/long windows, reset epoch, observation time,
+authentication and circuit state.
 
-On Windows, the independent Relay primary uses
-`%APPDATA%\Codex Relay\codex-home`; the official Store app keeps using
-`%USERPROFILE%\.codex`. Added Relay accounts use
-`%USERPROFILE%\.codex-mux\accounts\<id>\codex-home`. The two desktop apps never
-share a primary credential store or conversation database. On platforms where
-Relay is launched without the Windows copy marker, the existing native
-`~/.codex` primary behavior is retained for compatibility.
+`TaskRecord` binds one thread to canonical generation/checkpoint, Goal ID when
+available, the active lease and recovery state. `PoolLease` binds one logical
+turn to one pool, session, thread and credential source. CAS updates and one
+transition record make concurrent quota notifications idempotent.
 
-Managed configuration is copied from the Relay primary account, excluding
-credential-store settings and project trust. Every Relay account, including
-the primary, forces file-backed CLI and MCP OAuth credentials. When an older
-Windows state file still points its `primary` entry at `%USERPROFILE%\.codex`,
-Relay changes only that metadata to the dedicated home and removes the old
-native-chat owner mappings; it never copies, deletes, or edits the official
-Codex credentials or configuration. A requested legacy rollout may be read and
-copied into an isolated Relay home as described above; the official source
-file remains unchanged.
+### Sticky source state machine
 
-## Desktop integration
+```text
+PROBATION → ACTIVE_SOURCE → (quota evidence) → DEPLETED
+                                      │
+                                      ▼
+                                next eligible source
+```
 
-The patcher extracts `app.asar`, verifies exact upstream anchors, inserts the
-account UI, disables the copied app's native self-update, and repacks the
-archive with an updated integrity hash. On Windows, the native Settings → Usage
-& billing page remains the shell; the version-neutral DOM bridge mounts an
-in-flow **All connected subscriptions** panel only inside that page's content
-column. The version-pinned renderer bridge keeps the native single-account
-Usage and reset controls compatible with older profiles, while Account settings
-calls the token-protected per-account `rate-limit-resets` endpoints and renders
-the same **Usage limit resets** cards. The panel reads `/v1/usage/all` and never
-uses the official Codex credential as a Relay fallback.
-OAuth tokens stay outside the renderer. Windows also injects a small,
-version-neutral update bridge. It checks the Router's source-only GitHub release
-manifest, then hands a hash-verified archive to an updater executable stored
-outside the managed app so the app can quit and restart safely. The official
-Store package is never replaced. The app receives a separate Chromium profile
-and URL scheme.
+The current source is reused for every new request until explicit evidence says
+it cannot continue. Valid evidence is a structured quota/rate-limit rejection,
+`quota_exhausted`, `usage_limit`, `limit_reached=true`, `allowed=false`, a
+100%-used reported window, or an explicit app-server credential rejection.
+Timeouts and generic network failures never prove quota exhaustion. Unknown
+quota is probation-only and is not represented as confirmed headroom.
 
-The copied Computer Use service, Node runtime, and callers are re-signed under
-one Apple team. The helper uses a separate bundle identity and socket, avoiding
-the official app's privacy grants and app-group container.
+At A→B, the same request bytes, model, session, thread and logical turn are
+retried before any visible output. The authority connection and public identity
+remain unchanged. There is no round-robin, fair-share, pre-emptive balancing,
+new task, or owner-change event.
 
-## Plugin behavior
+## Output and side-effect safety
 
-Plugin definitions and managed MCP configuration are shared. The Plugins page
-adds an account selector and marks Apps, MCP status, and MCP OAuth requests with
-the selected account ID. The multiplexer removes that private routing marker
-before forwarding the strict RPC request to the chosen child.
+The transport buffers a bounded prefix of SSE data. It may retry a structured
+quota failure while no assistant output, tool call, approval, command, file
+mutation or other side effect has been committed. Once a visible item or side
+effect is observed, replay is unsafe: the lease becomes `RECOVERY_REQUIRED`,
+the source is depleted for future turns, and Relay emits a pool-level recovery
+event without exposing upstream account details. It does not claim a seamless
+continuation unless the upstream protocol supplies and the test proves a
+continuation primitive.
 
-## Control API
+When all sources are depleted, the request ends with one sanitized pool error;
+the failed turn is not recorded as completed. A reset or a newly connected
+source can serve the same task later. Successful completion clears the active
+lease and recovery marker without changing the task identity.
 
-The renderer talks to a loopback-only HTTP service on port 48123. All private
-routes require a random 256-bit token. CORS is limited to the copied app's
-known packaged renderer origins (`app://-` and the opaque `null`/`file://`
-origin emitted when Windows loads `webview/index.html` from a file URL). The
-trusted renderer responses also authorize Chromium Private Network Access for
-the loopback target. The service exposes account metadata, per-subscription
-Usage payloads with an explicit collection summary, controller-scoped native
-Usage payloads, profile data, thread ownership,
-login/logout actions, a persisted pending-login marker/cancellation action,
-per-account reset-credit read/redeem endpoints, and an authenticated SSE event
-stream; it never returns OAuth tokens. Browser sign-in
-is initiated by the official child app-server, which owns the localhost
-callback and writes credentials only in that subscription's isolated Codex
-home.
+## Canonical history and restart
 
-Routing observability is exposed through token-protected
-`/v1/router/status`, `/v1/thread-route`, `/v1/routing/decisions`,
-`/v1/routing/policy`, `/v1/thread-route/recover`, and `/v1/events`. API
-checkpoints redact the local rollout path. Routing decisions and attempt
-ledgers contain fixed reasons, event types, account/thread identifiers, and a
-SHA-256 request digest—not prompt text, file content, OAuth data, or arbitrary
-upstream errors.
+The authority home is the only writable task home. Existing chats are verified
+against a Relay canonical checkpoint; source files are regular JSONL files under
+managed `sessions`/`archived_sessions` roots. Paths are containment-checked,
+symlink/reparse escapes are rejected, bytes and SHA-256 are verified, and
+Windows access-denied replacement uses an immutable sibling generation. The
+official `%USERPROFILE%\\.codex` home is never used as Relay's writable home.
 
-### Explainability projection (contract version 1)
+On startup, expired leases become recovery-required, TaskRecords remain bound
+to the same thread, and v3 state is loaded without choosing a new worker. A
+continuous `state.json.v2.rollback` projection contains a conservative v2
+view with no reservations and recovery markers for active tasks. Its manifest
+contains a SHA-256 and source pool revision.
 
-Release 0.4.1 does not create a second routing state. `RouterStatus` and
-`ThreadRouteStatus` project the authoritative state-v2 scheduler, account
-health, `ThreadRoute`, `TurnAttempt`, decision ledger and handoff journal into a
-versioned, null-safe renderer contract. The projection distinguishes the
-Controller, canonical owner, active-turn worker, last-completed worker,
-last-confirmed quota-consuming worker, previous worker and policy-aware next
-candidate. `nextCandidateIsPreview` is always explicit.
+## UI and management boundary
 
-Candidate preview clones scheduler data and performs no state write. Sticky
-previews the eligible owner; Rotate previews the first eligible non-owner;
-Balanced sorts the quota-weighted deficit score. Reading status cannot advance
-cursor/dispatches, change deficits, reserve a turn, open a circuit, create a
-migration or update ownership.
+The native Settings shell remains authoritative. The pool summary is inserted
+only in the content column of Settings → Usage & billing. It does not add a
+sidebar item or fixed overlay and does not replace other Settings pages. Source
+emails and sign-in/remove controls remain in the account-management dialog.
+Normal task badges show only pool name, generation, aggregate remaining quota,
+health and recovery state.
 
-Timeline rows are a bounded merge of the existing decision, turn and handoff
-journals. Deterministic IDs such as `<attempt>:turn_reserved`,
-`<attempt>:reservation_rolled_back` and `<handoff>:committed` deduplicate one
-logical event. The decision ledger remains capped at 1,000 and the per-task
-response returns at most 100 recent rows. Terminal quota attribution runs
-asynchronously and stores only before/after effective percentages and
-observation times. A consuming worker is confirmed only when the newer
-snapshot decreases; unchanged/reset-crossing data remains unconfirmed.
+## Compatibility and release boundary
+
+Renderer patching is exact-anchor and version-profile based. Unknown Store
+bundles fail closed. The router core is version-neutral only after the actual
+app-server `responses` schema and headers are probed. A release is not claimed
+compatible merely because Go tests pass; it needs the profile fixtures,
+app-server probe, migration tests and (when authorized) live evidence.
+
+Do not publish, push, overwrite the production app or install over a running
+Relay until all local gates pass and the release operator confirms the step.

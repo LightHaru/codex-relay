@@ -14,7 +14,7 @@
 (() => {
   "use strict";
 
-  const { BrowserWindow, ipcMain, shell } = require("electron");
+  const { app, BrowserWindow, ipcMain, shell } = require("electron");
   const { randomUUID } = require("node:crypto");
 
   const OPEN_CHANNEL = "codex-mux:open-isolated-login";
@@ -22,6 +22,48 @@
   const CLOSED_CHANNEL = "codex-mux:isolated-login-closed";
   const EXTERNAL_MODE = "external";
   const flows = new Map();
+
+  // Give the copied process its own Windows application identity.  The
+  // upstream executable is still named ChatGPT.exe for compatibility with
+  // the Store layout, but AppUserModelId/name are what Windows uses to group
+  // taskbar entries and identify the app beside the official Codex install.
+  function enforceAppIdentity() {
+    try {
+      app.setName?.("Codex Relay");
+      app.setAppUserModelId?.("com.lightharu.codexrelay");
+    } catch {
+      // Older Electron builds may not expose one of these APIs; the branded
+      // window title remains the fallback identity in that case.
+    }
+  }
+  enforceAppIdentity();
+  // The upstream startup routine may set its own AppUserModelId during the
+  // ready phase. Re-apply the Relay identity after that routine has run so
+  // Windows does not group this copy under the official Codex/ChatGPT entry.
+  app.on("ready", () => {
+    enforceAppIdentity();
+    setImmediate(enforceAppIdentity);
+  });
+
+  // The copied Store bundle otherwise keeps the upstream window title
+  // ("ChatGPT"), which is confusing when the official app is open beside
+  // Relay. This listener is injected only into the independent Relay ASAR;
+  // it never runs in the Microsoft Store installation.
+  function brandWindow(window) {
+    if (window == null || window.isDestroyed?.()) return;
+    try {
+      window.on("page-title-updated", (event) => {
+        event.preventDefault();
+        window.setTitle("Codex Relay");
+      });
+      window.setTitle("Codex Relay");
+    } catch {
+      // A transient child window may close while the startup hook runs.
+    }
+  }
+
+  app.on("browser-window-created", (_event, window) => brandWindow(window));
+  for (const window of BrowserWindow.getAllWindows()) brandWindow(window);
 
   function verifiedInitialURL(value) {
     if (typeof value !== "string" || value.length === 0 || value.length > 16_384) return null;

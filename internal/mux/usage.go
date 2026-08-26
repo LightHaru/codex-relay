@@ -198,11 +198,12 @@ type UsageStatusCollection struct {
 	FailedCount    int                  `json:"failedCount"`
 }
 
-// UsageStatus returns the native Usage payload for the Router controller. If
-// that account's isolated credentials have expired or are temporarily
-// unavailable, it tries another enabled subscription before reporting an
-// error. This keeps the native Settings -> Usage page useful without making
-// the renderer depend on the original Store app browser session.
+// UsageStatus returns the native Usage payload for the Router controller. In
+// unified-pool mode the selected Relay authority is the only account allowed
+// to answer this account-shaped endpoint: falling back to another credential
+// would make the native page claim that the selected identity has a different
+// plan or balance. The all-subscription dashboard uses UsageStatusAll for the
+// pool view and can therefore keep every source visible independently.
 func (m *Multiplexer) UsageStatus(ctx context.Context) (json.RawMessage, error) {
 	if m.store == nil {
 		return nil, fmt.Errorf("subscription store is unavailable")
@@ -210,6 +211,13 @@ func (m *Multiplexer) UsageStatus(ctx context.Context) (json.RawMessage, error) 
 	accounts := orderedUsageAccounts(m.store.Accounts())
 	if len(accounts) == 0 {
 		return nil, fmt.Errorf("no enabled subscription is available for usage")
+	}
+	if m.unifiedPoolEnabled() {
+		controller, ok := m.store.Controller()
+		if !ok || !controller.Enabled {
+			return nil, fmt.Errorf("Relay task authority is unavailable")
+		}
+		accounts = []state.Account{controller}
 	}
 	endpoint := m.usageEndpoint
 	if endpoint == "" {
@@ -230,6 +238,9 @@ func (m *Multiplexer) UsageStatus(ctx context.Context) (json.RawMessage, error) 
 			filepath.Join(account.CodexHome, "auth.json"),
 		)
 		if err == nil {
+			if m.unifiedPoolEnabled() {
+				return status, nil
+			}
 			// The native composer asks for one account-shaped Usage object. If
 			// the Router Primary is exhausted, returning that payload would make
 			// the shared UI display an out-of-messages banner even though another

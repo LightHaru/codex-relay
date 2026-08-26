@@ -2,6 +2,7 @@ package state
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,7 +16,7 @@ import (
 	"time"
 )
 
-const stateVersion = 2
+const stateVersion = 3
 
 type Account struct {
 	ID         string `json:"id"`
@@ -34,6 +35,22 @@ type Account struct {
 }
 
 type persistedState struct {
+	Version      int                            `json:"version"`
+	Accounts     []Account                      `json:"accounts"`
+	ThreadOwner  map[string]string              `json:"threadOwner,omitempty"`
+	ThreadRoutes map[string]ThreadRoute         `json:"threadRoutes"`
+	Scheduler    SchedulerState                 `json:"scheduler"`
+	Health       map[string]AccountHealth       `json:"accountHealth"`
+	Attempts     map[string]TurnAttempt         `json:"turnAttempts"`
+	Handoffs     map[string]Handoff             `json:"handoffs"`
+	Checkpoints  map[string]CanonicalCheckpoint `json:"canonicalCheckpoints"`
+	Decisions    []RoutingDecision              `json:"routingDecisions"`
+	Capabilities map[string]AccountCapability   `json:"accountCapabilities"`
+	Pool         PoolState                      `json:"pool"`
+	Tasks        map[string]TaskRecord          `json:"tasks"`
+}
+
+type persistedV2Projection struct {
 	Version      int                            `json:"version"`
 	Accounts     []Account                      `json:"accounts"`
 	ThreadOwner  map[string]string              `json:"threadOwner,omitempty"`
@@ -68,6 +85,8 @@ type Store struct {
 	checkpoints            map[string]CanonicalCheckpoint
 	decisions              []RoutingDecision
 	capabilities           map[string]AccountCapability
+	pool                   PoolState
+	tasks                  map[string]TaskRecord
 }
 
 func Open(root, primaryCodexHome string) (*Store, error) {
@@ -109,6 +128,7 @@ func open(root, primaryCodexHome, legacyPrimaryHome string, isolatedPrimary bool
 		handoffs:               make(map[string]Handoff),
 		checkpoints:            make(map[string]CanonicalCheckpoint),
 		capabilities:           make(map[string]AccountCapability),
+		tasks:                  make(map[string]TaskRecord),
 	}
 	stateNeedsSave := false
 	data, err := os.ReadFile(store.path)
@@ -123,7 +143,7 @@ func open(root, primaryCodexHome, legacyPrimaryHome string, isolatedPrimary bool
 			data = backupData
 			stateNeedsSave = true
 		}
-		if persisted.Version != 1 && persisted.Version != stateVersion {
+		if persisted.Version != 1 && persisted.Version != 2 && persisted.Version != stateVersion {
 			return nil, fmt.Errorf("unsupported state version %d", persisted.Version)
 		}
 		store.accounts = persisted.Accounts
@@ -150,14 +170,41 @@ func open(root, primaryCodexHome, legacyPrimaryHome string, isolatedPrimary bool
 		if persisted.Capabilities != nil {
 			store.capabilities = persisted.Capabilities
 		}
+		if persisted.Tasks != nil {
+			store.tasks = persisted.Tasks
+		}
 		if persisted.Version == 1 {
-			if err := writeMigrationBackup(store.path, data); err != nil {
+			if err := writeVersionedMigrationBackup(store.path, data, 1); err != nil {
 				return nil, err
 			}
 			for threadID, accountID := range store.owners {
 				store.routes[threadID] = ThreadRoute{ThreadID: threadID, AccountID: accountID, Generation: 1, UpdatedAt: time.Now().UnixMilli()}
 			}
 			stateNeedsSave = true
+		}
+		if persisted.Version <= 2 {
+			if persisted.Version == 2 {
+				if err := writeVersionedMigrationBackup(store.path, data, 2); err != nil {
+					return nil, err
+				}
+			}
+			store.pool = defaultPoolState(store.accounts)
+			for threadID, route := range store.routes {
+				recovery := ""
+				if route.RecoveryRequired || route.ActiveAttemptID != "" || route.ActiveMigrationID != "" {
+					recovery = "recovery-required"
+				}
+				store.tasks[threadID] = TaskRecord{
+					ThreadID: threadID, CanonicalGeneration: route.HistoryGeneration,
+					CheckpointSHA256: route.HistorySHA256, CheckpointSize: route.HistorySize,
+					LastCompletedTurnID: route.LastCompletedTurnID, RecoveryState: recovery,
+					CreatedAt: route.UpdatedAt, UpdatedAt: route.UpdatedAt,
+				}
+			}
+			store.scheduler.Reservations = make(map[string]Reservation)
+			stateNeedsSave = true
+		} else {
+			store.pool = normalizePoolState(persisted.Pool, store.accounts)
 		}
 	case errors.Is(err, os.ErrNotExist):
 		store.accounts = []Account{{
@@ -168,6 +215,7 @@ func open(root, primaryCodexHome, legacyPrimaryHome string, isolatedPrimary bool
 			Controller: true,
 			CreatedAt:  time.Now().Unix(),
 		}}
+		store.pool = defaultPoolState(store.accounts)
 		if err := store.saveLocked(); err != nil {
 			return nil, err
 		}
@@ -193,6 +241,7 @@ func open(root, primaryCodexHome, legacyPrimaryHome string, isolatedPrimary bool
 	if store.ensureNativePrimaryLocked() {
 		stateNeedsSave = true
 	}
+	store.pool = normalizePoolState(store.pool, store.accounts)
 	if stateNeedsSave {
 		if err := store.saveLocked(); err != nil {
 			return nil, err
@@ -427,8 +476,12 @@ func (s *Store) AddAccount(label string) (Account, error) {
 		Enabled:   true,
 		CreatedAt: time.Now().Unix(),
 	}
+	previousPool := clonePoolState(s.pool)
 	s.accounts = append(s.accounts, account)
+	s.syncAccountSourceLocked(account)
 	if err := s.saveLocked(); err != nil {
+		s.accounts = s.accounts[:len(s.accounts)-1]
+		s.pool = previousPool
 		return Account{}, err
 	}
 	return account, nil
@@ -441,6 +494,8 @@ func (s *Store) UpdateAccount(id string, label *string, enabled *bool) (Account,
 		if s.accounts[index].ID != id {
 			continue
 		}
+		previous := s.accounts[index]
+		previousPool := clonePoolState(s.pool)
 		if label != nil {
 			trimmed := strings.TrimSpace(*label)
 			if trimmed == "" {
@@ -451,7 +506,10 @@ func (s *Store) UpdateAccount(id string, label *string, enabled *bool) (Account,
 		if enabled != nil {
 			s.accounts[index].Enabled = *enabled
 		}
+		s.syncAccountSourceLocked(s.accounts[index])
 		if err := s.saveLocked(); err != nil {
+			s.accounts[index] = previous
+			s.pool = previousPool
 			return Account{}, err
 		}
 		return s.accounts[index], nil
@@ -471,9 +529,14 @@ func (s *Store) SetPendingLogin(id, loginID string) (Account, error) {
 		if s.accounts[index].ID != id {
 			continue
 		}
+		previous := s.accounts[index]
+		previousPool := clonePoolState(s.pool)
 		s.accounts[index].PendingLogin = true
 		s.accounts[index].PendingLoginID = strings.TrimSpace(loginID)
+		s.syncAccountSourceLocked(s.accounts[index])
 		if err := s.saveLocked(); err != nil {
+			s.accounts[index] = previous
+			s.pool = previousPool
 			return Account{}, err
 		}
 		return s.accounts[index], nil
@@ -494,9 +557,14 @@ func (s *Store) ClearPendingLogin(id string) (Account, error) {
 		if !s.accounts[index].PendingLogin && s.accounts[index].PendingLoginID == "" {
 			return s.accounts[index], nil
 		}
+		previous := s.accounts[index]
+		previousPool := clonePoolState(s.pool)
 		s.accounts[index].PendingLogin = false
 		s.accounts[index].PendingLoginID = ""
+		s.syncAccountSourceLocked(s.accounts[index])
 		if err := s.saveLocked(); err != nil {
+			s.accounts[index] = previous
+			s.pool = previousPool
 			return Account{}, err
 		}
 		return s.accounts[index], nil
@@ -529,9 +597,12 @@ func (s *Store) DiscardProvisionalAccount(id string) (Account, error) {
 		}
 
 		previous := s.accounts
+		previousPool := clonePoolState(s.pool)
 		s.accounts = append(slices.Clone(s.accounts[:index]), s.accounts[index+1:]...)
+		s.markSourceRemovedLocked(id)
 		if err := s.saveLocked(); err != nil {
 			s.accounts = previous
+			s.pool = previousPool
 			return Account{}, err
 		}
 		return account, nil
@@ -585,6 +656,7 @@ func (s *Store) RemoveAccount(id string, force bool) (Account, error) {
 		for threadID, route := range s.routes {
 			previousRoutes[threadID] = route
 		}
+		previousPool := clonePoolState(s.pool)
 		s.accounts = append(slices.Clone(s.accounts[:index]), s.accounts[index+1:]...)
 		if force {
 			for _, threadID := range owned {
@@ -592,10 +664,12 @@ func (s *Store) RemoveAccount(id string, force bool) (Account, error) {
 				delete(s.routes, threadID)
 			}
 		}
+		s.markSourceRemovedLocked(id)
 		if err := s.saveLocked(); err != nil {
 			s.accounts = previousAccounts
 			s.owners = previousOwners
 			s.routes = previousRoutes
+			s.pool = previousPool
 			return Account{}, err
 		}
 		return account, nil
@@ -703,6 +777,8 @@ func (s *Store) saveLocked() error {
 		Checkpoints:  s.checkpoints,
 		Decisions:    s.decisions,
 		Capabilities: s.capabilities,
+		Pool:         s.pool,
+		Tasks:        s.tasks,
 	}
 	data, err := json.MarshalIndent(persisted, "", "  ")
 	if err != nil {
@@ -727,24 +803,134 @@ func (s *Store) saveLocked() error {
 			return fmt.Errorf("commit state backup: %w", err)
 		}
 	}
+	// Publish the conservative v2 rollback view before committing the v3
+	// document. A rollback projection failure must never be reported after the
+	// caller-visible v3 commit has already happened, because callers restore
+	// their in-memory mutation when saveLocked returns an error.
+	if err := s.writeV2RollbackProjectionLocked(); err != nil {
+		return err
+	}
 	if err := renameStateFile(temporary, s.path); err != nil {
 		return fmt.Errorf("commit state: %w", err)
 	}
 	return nil
 }
 
-func writeMigrationBackup(path string, data []byte) error {
-	backup := path + ".v1.backup"
+func (s *Store) writeV2RollbackProjectionLocked() error {
+	authorityID := ""
+	for _, account := range s.accounts {
+		if samePath(account.CodexHome, s.primaryCodexHome) {
+			authorityID = account.ID
+			break
+		}
+	}
+	if authorityID == "" && len(s.accounts) > 0 {
+		authorityID = s.accounts[0].ID
+	}
+	owners := make(map[string]string, len(s.routes)+len(s.tasks))
+	routes := make(map[string]ThreadRoute, len(s.routes)+len(s.tasks))
+	for threadID, existing := range s.routes {
+		route := existing
+		route.AccountID = authorityID
+		route.PreviousAccountID = ""
+		route.ActiveAttemptID = ""
+		route.ActiveMigrationID = ""
+		if task, ok := s.tasks[threadID]; ok && task.ActiveLeaseID != "" {
+			route.RecoveryRequired = true
+			route.CurrentState = "recovery-required"
+		} else if !route.RecoveryRequired {
+			route.CurrentState = "idle"
+		}
+		owners[threadID] = authorityID
+		routes[threadID] = route
+	}
+	for threadID, task := range s.tasks {
+		if _, exists := routes[threadID]; exists {
+			continue
+		}
+		route := ThreadRoute{
+			ThreadID: threadID, AccountID: authorityID, Generation: max(task.CanonicalGeneration, 1),
+			HistoryGeneration: task.CanonicalGeneration, HistorySHA256: task.CheckpointSHA256,
+			HistorySize: task.CheckpointSize, LastCompletedTurnID: task.LastCompletedTurnID,
+			CurrentState: "idle", UpdatedAt: task.UpdatedAt,
+		}
+		if task.ActiveLeaseID != "" || task.RecoveryState != "" {
+			route.RecoveryRequired = true
+			route.CurrentState = "recovery-required"
+		}
+		owners[threadID] = authorityID
+		routes[threadID] = route
+	}
+	scheduler := normalizeScheduler(s.scheduler)
+	scheduler.Policy = RoutingPolicySticky
+	scheduler.Reservations = make(map[string]Reservation)
+	projection := persistedV2Projection{
+		Version: 2, Accounts: slices.Clone(s.accounts), ThreadOwner: owners,
+		ThreadRoutes: routes, Scheduler: scheduler, Health: cloneMap(s.health),
+		Attempts: make(map[string]TurnAttempt), Handoffs: make(map[string]Handoff),
+		Checkpoints: cloneMap(s.checkpoints), Decisions: slices.Clone(s.decisions),
+		Capabilities: cloneMap(s.capabilities),
+	}
+	data, err := json.MarshalIndent(projection, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode v2 rollback projection: %w", err)
+	}
+	data = append(data, '\n')
+	path := s.path + ".v2.rollback"
+	temporary := path + ".tmp"
+	if err := os.WriteFile(temporary, data, 0o600); err != nil {
+		return fmt.Errorf("write v2 rollback projection: %w", err)
+	}
+	if err := os.Chmod(temporary, 0o600); err != nil {
+		return fmt.Errorf("secure v2 rollback projection: %w", err)
+	}
+	if err := renameStateFile(temporary, path); err != nil {
+		return fmt.Errorf("commit v2 rollback projection: %w", err)
+	}
+	digest := sha256.Sum256(data)
+	manifest := map[string]any{
+		"format": "codex-relay-v2-rollback", "sourceVersion": stateVersion,
+		"sourcePoolRevision": s.pool.Revision,
+		"createdAt":          time.Now().UnixMilli(), "sha256": hex.EncodeToString(digest[:]),
+		"activeTasksRequireRecovery": activeTaskCount(s.tasks),
+	}
+	manifestData, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode v2 rollback manifest: %w", err)
+	}
+	manifestPath := path + ".manifest.json"
+	manifestTemporary := manifestPath + ".tmp"
+	if err := os.WriteFile(manifestTemporary, append(manifestData, '\n'), 0o600); err != nil {
+		return fmt.Errorf("write v2 rollback manifest: %w", err)
+	}
+	if err := renameStateFile(manifestTemporary, manifestPath); err != nil {
+		return fmt.Errorf("commit v2 rollback manifest: %w", err)
+	}
+	return nil
+}
+
+func activeTaskCount(tasks map[string]TaskRecord) int {
+	count := 0
+	for _, task := range tasks {
+		if task.ActiveLeaseID != "" || task.RecoveryState != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func writeVersionedMigrationBackup(path string, data []byte, version int) error {
+	backup := fmt.Sprintf("%s.v%d.backup", path, version)
 	if _, err := os.Stat(backup); err == nil {
 		return nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect state backup: %w", err)
 	}
 	if err := os.WriteFile(backup, data, 0o600); err != nil {
-		return fmt.Errorf("backup v1 state: %w", err)
+		return fmt.Errorf("backup v%d state: %w", version, err)
 	}
 	if err := os.Chmod(backup, 0o600); err != nil {
-		return fmt.Errorf("secure v1 state backup: %w", err)
+		return fmt.Errorf("secure v%d state backup: %w", version, err)
 	}
 	return nil
 }

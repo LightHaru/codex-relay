@@ -45,6 +45,8 @@ function createHarness() {
   const handlers = new Map();
   const windows = [];
   const externalURLs = [];
+  const appHandlers = new Map();
+  const appIdentity = {};
   const UUIDS = [
     "11111111-1111-4111-8111-111111111111",
     "22222222-2222-4222-8222-222222222222",
@@ -64,6 +66,10 @@ function createHarness() {
 
     static fromWebContents(contents) {
       return contents.owner || null;
+    }
+
+    static getAllWindows() {
+      return windows;
     }
 
     isDestroyed() {
@@ -90,6 +96,10 @@ function createHarness() {
 
     setMenuBarVisibility() {}
 
+    setTitle(title) {
+      this.title = title;
+    }
+
     removeMenu() {}
 
     show() {}
@@ -110,6 +120,19 @@ function createHarness() {
   }
 
   const electron = {
+    app: {
+      setName(name) {
+        appIdentity.name = name;
+      },
+      setAppUserModelId(id) {
+        appIdentity.id = id;
+      },
+      on(name, listener) {
+        const listeners = appHandlers.get(name) || [];
+        listeners.push(listener);
+        appHandlers.set(name, listeners);
+      },
+    },
     BrowserWindow: FakeWindow,
     shell: {
       async openExternal(url) {
@@ -160,6 +183,7 @@ function createHarness() {
     probe: context.__codexMuxPrivateLoginTest,
     sender,
     externalURLs,
+    appIdentity,
     windows,
   };
 }
@@ -168,6 +192,10 @@ test("login main bridge opens only the official URL in the default browser", asy
   const harness = createHarness();
   const event = { sender: harness.sender };
 
+  assert.deepEqual(harness.appIdentity, {
+    name: "Codex Relay",
+    id: "com.lightharu.codexrelay",
+  });
   assert.ok(harness.probe.trustedOwner(event));
   assert.equal(
     harness.probe.verifiedInitialURL("https://chatgpt.com/codex/desktop-auth?state=first"),

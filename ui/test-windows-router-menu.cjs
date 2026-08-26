@@ -238,7 +238,7 @@ test("native usage billing bridge exposes the all-subscription endpoint", async 
   assert.equal(requests.some((url) => url.endsWith("/usage/all")), true);
 });
 
-test("Usage & billing renders one in-flow pooled surface with expandable worker diagnostics", async () => {
+test("Usage & billing renders one in-flow pool plus every account's quota details", async () => {
   const { hooks } = loadBridge({
     fetchImpl: async (url) => ({
       ok: true,
@@ -259,13 +259,39 @@ test("Usage & billing renders one in-flow pooled surface with expandable worker 
     ],
   }, host, { resetRenderVersion: 1 }, 1);
   const text = collectText(host);
-  assert.match(text, /Shared quota pool/);
-	assert.match(text, /Worker diagnostics \(2\)/);
+  assert.match(text, /Codex Relay Pool/);
+  assert.match(text, /One Relay task authority/);
+  assert.match(text, /Confirmed remaining/);
+  assert.match(text, /Quota-known sources/);
+  assert.doesNotMatch(text, /Worker diagnostics/);
   assert.match(text, /Bennett/);
   assert.match(text, /Susan/);
   assert.match(text, /General usage limits/);
+  assert.match(text, /Billing details/);
   await new Promise((resolve) => setImmediate(resolve));
   assert.match(collectText(host), /Weekly reset/);
+});
+
+test("Usage & billing shows a bounded account error instead of an exclamation-only state", () => {
+  const { hooks } = loadBridge();
+  const host = new FakeElement("host");
+  hooks.renderUsageBillingSurface([
+    { id: "primary", label: "Primary", displayName: "Aira", enabled: true, connected: true, controller: true, relayAuthority: true, rateLimits: {} },
+    { id: "secondary", label: "Subscription 2", displayName: "Susan", enabled: true, connected: true, controller: false, rateLimits: {} },
+  ], {
+    availableCount: 1,
+    failedCount: 1,
+    accounts: [
+      { accountId: "primary", connected: true, usage: { plan_type: "plus" } },
+      { accountId: "secondary", connected: true, error: "fetch usage: status 429" },
+    ],
+  }, host, { resetRenderVersion: 1 }, 1, {
+    status: { pool: { connectedSubscriptions: 2, maximumPercent: 200, confirmedRemainingPercent: 100, knownSubscriptions: 1, unknownSubscriptions: 1, availableSubscriptions: 1, health: "degraded" } },
+  });
+  const text = collectText(host);
+  assert.match(text, /Susan/);
+  assert.match(text, /Error/);
+  assert.match(text, /fetch usage: status 429/);
 });
 
 test("a stale browser-login poll cannot close a newer sign-in dialog", () => {
@@ -510,24 +536,25 @@ test("Usage limit resets exposes a guarded Use reset action and refreshes after 
   assert.match(collectText(host), /Usage limit resets|Full reset/);
 });
 
-test("Disconnected accounts only show Cancel sign-in when the Router persisted a pending flow", () => {
+test("pending credential sources remain hidden from the public profile menu", () => {
   const { hooks } = loadBridge();
   const pending = new FakeElement("pending");
   hooks.renderMenu(pending, [{
     id: "pending", label: "Pending", enabled: true, connected: false, controller: false, pendingLogin: true,
   }]);
-  assert.match(collectText(pending), /Waiting for sign-in/);
-  assert.match(collectText(pending), /Cancel sign-in/);
+  assert.doesNotMatch(collectText(pending), /Waiting for sign-in/);
+  assert.doesNotMatch(collectText(pending), /Cancel sign-in/);
+  assert.match(collectText(pending), /Manage pool sources/);
 
   const stale = new FakeElement("stale");
   hooks.renderMenu(stale, [{
     id: "stale", label: "Stale", enabled: true, connected: false, controller: false, pendingLogin: false,
   }]);
-  assert.match(collectText(stale), /Not connected/);
+  assert.doesNotMatch(collectText(stale), /Not connected/);
   assert.doesNotMatch(collectText(stale), /Cancel sign-in/);
 });
 
-test("Relay primary remains visibly separate and cannot be removed from Account settings", () => {
+test("Relay host remains visibly separate and cannot be removed from Account settings", () => {
   const { hooks } = loadBridge();
   const state = {
     accounts: [{ id: "primary", label: "Primary", connected: false, controller: false }],
@@ -537,8 +564,8 @@ test("Relay primary remains visibly separate and cannot be removed from Account 
   };
   hooks.renderAccountManager(state);
   const text = collectText(state.list);
-  assert.match(text, /Relay primary · separate from Codex/);
-  assert.match(text, /Relay only/);
+  assert.match(text, /Relay host · separate from Codex/);
+  assert.match(text, /Relay authority/);
   assert.doesNotMatch(text, /Remove/);
 });
 
@@ -577,7 +604,7 @@ test("usage summary keeps known quota visible when another account has no quota 
   ]);
   const text = collectText(menu);
   assert.match(text, /97% \/ 200% left/);
-  assert.match(text, /Updating quota|Quota unavailable/);
+  assert.match(text, /quota updating/);
   assert.doesNotMatch(text, /–/);
 });
 
@@ -598,7 +625,7 @@ test("five fresh subscriptions are presented as one 500 percent quota pool", () 
   assert.match(text, /Shared quota pool/);
   assert.match(text, /500% \/ 500% left/);
   assert.match(text, /5 subscriptions act as one pool/);
-  assert.match(text, /Worker diagnostics \(5\)/);
+  assert.doesNotMatch(text, /Worker diagnostics/);
 });
 
 test("Vietnamese pooled quota copy is clear and additive", () => {
@@ -613,7 +640,7 @@ test("Vietnamese pooled quota copy is clear and additive", () => {
   assert.match(text, /5 tài khoản hợp thành một pool/);
 });
 
-test("profile menu distinguishes Relay Controller, Current Task Route, and routing policy", () => {
+test("profile menu exposes one Relay pool identity instead of worker routing", () => {
   const { hooks } = loadBridge();
   const menu = new FakeElement("menu");
   const accounts = [
@@ -626,18 +653,16 @@ test("profile menu distinguishes Relay Controller, Current Task Route, and routi
     thread: { route: { accountId: "secondary", generation: 7, recoveryRequired: false } },
   });
   const text = collectText(menu);
-  assert.match(text, /Relay Controller/);
-  assert.match(text, /Controller Account/);
-  assert.match(text, /Current Task Route/);
-  assert.match(text, /Task Account · generation 7/);
-  assert.match(text, /Next Candidate/);
-  assert.match(text, /Controller Account · 64% left/);
-  assert.match(text, /Sticky/);
-  assert.match(text, /Balanced/);
-  assert.match(text, /Rotate/);
+  assert.match(text, /Shared quota pool/);
+  assert.doesNotMatch(text, /Relay Controller/);
+  assert.doesNotMatch(text, /Controller Account/);
+  assert.doesNotMatch(text, /Current Task Route/);
+  assert.doesNotMatch(text, /Task Account/);
+  assert.doesNotMatch(text, /Next Candidate/);
+  assert.doesNotMatch(text, /Rotate/);
 });
 
-test("routing panel provides clear Vietnamese labels", () => {
+test("Vietnamese profile menu keeps the one-pool public identity", () => {
 	const { hooks } = loadBridge({ navigatorLanguage: "vi-VN" });
 	const menu = new FakeElement("menu");
 	hooks.renderMenu(menu, [
@@ -649,10 +674,10 @@ test("routing panel provides clear Vietnamese labels", () => {
 		thread: { route: { accountId: "secondary", generation: 3 } },
 	});
 	const text = collectText(menu);
-	assert.match(text, /Định tuyến Relay/);
-	assert.match(text, /Tài khoản điều khiển Relay/);
-	assert.match(text, /Tài khoản chạy task hiện tại/);
-	assert.match(text, /Cân bằng/);
+	assert.match(text, /Pool quota dùng chung/);
+	assert.doesNotMatch(text, /Tài khoản điều khiển Relay/);
+	assert.doesNotMatch(text, /Tài khoản chạy task hiện tại/);
+	assert.doesNotMatch(text, /Cân bằng/);
 });
 
 test("handoff SSE refreshes the open route badge", async () => {
@@ -704,6 +729,24 @@ test("task-view route badge shows current worker, next candidate, policy, and ha
 	assert.match(text, /Agent Aira · Plus · 100% left/);
 	assert.match(text, /Handoff/);
 	assert.doesNotMatch(fs.readFileSync(path.join(__dirname, "windows-router-menu.js"), "utf8"), /#\$\{TASK_ROUTE_BADGE_ID\} \{[^}]*position:\s*fixed/);
+});
+
+test("v3 task badge exposes only the Relay Pool identity across credential failover", () => {
+	const { hooks } = loadBridge();
+	const badge = new FakeElement("section");
+	hooks.renderTaskRouteBadge(badge, [
+		{ id: "primary", label: "Agent Aira", enabled: true, connected: true },
+		{ id: "secondary", label: "reo", enabled: true, connected: true },
+	], {
+		status: { contractVersion: 2, pool: { health: "healthy", connectedSubscriptions: 2, maximumPercent: 200, confirmedRemainingPercent: 173, knownSubscriptions: 2, availableSubscriptions: 2 } },
+		thread: { route: { accountId: "secondary", generation: 9, recoveryRequired: false }, pool: { health: "healthy", connectedSubscriptions: 2, maximumPercent: 200, confirmedRemainingPercent: 173, knownSubscriptions: 2, availableSubscriptions: 2 } },
+	});
+	const text = collectText(badge);
+	assert.match(text, /Running via Codex Relay Pool · generation 9/);
+	assert.match(text, /173% \/ 200%/);
+	assert.doesNotMatch(text, /Agent Aira/);
+	assert.doesNotMatch(text, /reo/);
+	assert.doesNotMatch(text, /Next Candidate|Handoff|worker/i);
 });
 
 test("task route inspector distinguishes owner, active worker, last quota worker, reasons, and timeline", () => {
@@ -759,10 +802,31 @@ test("replayed handoff event shows only one session-scoped toast", async () => {
 	const toastCount = document.body.children.length;
 	source.onmessage({ data: JSON.stringify(event) });
 	assert.equal(hooks.getActiveToast(), first);
-	assert.equal(document.body.children.length, toastCount);
+  assert.equal(document.body.children.length, toastCount);
 });
 
-test("account rows show the real profile identity and each quota window reset", () => {
+test("Relay error event shows the actionable reason instead of only an exclamation mark", () => {
+  let source;
+  class FakeEventSource {
+    constructor() { source = this; }
+  }
+  const { document, hooks } = loadBridge({
+    eventSourceImpl: FakeEventSource,
+    fetchImpl: async () => ({ ok: true, json: async () => ({ accounts: [], decisions: [] }) }),
+  });
+  hooks.startRoutingWatcher();
+  source.onmessage({ data: JSON.stringify({
+    id: "router-error:1",
+    type: "router-error",
+    message: "Relay Pool has exhausted every usable quota source",
+  }) });
+  const toast = hooks.getActiveToast();
+  assert.ok(toast, "Relay error should create a visible toast");
+  assert.match(collectText(document.body), /Relay request failed/);
+  assert.match(collectText(document.body), /exhausted every usable quota source/);
+});
+
+test("public profile menu hides credential-source identity and reset details", () => {
   const { hooks } = loadBridge();
   const resetSoon = Math.ceil((Date.now() + 90 * 60 * 1000) / 1000);
   const account = {
@@ -785,9 +849,10 @@ test("account rows show the real profile identity and each quota window reset", 
   const menu = new FakeElement("menu");
   hooks.renderMenu(menu, [account]);
   const text = collectText(menu);
-  assert.match(text, /Bennett/);
-  assert.match(text, /bennett@example\.invalid/);
-  assert.match(text, /Reset 5h: 1h/);
+  assert.doesNotMatch(text, /Bennett/);
+  assert.doesNotMatch(text, /bennett@example\.invalid/);
+  assert.doesNotMatch(text, /Reset 5h: 1h/);
+  assert.match(text, /Shared quota pool/);
 });
 
 test("account settings Primary action calls the independent Router endpoint", async () => {

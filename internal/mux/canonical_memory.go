@@ -66,13 +66,27 @@ func (m *Multiplexer) checkpointCompletedTurn(threadID, accountID string) {
 		route.RolloutRelativePath = relative
 	}
 	if err := m.store.PutThreadRoute(route); err == nil {
+		if m.unifiedPoolEnabled() {
+			task := m.store.TaskRecords()[threadID]
+			task.ThreadID = threadID
+			task.CanonicalGeneration = route.Generation
+			task.CheckpointSHA256 = checkpoint.SHA256
+			task.CheckpointSize = checkpoint.Size
+			task.CheckpointPath = checkpoint.Path
+			task.LastCompletedTurnID = route.LastCompletedTurnID
+			task.ActiveLeaseID = ""
+			task.RecoveryState = ""
+			task.UpdatedAt = time.Now().UnixMilli()
+			_ = m.store.PutTaskRecord(task)
+		}
 		_ = m.persistCanonicalSnapshot(threadID)
 		m.publish(Event{Type: "routing-checkpoint-updated", ThreadID: threadID, AccountID: accountID, RouteGeneration: route.Generation, Data: map[string]any{"historySize": checkpoint.Size, "incremental": checkpoint.Incremental}})
 	}
 }
 
 // checkpointAndMaterialize first updates Relay's account-neutral canonical
-// rollout, then materializes that exact checkpoint into the selected worker.
+// rollout, then materializes that exact checkpoint into the Relay task
+// authority. Credential sources are transport-only and never own task memory.
 // Workers therefore never become the authority for the logical conversation.
 func (m *Multiplexer) checkpointAndMaterialize(
 	threadID, sourceHome, sourcePath, targetHome string,

@@ -87,10 +87,14 @@ type RateLimits struct {
 }
 
 type AccountSnapshot struct {
-	ID                   string      `json:"id"`
-	Label                string      `json:"label"`
-	Enabled              bool        `json:"enabled"`
-	Controller           bool        `json:"controller"`
+	ID         string `json:"id"`
+	Label      string `json:"label"`
+	Enabled    bool   `json:"enabled"`
+	Controller bool   `json:"controller"`
+	// RelayAuthority identifies the one public task-authority child. In pool
+	// mode this follows the user's selected Controller account; it is separate
+	// from the native Codex app's original ~/.codex identity.
+	RelayAuthority       bool        `json:"relayAuthority"`
 	Connected            bool        `json:"connected"`
 	PendingLogin         bool        `json:"pendingLogin"`
 	DisplayName          string      `json:"displayName,omitempty"`
@@ -151,6 +155,19 @@ func (m *Multiplexer) Accounts(ctx context.Context) []AccountSnapshot {
 	return m.accountSnapshots(ctx, true)
 }
 
+func safeAccountSnapshotError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if category, message := sanitizeRoutingFailure(err.Error()); category != "routing_operation_failed" {
+		return message
+	}
+	// App-server errors can contain a local home path, callback URL, or other
+	// sensitive detail. Keep the renderer actionable without copying that data
+	// into the account menu or Usage page.
+	return "account status is temporarily unavailable"
+}
+
 func (m *Multiplexer) accountSnapshots(ctx context.Context, includeProfile bool) []AccountSnapshot {
 	accounts := m.store.Accounts()
 	results := make(chan AccountSnapshot, len(accounts))
@@ -160,8 +177,9 @@ func (m *Multiplexer) accountSnapshots(ctx context.Context, includeProfile bool)
 			if err != nil {
 				snapshot = AccountSnapshot{
 					ID: account.ID, Label: account.Label, Enabled: account.Enabled,
-					Controller: account.Controller, PendingLogin: account.PendingLogin,
-					CreatedAt: account.CreatedAt, Error: err.Error(),
+					Controller: account.Controller, RelayAuthority: account.ID == m.taskAuthorityID(),
+					PendingLogin: account.PendingLogin, CreatedAt: account.CreatedAt,
+					Error: safeAccountSnapshotError(err),
 				}
 			}
 			results <- snapshot
@@ -278,6 +296,7 @@ func (m *Multiplexer) SetPrimaryAndRestart(ctx context.Context, id string) (Prim
 	// race being reported as a failed Primary change.
 	updated := snapshot
 	updated.Controller = true
+	updated.RelayAuthority = true
 	m.publish(Event{Type: "primary-changed", AccountID: id, Data: updated})
 	m.publish(Event{Type: "router-restarted", AccountID: id, Message: "Router Codex sessions restarted"})
 	return PrimaryChange{Account: updated, RestartedChildren: restarted}, nil
@@ -295,7 +314,13 @@ func (m *Multiplexer) RemoveAccount(ctx context.Context, id string, force bool) 
 		return AccountSnapshot{}, fmt.Errorf("account %q not found", id)
 	}
 	if account.Controller {
-		return AccountSnapshot{}, errors.New("choose another Primary account before removing this account")
+		if !m.unifiedPoolEnabled() || account.ID == m.taskAuthorityID() {
+			return AccountSnapshot{}, errors.New("the Relay task authority cannot be removed")
+		}
+		if _, err := m.store.SetController(m.taskAuthorityID()); err != nil {
+			return AccountSnapshot{}, fmt.Errorf("restore Relay task authority before removing source: %w", err)
+		}
+		account.Controller = false
 	}
 	if len(m.store.Accounts()) <= 1 {
 		return AccountSnapshot{}, errors.New("at least one subscription must remain")
@@ -501,7 +526,7 @@ func (m *Multiplexer) accountSnapshotWithProfile(ctx context.Context, accountID 
 	}
 	snapshot := AccountSnapshot{
 		ID: account.ID, Label: account.Label, Enabled: account.Enabled,
-		Controller: account.Controller, PendingLogin: account.PendingLogin,
+		Controller: account.Controller, RelayAuthority: account.ID == m.taskAuthorityID(), PendingLogin: account.PendingLogin,
 		Connected: string(accountResult.Account) != "null" && len(accountResult.Account) > 0,
 		CreatedAt: account.CreatedAt, RawAccount: accountResult.Account,
 		ThreadCount: m.store.ThreadCounts()[account.ID],

@@ -193,6 +193,57 @@ func TestUsageStatusPrefersConnectedSubscriptionWithCapacity(t *testing.T) {
 	}
 }
 
+func TestUnifiedUsageStatusNeverFallsBackFromSelectedRelayAuthority(t *testing.T) {
+	var requested []string
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		accountID := request.Header.Get("ChatGPT-Account-ID")
+		requested = append(requested, accountID)
+		if accountID != "controller-account" {
+			t.Fatalf("unified UsageStatus used a non-authority account: %q", accountID)
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{"plan_type":"plus","rate_limit":{"allowed":false,"limit_reached":true}}`))
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	primaryHome := filepath.Join(root, "primary")
+	store, err := state.Open(filepath.Join(root, "mux"), primaryHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondary, err := store.AddAccount("Subscription 2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeUsageAuthFile(t, primaryHome, "controller-token", "controller-account")
+	writeUsageAuthFile(t, secondary.CodexHome, "secondary-token", "secondary-account")
+
+	multiplexer, err := New(Options{
+		RealExecutable: "codex-test-helper",
+		GatewayBaseURL: "http://127.0.0.1:1/v1",
+		GatewayToken:   "unified-test-token",
+		Store:          store,
+		Output:         bytes.NewBuffer(nil),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	multiplexer.profileClient = server.Client()
+	multiplexer.usageEndpoint = server.URL
+
+	status, err := multiplexer.UsageStatus(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(status), `"limit_reached":true`) {
+		t.Fatalf("selected authority Usage payload was not preserved: %s", status)
+	}
+	if got, want := strings.Join(requested, ","), "controller-account"; got != want {
+		t.Fatalf("unified credential order=%q, want %q", got, want)
+	}
+}
+
 func TestUsageStatusAllReturnsEveryEnabledSubscriptionAndPartialFailures(t *testing.T) {
 	var requested []string
 	var requestedMu sync.Mutex

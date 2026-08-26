@@ -90,6 +90,14 @@ func copyThreadHistory(sourceHome, targetHome, sourcePath string) error {
 	if err := os.MkdirAll(filepath.Dir(targetFile), 0o700); err != nil {
 		return fmt.Errorf("create target history directory: %w", err)
 	}
+	// The target may be an older rollout that the Windows app-server still has
+	// open. Validate every parent and the destination before copying so a
+	// junction/symlink cannot redirect the migration, and let the same bounded
+	// sibling-generation installer used by canonical memory handle a sharing
+	// violation without surfacing "Access is denied" to the user.
+	if err := rejectSymlinkTarget(targetRoot, targetFile); err != nil {
+		return err
+	}
 
 	input, err := os.Open(resolvedSource)
 	if err != nil {
@@ -125,11 +133,11 @@ func copyThreadHistory(sourceHome, targetHome, sourcePath string) error {
 	if err := temporary.Close(); err != nil {
 		return fmt.Errorf("close copied chat history: %w", err)
 	}
-	// os.Rename replaces an existing regular destination atomically on the
-	// supported platforms. The old file remains untouched if the copy or rename
-	// fails, which is important when a subscription was used for this chat
-	// before a later failover.
-	if err := os.Rename(temporaryPath, targetFile); err != nil {
+	// Install atomically when possible. If Windows refuses to replace a locked
+	// rollout, installMaterializedHistory allocates a verified sibling whose
+	// filename still contains the thread ID; the next thread lookup therefore
+	// discovers the new generation while the old file remains untouched.
+	if _, err := installMaterializedHistory(temporaryPath, targetFile, replaceHistoryFile); err != nil {
 		return fmt.Errorf("install copied chat history: %w", err)
 	}
 	completed = true

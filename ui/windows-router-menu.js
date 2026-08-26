@@ -65,10 +65,15 @@
       handoffComplete: "Task handoff completed", handoffFailed: "Task handoff needs attention",
       recoveryNotice: "Automatic retry stopped safely", from: "from", to: "to",
       allDepleted: "All connected subscriptions are out of quota", policyDowngraded: "Routing mode changed for safety",
+      relayError: "Relay request failed",
       eligible: "eligible", depleted: "depleted", unknownQuota: "quota unknown", updated: "updated",
       sharedPool: "Shared quota pool", poolWorkers: "subscriptions act as one pool",
-      poolUpdating: "quota updating", workerDiagnostics: "Worker diagnostics",
-      confirmedRemaining: "Confirmed remaining", poolMaximum: "Pool maximum", activeWorkers: "Active workers",
+      poolUpdating: "quota updating", workerDiagnostics: "Quota source diagnostics",
+      confirmedRemaining: "Confirmed remaining", poolMaximum: "Pool maximum", activeWorkers: "Available quota sources",
+      poolTitle: "Codex Relay Pool", poolDescription: "One Relay task authority owns this chat, its tools, Goal state, and history. The pool changes only the private credential behind a request; the task stays on this one Relay.",
+      poolHealth: "Health", activeRequests: "Active requests", quotaKnownSources: "Quota-known sources",
+      quotaTiming: "Quota timing", nextPoolReset: "Next pool reset", quotaChecked: "Quota checked",
+      unknownQuotaCount: "Unknown quota", noResetReported: "No reset reported", waitingQuotaEvidence: "Waiting for quota evidence",
     },
     vi: {
       title: "Định tuyến Relay", controller: "Tài khoản điều khiển Relay", current: "Tài khoản chạy task hiện tại",
@@ -90,10 +95,15 @@
       handoffComplete: "Đã bàn giao task", handoffFailed: "Bàn giao task cần kiểm tra",
       recoveryNotice: "Đã dừng thử lại tự động để bảo vệ task", from: "từ", to: "sang",
       allDepleted: "Tất cả tài khoản đã kết nối đều hết quota", policyDowngraded: "Đã đổi chế độ định tuyến để bảo đảm an toàn",
+      relayError: "Relay gặp lỗi khi gửi request",
       eligible: "có thể nhận lượt", depleted: "đã hết quota", unknownQuota: "chưa rõ quota", updated: "cập nhật",
       sharedPool: "Pool quota dùng chung", poolWorkers: "tài khoản hợp thành một pool",
-      poolUpdating: "quota đang cập nhật", workerDiagnostics: "Chẩn đoán worker",
-      confirmedRemaining: "Quota xác nhận còn lại", poolMaximum: "Dung lượng tối đa", activeWorkers: "Worker khả dụng",
+      poolUpdating: "quota đang cập nhật", workerDiagnostics: "Chẩn đoán nguồn quota",
+      confirmedRemaining: "Quota xác nhận còn lại", poolMaximum: "Dung lượng tối đa", activeWorkers: "Nguồn quota khả dụng",
+      poolTitle: "Pool Codex Relay", poolDescription: "Một Relay duy nhất sở hữu task, tool, trạng thái Goal và lịch sử chat. Pool chỉ đổi credential riêng phía sau request; task vẫn ở cùng một Relay duy nhất.",
+      poolHealth: "Tình trạng", activeRequests: "Request đang chạy", quotaKnownSources: "Nguồn đã xác nhận quota",
+      quotaTiming: "Thời gian quota", nextPoolReset: "Lần reset pool kế tiếp", quotaChecked: "Quota được kiểm tra lúc",
+      unknownQuotaCount: "Quota chưa rõ", noResetReported: "Chưa có thời gian reset", waitingQuotaEvidence: "Đang chờ bằng chứng quota",
     },
   };
 
@@ -152,7 +162,13 @@
       },
     });
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error || `Router request failed (${response.status})`);
+    if (!response.ok) {
+      const rawError = body?.error;
+      const detail = typeof rawError === "string"
+        ? rawError
+        : rawError?.message || rawError?.detail || rawError?.code || "";
+      throw new Error(detail || `Router request failed (${response.status})`);
+    }
     return body;
   }
 
@@ -313,12 +329,14 @@
       let payload = null;
       try { payload = JSON.parse(event?.data || "null"); } catch { return; }
       const eventType = String(payload?.type || "").replaceAll("-", "_");
-      if (!/^(route_|routing_|turn_|quota_circuit_|handoff_|recovery_|all_accounts_|policy_)/.test(eventType)) return;
+      if (!/^(route_|routing_|turn_|quota_circuit_|handoff_|recovery_|all_accounts_|policy_|router_error$)/.test(eventType)) return;
       const reasonCode = payload?.data?.reasonCode || payload?.data?.ReasonCode || "";
-      const shouldNotify = eventType === "handoff_failed" || eventType === "recovery_required" || eventType === "all_accounts_depleted" || eventType === "policy_downgraded" || (eventType === "handoff_committed" && reasonCode === "handoff_quota_exhausted");
+      const shouldNotify = eventType === "router_error" || eventType === "handoff_failed" || eventType === "recovery_required" || eventType === "all_accounts_depleted" || eventType === "policy_downgraded" || (eventType === "handoff_committed" && reasonCode === "handoff_quota_exhausted");
       if (payload?.id && shouldNotify && rememberRoutingEvent(payload.id)) {
         const detail = payload?.message || [payload?.previousAccountId, payload?.accountId].filter(Boolean).join(" → ");
-        const title = eventType === "handoff_committed"
+        const title = eventType === "router_error"
+          ? routingText("relayError")
+          : eventType === "handoff_committed"
           ? routingText("handoffComplete")
           : eventType === "handoff_failed" ? routingText("handoffFailed")
             : eventType === "all_accounts_depleted" ? routingText("allDepleted")
@@ -388,6 +406,21 @@
   function renderTaskRouteBadge(badge, accounts, routing) {
     badge.replaceChildren();
     if (!routing?.status || !routing?.thread?.route) return;
+    if (Number(routing.status.contractVersion) >= 2) {
+      const route = routing.thread.route;
+	      const pool = poolPresentation(accounts, routing.status);
+	      const status = routing.status.pool || routing.thread.pool || {};
+      const compact = make("div", "codex-mux-win-task-route-compact");
+      compact.append(
+        routeItem(routingText("runningVia"), `${routingText("poolTitle")} · ${routingText("generation")} ${route.generation}`),
+        routeItem(routingText("mode"), routingText("sharedPool")),
+        routeItem(routingText("confirmedRemaining"), `${Math.round(pool.remaining)}% / ${Math.round(pool.maximum)}%`),
+        routeItem(routingText("poolHealth"), String(status.health || "warming")),
+      );
+      if (route.recoveryRequired) compact.append(routeItem("", routingText("recovery"), "codex-mux-win-task-route-recovery"));
+      badge.append(compact);
+      return;
+    }
     const byId = new Map((Array.isArray(accounts) ? accounts : []).map((account) => [account.id, account]));
     const thread = routing.thread;
     const route = thread.route;
@@ -556,6 +589,15 @@
   }
 
   function isRelayPrimary(account) {
+    // Newer control responses mark the actual one task authority explicitly.
+    // Keep the id fallback for older installed bridges and unit fixtures.
+    if (account && Object.prototype.hasOwnProperty.call(account, "relayAuthority")) {
+      return account.relayAuthority === true;
+    }
+    return account?.id === "primary";
+  }
+
+  function isRelayHost(account) {
     return account?.id === "primary";
   }
 
@@ -597,6 +639,7 @@
   function usageLabel(account) {
     const remaining = remainingUsage(account);
     if (remaining != null) return `${Math.round(remaining)}% left`;
+    if (account?.error) return "Account status unavailable";
     if (account?.rateLimitError) return "Quota unavailable";
     return "Updating quota…";
   }
@@ -649,7 +692,8 @@
     const windows = usageWindows(account?.rateLimits);
     const quota = windows.length > 0
       ? `${Math.round(remainingUsage(account))}% quota left`
-      : account?.rateLimitError ? "Quota data unavailable" : "Quota data is updating";
+      : account?.error ? "Account status unavailable"
+        : account?.rateLimitError ? "Quota data unavailable" : "Quota data is updating";
     return `${quota} · ${quotaResetSummary(account)}`;
   }
 
@@ -707,20 +751,19 @@
     const labels = make("div", "codex-mux-win-labels");
     const primary = make("div", "codex-mux-win-name", accountName(account));
     const identityDetail = accountIdentityDetail(account);
-    const secondary = make(
-      "div",
-      "codex-mux-win-subtext",
-      account.connected
+    const connectedStatus = account?.error
+      ? `Error: ${account.error}`
+      : account.connected
         ? `${account.controller ? "Primary · " : ""}${usageStatus(account)}`
-        : isRelayPrimary(account)
-          ? "Relay primary · separate from Codex"
-          : hasPendingLogin(account) ? "Waiting for sign-in" : "Not connected",
-    );
+        : isRelayHost(account)
+          ? "Relay host · separate from Codex"
+          : hasPendingLogin(account) ? "Waiting for sign-in" : "Not connected";
+    const secondary = make("div", "codex-mux-win-subtext", connectedStatus);
     append(labels, primary, identityDetail ? make("div", "codex-mux-win-account-id", identityDetail) : null, secondary);
     append(identity, avatar(account), labels);
     line.title = quotaResetTitle(account);
     line.append(identity);
-    if (!account.connected && !account.controller && !isRelayPrimary(account) && hasPendingLogin(account) && typeof onCancelPending === "function") {
+    if (!account.connected && !account.controller && !isRelayHost(account) && hasPendingLogin(account) && typeof onCancelPending === "function") {
       const cancel = make("button", "codex-mux-win-pending-cancel", "Cancel sign-in");
       cancel.type = "button";
       cancel.setAttribute("aria-label", `Cancel sign-in for ${account.label || "subscription"}`);
@@ -1583,6 +1626,7 @@
 
   function renderUsageBillingAccount(account, entry, state, renderVersion) {
     const payload = usagePayload(entry);
+    const error = normalize(entry?.error || account?.error || account?.rateLimitError || "");
     const connected = entry?.connected === true || (entry == null && account?.connected === true);
     const card = make("article", "codex-mux-win-usage-account-card");
     const header = make("div", "codex-mux-win-usage-account-header");
@@ -1594,13 +1638,18 @@
     );
     const status = make(
       "span",
-      `codex-mux-win-usage-account-status${connected ? "" : " codex-mux-win-usage-account-status-unavailable"}`,
-      connected ? "Connected" : "Unavailable",
+      `codex-mux-win-usage-account-status${connected && !error ? "" : " codex-mux-win-usage-account-status-unavailable"}`,
+      error ? "Error" : connected ? "Connected" : "Unavailable",
     );
     append(header, avatar(account), title, status);
     card.append(header);
+    if (error || !connected) {
+      card.append(make("div", "codex-mux-win-usage-error", error || "This subscription is not connected."));
+      if (!connected) return card;
+      // A quota payload may still be present alongside a warning. Keep the
+      // verified windows visible below while making the failure explicit.
+    }
     if (!connected) {
-      card.append(make("div", "codex-mux-win-usage-error", entry?.error || "This subscription is not connected."));
       return card;
     }
 
@@ -1650,16 +1699,13 @@
   }
 
   function renderUsageBillingSurface(accounts, collection, host, state, renderVersion, routing = null) {
-    const enabled = (Array.isArray(accounts) ? accounts : []).filter((account) => account?.enabled);
-    const entries = new Map((Array.isArray(collection?.accounts) ? collection.accounts : [])
-      .map((entry) => [entry.accountId, entry]));
     const section = make("section", "");
     section.id = USAGE_SURFACE_ID;
     section.setAttribute("aria-label", routingText("sharedPool"));
     append(
       section,
-      make("div", "codex-mux-win-usage-heading", routingText("sharedPool")),
-      make("div", "codex-mux-win-usage-description", "Relay combines schedulable quota into one pool while keeping every upstream credential isolated. Per-worker billing and reset details remain available below for diagnostics."),
+      make("div", "codex-mux-win-usage-heading", routingText("poolTitle")),
+      make("div", "codex-mux-win-usage-description", routingText("poolDescription")),
     );
     const pool = poolPresentation(accounts, routing);
     const summary = make("div", "codex-mux-win-usage-summary");
@@ -1670,22 +1716,58 @@
         summary.append(item);
     });
     section.append(summary);
-    if (collection?.error) {
-      section.append(make("div", "codex-mux-win-usage-error", String(collection.error)));
-    }
-    const cards = make("div", "codex-mux-win-usage-accounts");
-    const sorted = enabled.slice().sort((left, right) => Number(right.controller) - Number(left.controller));
-    if (sorted.length === 0) cards.append(make("div", "codex-mux-win-picker-empty", "No Relay subscriptions are configured."));
-    sorted.forEach((account) => cards.append(renderUsageBillingAccount(account, entries.get(account.id), state, renderVersion)));
-    const diagnostics = make("details", "codex-mux-win-usage-details codex-mux-win-worker-diagnostics");
-    diagnostics.append(make("summary", "", `${routingText("workerDiagnostics")} (${enabled.length})`), cards);
-    section.append(diagnostics);
+    const status = routing?.status?.pool || routing?.pool || {};
+    const details = make("div", "codex-mux-win-usage-columns codex-mux-win-pool-details");
+    const operational = make("div", "codex-mux-win-usage-column");
+    operational.append(make("div", "codex-mux-win-usage-column-title", routingText("poolSummary")));
+    [[routingText("poolHealth"), String(status.health || "warming")], [routingText("activeRequests"), String(Number(status.activeLeaseCount) || 0)], [routingText("quotaKnownSources"), `${pool.known}/${pool.connected}`]]
+      .forEach(([label, value]) => {
+        const row = make("div", "codex-mux-win-usage-row");
+        append(row, make("span", "", label), make("span", "codex-mux-win-usage-row-value", value));
+        operational.append(row);
+      });
+    const timing = make("div", "codex-mux-win-usage-column");
+    timing.append(make("div", "codex-mux-win-usage-column-title", routingText("quotaTiming")));
+    const nextReset = Number(status.nextResetAt) > 0 ? formatResetCountdown(Number(status.nextResetAt)) : routingText("noResetReported");
+    const updated = Number(status.quotaUpdatedAt) > 0 ? new Date(Number(status.quotaUpdatedAt)).toLocaleString() : routingText("waitingQuotaEvidence");
+    [[routingText("nextPoolReset"), nextReset], [routingText("quotaChecked"), updated], [routingText("unknownQuotaCount"), String(pool.unknown)]]
+      .forEach(([label, value]) => {
+        const row = make("div", "codex-mux-win-usage-row");
+        append(row, make("span", "", label), make("span", "codex-mux-win-usage-row-value", value));
+        timing.append(row);
+      });
+    append(details, operational, timing);
+    section.append(details);
+    const usageAccounts = make("div", "codex-mux-win-usage-accounts");
+    const collectionEntries = new Map(
+      (Array.isArray(collection?.accounts) ? collection.accounts : [])
+        .map((entry) => [String(entry?.accountId || ""), entry])
+        .filter(([accountId]) => accountId),
+    );
+    (Array.isArray(accounts) ? accounts : [])
+      .filter((account) => account?.enabled !== false)
+      .forEach((account) => {
+        usageAccounts.append(
+          renderUsageBillingAccount(
+            account,
+            collectionEntries.get(String(account.id)) || null,
+            state,
+            renderVersion,
+          ),
+        );
+      });
+    if (usageAccounts.children.length > 0) section.append(usageAccounts);
+    if (collection?.error) section.append(make("div", "codex-mux-win-usage-error", "Some billing metadata is temporarily unavailable; pool routing remains governed by verified quota evidence."));
     host.replaceChildren(section);
   }
 
   async function loadUsageBillingSurface(host, renderVersion) {
     try {
-      const [accounts, collection, routing] = await Promise.all([loadAccounts(), nativeUsageStatusAll(), routingContext().catch(() => null)]);
+      const [accounts, routing, collection] = await Promise.all([
+        loadAccounts(),
+        routingContext().catch(() => null),
+        nativeUsageStatusAll(),
+      ]);
       if (!host.isConnected || usageSurfaceVersion !== renderVersion) return;
       const state = { resetRenderVersion: renderVersion };
       renderUsageBillingSurface(accounts, collection, host, state, renderVersion, routing);
@@ -1735,36 +1817,45 @@
       const identity = make("div", "codex-mux-win-identity");
       const meta = make("div", "codex-mux-win-account-meta");
       const name = make("div", "codex-mux-win-name", accountName(account));
-      if (account.controller) name.append(make("span", "codex-mux-win-account-badge", "Primary"));
+      if (isRelayPrimary(account)) name.append(make("span", "codex-mux-win-account-badge", "Relay authority"));
       const identityDetail = accountIdentityDetail(account);
       const status = account.connected
         ? usageStatus(account)
-        : isRelayPrimary(account) ? "Relay primary · separate from Codex"
+        : isRelayHost(account) ? "Relay host · separate from Codex"
         : hasPendingLogin(account) ? "Waiting for sign-in" : "Not connected — sign in again or remove this subscription";
       append(meta, name, identityDetail ? make("div", "codex-mux-win-account-id", identityDetail) : null, make("div", "codex-mux-win-account-hint", status));
       append(identity, avatar(account), meta);
       const actions = make("div", "codex-mux-win-account-card-actions");
-      if (account.controller) {
-        const primary = make("button", "codex-mux-win-account-action codex-mux-win-account-action-primary", "Primary");
-        primary.type = "button";
-        primary.disabled = true;
-        primary.title = "Choose another Primary before removing this account";
-        actions.append(primary);
-      } else if (isRelayPrimary(account)) {
-        const primary = make("button", "codex-mux-win-account-action", "Relay only");
-        primary.type = "button";
-        primary.disabled = true;
-        primary.title = "This Relay-owned primary is separate from the official Codex account";
-        actions.append(primary);
+      if (isRelayPrimary(account)) {
+        const authority = make("button", "codex-mux-win-account-action", "Relay authority");
+        authority.type = "button";
+        authority.disabled = true;
+        authority.title = "This subscription is the selected Relay task authority and cannot be removed while it owns the active logical worker";
+        actions.append(authority);
+      } else if (isRelayHost(account) && !account.connected) {
+        const host = make("button", "codex-mux-win-account-action", "Relay host");
+        host.type = "button";
+        host.disabled = true;
+        host.title = "This private Relay home is kept as the app host and cannot be removed";
+        actions.append(host);
       } else if (account.connected) {
-        const select = make("button", "codex-mux-win-account-action codex-mux-win-account-action-primary", "Set as Primary");
+        const select = make("button", "codex-mux-win-account-action codex-mux-win-account-action-primary", "Use as authority");
         select.type = "button";
+        select.title = "Make this connected subscription the Relay task authority; active turns must finish first";
         select.addEventListener("click", () => { void setPrimaryAccount(state, account, select); });
         actions.append(select);
-        const remove = make("button", "codex-mux-win-account-action codex-mux-win-account-action-danger", "Remove");
-        remove.type = "button";
-        remove.addEventListener("click", () => { void removeManagedAccount(state, account, remove); });
-        actions.append(remove);
+        if (isRelayHost(account)) {
+          const host = make("button", "codex-mux-win-account-action", "Relay host");
+          host.type = "button";
+          host.disabled = true;
+          host.title = "This private Relay home is kept as the app host and cannot be removed";
+          actions.append(host);
+        } else {
+          const remove = make("button", "codex-mux-win-account-action codex-mux-win-account-action-danger", "Remove");
+          remove.type = "button";
+          remove.addEventListener("click", () => { void removeManagedAccount(state, account, remove); });
+          actions.append(remove);
+        }
       } else if (hasPendingLogin(account)) {
         const cancel = make("button", "codex-mux-win-account-action", "Cancel sign-in");
         cancel.type = "button";
@@ -1792,13 +1883,13 @@
     dialog.setAttribute("role", "dialog");
     dialog.setAttribute("aria-modal", "true");
     const header = make("div", "codex-mux-win-manager-header");
-    append(header, make("h2", "", "Account settings"));
+    append(header, make("h2", "", "Manage pool sources"));
     const close = make("button", "codex-mux-win-toast-close codex-mux-win-close-button", "×");
     close.type = "button";
     close.setAttribute("aria-label", "Close account settings");
     close.addEventListener("click", () => closeAccountManager(state));
     header.append(close);
-    const description = make("p", "", "Choose which connected subscription is Primary for Router, or remove a subscription. Changing Primary restarts Router sessions automatically and does not change the native Codex app.");
+    const description = make("p", "", "Add, sign in, or remove private quota sources. Sources never become task workers: one fixed Relay authority continues to own every chat, Goal, tool call, and history file.");
     const list = make("div", "codex-mux-win-account-list");
     const status = make("div", "codex-mux-win-status");
     status.hidden = true;
@@ -1907,17 +1998,6 @@
     const totalLabel = pool.connected === 0 ? "Updating…" : `${Math.round(pool.remaining)}% / ${Math.round(pool.maximum)}% ${routingText("left")}`;
     append(summary, icon, label, make("div", `codex-mux-win-total${pool.connected === 0 ? " codex-mux-win-percent-muted" : ""}`, totalLabel));
     menu.append(summary);
-	  renderRoutingPanel(menu, accounts, routing);
-
-    if (accounts.length) {
-      menu.append(make("div", "codex-mux-win-divider"));
-      const diagnostics = make("details", "codex-mux-win-worker-diagnostics");
-      diagnostics.append(make("summary", "codex-mux-win-add", `${routingText("workerDiagnostics")} (${accounts.length})`));
-      accounts.forEach((account) => diagnostics.append(row(account, (button) => {
-        cancelPendingSubscription(menu, account, button).catch((error) => setMenuStatus(menu, error.message));
-      })));
-      menu.append(diagnostics);
-    }
 
     const add = make("button", "codex-mux-win-add");
     add.type = "button";
@@ -1930,7 +2010,7 @@
     menu.append(make("div", "codex-mux-win-divider"), add);
     const settings = make("button", "codex-mux-win-add codex-mux-win-settings");
     settings.type = "button";
-    append(settings, make("span", "codex-mux-win-settings-icon", "⚙"), make("span", "", "Account settings"));
+    append(settings, make("span", "codex-mux-win-settings-icon", "⚙"), make("span", "", "Manage pool sources"));
     settings.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();

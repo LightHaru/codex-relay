@@ -1,6 +1,7 @@
 package mux
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -29,8 +30,13 @@ type Options struct {
 	// CompatibilityProfile is emitted by a reviewed installer profile. An
 	// empty/unknown value deliberately disables cross-account history handoff.
 	CompatibilityProfile string
-	Store                *state.Store
-	Output               io.Writer
+	// GatewayBaseURL enables v3 unified-pool mode. Exactly one app-server is
+	// configured to send every model request through this local Responses API;
+	// per-account children remain management-only for login and quota probes.
+	GatewayBaseURL string
+	GatewayToken   string
+	Store          *state.Store
+	Output         io.Writer
 }
 
 type externalRoute struct {
@@ -75,14 +81,17 @@ type Event struct {
 	Data              any    `json:"data,omitempty"`
 }
 
-// Multiplexer presents one app-server connection to ChatGPT.app while owning
-// one real app-server process per ChatGPT subscription.
+// Multiplexer presents one app-server connection to ChatGPT.app. In unified
+// mode it exposes one task-authority child and keeps other app-server children
+// management-only for login, health and quota observation.
 type Multiplexer struct {
 	realExecutable       string
 	realArgs             []string
 	environment          []string
 	compatibilityProfile string
 	safeHandoff          bool
+	gatewayBaseURL       string
+	gatewayToken         string
 	store                *state.Store
 	output               io.Writer
 
@@ -127,6 +136,12 @@ type Multiplexer struct {
 	quotaMu         sync.RWMutex
 	quotaSnapshots  map[string]AccountSnapshot
 	usageQuotaCache map[string]usageQuotaCacheEntry
+	// quotaRefreshMu gates the bounded live refresh used by unified status. The
+	// native settings page polls frequently; one refresh window avoids issuing
+	// a full account/rate-limit request for every repaint while ensuring the
+	// pool view never remains at the startup "warming/0%" snapshot.
+	quotaRefreshMu sync.Mutex
+	quotaRefreshAt time.Time
 
 	resetCreditsMu       sync.Mutex
 	resetCreditsCache    map[string]resetCreditsCacheEntry
@@ -150,6 +165,8 @@ func New(options Options) (*Multiplexer, error) {
 		environment:          append([]string(nil), options.Environment...),
 		compatibilityProfile: compatibilityProfile,
 		safeHandoff:          compatibilityProfile != "" && !strings.EqualFold(compatibilityProfile, "unknown"),
+		gatewayBaseURL:       strings.TrimRight(strings.TrimSpace(options.GatewayBaseURL), "/"),
+		gatewayToken:         strings.TrimSpace(options.GatewayToken),
 		store:                options.Store,
 		output:               options.Output,
 		children:             make(map[string]*backend.Child),
@@ -177,6 +194,9 @@ func (m *Multiplexer) Start(ctx context.Context) error {
 	m.runtimeMu.Lock()
 	m.runtimeCancel = runtimeCancel
 	m.runtimeMu.Unlock()
+	if err := m.store.RecoverPoolLeases(time.Now()); err != nil {
+		return fmt.Errorf("recover Relay Pool leases: %w", err)
+	}
 	if err := m.recoverInterruptedHandoffs(); err != nil {
 		return fmt.Errorf("recover interrupted handoffs: %w", err)
 	}
@@ -225,8 +245,14 @@ func (m *Multiplexer) Close() {
 	m.asyncMu.Lock()
 	m.asyncClosed = true
 	m.asyncMu.Unlock()
-	for _, entry := range m.childEntries() {
+	entries := m.childEntries()
+	for _, entry := range entries {
 		_ = entry.child.Close()
+	}
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer waitCancel()
+	for _, entry := range entries {
+		_ = entry.child.Wait(waitCtx)
 	}
 	m.runtimeWG.Wait()
 	done := make(chan struct{})
@@ -345,7 +371,11 @@ func (m *Multiplexer) HandleClient(message protocol.Message) {
 
 	switch message.Method {
 	case "thread/list":
-		m.runAsync(func() { m.aggregateThreadList(message) })
+		if m.unifiedPoolEnabled() {
+			m.routeExistingRequest(message)
+		} else {
+			m.runAsync(func() { m.aggregateThreadList(message) })
+		}
 	case "thread/start":
 		m.runAsync(func() { m.routeNewThread(message) })
 	case "account/rateLimits/read":
@@ -366,8 +396,9 @@ func (m *Multiplexer) initialize(message protocol.Message) {
 	// account while the remaining children finish their own handshake.
 	entries := m.childEntries()
 	type initializationResult struct {
-		result json.RawMessage
-		err    error
+		accountID string
+		result    json.RawMessage
+		err       error
 	}
 	results := make(chan initializationResult, len(entries))
 	for _, entry := range entries {
@@ -375,11 +406,12 @@ func (m *Multiplexer) initialize(message protocol.Message) {
 			ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 			response, err := entry.child.Request(ctx, "initialize", message.Params)
 			cancel()
-			results <- initializationResult{result: response.Result, err: err}
+			results <- initializationResult{accountID: entry.account.ID, result: response.Result, err: err}
 		}(entry)
 	}
 
 	var firstResult json.RawMessage
+	var authorityResult json.RawMessage
 	var firstErr error
 	for range entries {
 		outcome := <-results
@@ -392,6 +424,14 @@ func (m *Multiplexer) initialize(message protocol.Message) {
 		if firstResult == nil {
 			firstResult = outcome.result
 		}
+		// In unified mode the renderer must observe capabilities from the one
+		// task authority, never whichever management child responds fastest.
+		if outcome.accountID == m.taskAuthorityID() {
+			authorityResult = outcome.result
+		}
+	}
+	if m.unifiedPoolEnabled() {
+		firstResult = authorityResult
 	}
 	if firstResult == nil {
 		m.write(protocol.Failure(message.ID, -32000, fmt.Sprintf("failed to initialize account pool: %v", firstErr)))
@@ -411,6 +451,12 @@ func (m *Multiplexer) handleClientNotification(message protocol.Message) {
 		return
 	}
 	if threadID := threadIDFromAnyParams(message.Params); threadID != "" {
+		if m.unifiedPoolEnabled() {
+			if child, ok := m.taskAuthorityChild(); ok {
+				_ = child.Send(message)
+			}
+			return
+		}
 		m.turnMu.Lock()
 		active, activeOK := m.activeTurns[threadID]
 		m.turnMu.Unlock()
@@ -427,6 +473,12 @@ func (m *Multiplexer) handleClientNotification(message protocol.Message) {
 		return
 	}
 	if activeBoundMethod(message.Method) {
+		if m.unifiedPoolEnabled() {
+			if child, ok := m.taskAuthorityChild(); ok {
+				_ = child.Send(message)
+				return
+			}
+		}
 		accountID := m.activeAccountForUnscoped()
 		if child, ok := m.child(accountID); ok {
 			_ = child.Send(message)
@@ -439,6 +491,17 @@ func (m *Multiplexer) handleClientNotification(message protocol.Message) {
 }
 
 func (m *Multiplexer) routeNewThread(message protocol.Message) {
+	if m.unifiedPoolEnabled() {
+		authorityID := m.taskAuthorityID()
+		if authorityID == "" {
+			m.write(protocol.Failure(message.ID, -32020, "Relay task authority is unavailable"))
+			return
+		}
+		if err := m.forward(authorityID, message); err != nil {
+			m.write(protocol.Failure(message.ID, -32021, err.Error()))
+		}
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()
 	reservationID := "request-" + protocol.RequestIDKey(message.ID)
@@ -477,6 +540,22 @@ func (m *Multiplexer) routeExistingRequest(message protocol.Message) {
 		}
 	}
 	threadID := threadIDFromParams(message.Params)
+	if m.unifiedPoolEnabled() {
+		authorityID := m.taskAuthorityID()
+		if authorityID == "" {
+			m.write(protocol.Failure(message.ID, -32022, "Relay task authority is unavailable"))
+			return
+		}
+		if message.Method == "thread/resume" && threadID != "" {
+			m.ensureUnifiedTask(threadID)
+			m.runAsync(func() { m.routeThreadResume(message, threadID, authorityID) })
+			return
+		}
+		if err := m.forward(authorityID, message); err != nil {
+			m.write(protocol.Failure(message.ID, -32023, err.Error()))
+		}
+		return
+	}
 	if threadID != "" {
 		accountID, _ = m.store.ThreadOwner(threadID)
 	}
@@ -523,6 +602,55 @@ func activeBoundMethod(method string) bool {
 	return strings.HasPrefix(method, "turn/") || strings.HasPrefix(method, "item/") ||
 		strings.HasPrefix(method, "hook/") || strings.Contains(lower, "approval") ||
 		strings.Contains(lower, "cancel") || strings.Contains(lower, "interrupt") || strings.Contains(lower, "tool")
+}
+
+func managementScopedMethod(method string) bool {
+	return strings.HasPrefix(method, "account/") ||
+		strings.HasPrefix(method, "mcpServer/") ||
+		strings.HasPrefix(method, "plugin/")
+}
+
+func managementInboundMethod(method string) bool {
+	return method == "account/login/completed" || method == "account/updated" ||
+		method == "account/rateLimits/updated" || strings.HasPrefix(method, "mcpServer/") ||
+		strings.HasPrefix(method, "plugin/")
+}
+
+func (m *Multiplexer) unifiedPoolEnabled() bool {
+	return m.gatewayBaseURL != "" && m.gatewayToken != ""
+}
+
+func (m *Multiplexer) taskAuthorityID() string {
+	// Pool mode has one public logical worker. Its identity is the account the
+	// user selected as Relay Controller, not whichever account happens to own
+	// the Relay app's private bootstrap home. The latter is often the account
+	// imported from the original Codex installation (for example `reo`) and
+	// must never silently take over an Aira/selected authority.
+	if m.unifiedPoolEnabled() {
+		if controller, ok := m.store.Controller(); ok {
+			if controller.Enabled {
+				return controller.ID
+			}
+			// Never fall back to the Relay host (which may be the imported
+			// original-Codex account) when the selected authority is disabled.
+			// A failed-closed empty result produces an actionable UI error.
+			return ""
+		}
+	}
+	primaryHome := m.store.PrimaryCodexHome()
+	for _, account := range m.store.Accounts() {
+		if samePath(account.CodexHome, primaryHome) {
+			return account.ID
+		}
+	}
+	if controller, ok := m.store.Controller(); ok {
+		return controller.ID
+	}
+	return ""
+}
+
+func (m *Multiplexer) taskAuthorityChild() (*backend.Child, bool) {
+	return m.child(m.taskAuthorityID())
 }
 
 func (m *Multiplexer) activeAccountForUnscoped() string {
@@ -582,6 +710,19 @@ func (m *Multiplexer) ensureThreadHistoryOnAccount(threadID, accountID string) e
 	if _, found := findThreadHistory(account.CodexHome, threadID); found {
 		return nil
 	}
+	if m.unifiedPoolEnabled() {
+		for _, source := range m.store.Accounts() {
+			if samePath(source.CodexHome, account.CodexHome) {
+				continue
+			}
+			if sourcePath, found := findThreadHistory(source.CodexHome, threadID); found {
+				if err := copyThreadHistory(source.CodexHome, account.CodexHome, sourcePath); err != nil {
+					return fmt.Errorf("consolidate chat history into Relay authority: %w", err)
+				}
+				return nil
+			}
+		}
+	}
 	legacyHome := m.store.LegacyPrimaryCodexHome()
 	if strings.TrimSpace(legacyHome) == "" || samePath(account.CodexHome, legacyHome) {
 		return nil
@@ -617,13 +758,16 @@ func (m *Multiplexer) forwardRoute(
 	excluded map[string]struct{},
 	capacityRetries int,
 ) error {
+	if m.unifiedPoolEnabled() && !managementScopedMethod(message.Method) {
+		accountID = m.taskAuthorityID()
+	}
 	child, ok := m.child(accountID)
 	if !ok {
 		return fmt.Errorf("account %s is unavailable", accountID)
 	}
 	key := protocol.RequestIDKey(message.ID)
 	reservationID := ""
-	if message.Method == "thread/start" {
+	if message.Method == "thread/start" && !m.unifiedPoolEnabled() {
 		reservationID = "request-" + key
 		reservation, exists := m.store.Scheduler().Reservations[reservationID]
 		if !exists {
@@ -1364,6 +1508,9 @@ func (m *Multiplexer) inboundLoop(ctx context.Context) {
 
 func (m *Multiplexer) handleInbound(inbound backend.Inbound) {
 	message := inbound.Message
+	if m.unifiedPoolEnabled() && inbound.AccountID != m.taskAuthorityID() && !managementInboundMethod(message.Method) {
+		return
+	}
 	if isVisibleOutputNotification(message.Method, message.Params) {
 		m.markVisibleOutput(inbound.AccountID, message.Method, message.Params)
 	}
@@ -1397,7 +1544,7 @@ func (m *Multiplexer) handleInbound(inbound backend.Inbound) {
 				m.runAsync(func() { m.retryTurnAfterModelCapacity(route, route.accountID, inbound.Raw) })
 				return
 			}
-			if route.method == "turn/start" && isUsageLimitResponse(message) {
+			if route.method == "turn/start" && isUsageLimitResponse(message) && !m.unifiedPoolEnabled() {
 				m.recordAccountFailure(inbound.AccountID, "quota rejected turn")
 				m.removeActiveTurn(threadIDFromParams(route.message.Params), inbound.AccountID)
 				if !m.safeHandoff {
@@ -1408,7 +1555,7 @@ func (m *Multiplexer) handleInbound(inbound backend.Inbound) {
 				m.runAsync(func() { m.retryTurnAfterUsageLimit(route, inbound.AccountID) })
 				return
 			}
-			if route.method == "thread/start" && isUsageLimitResponse(message) {
+			if route.method == "thread/start" && isUsageLimitResponse(message) && !m.unifiedPoolEnabled() {
 				m.recordAccountFailure(inbound.AccountID, "quota rejected new chat")
 				// A new-thread request does not have a thread ID yet, so it cannot
 				// use the existing-chat migration path. Retry the identical request
@@ -1416,14 +1563,50 @@ func (m *Multiplexer) handleInbound(inbound backend.Inbound) {
 				m.runAsync(func() { m.retryNewThreadAfterUsageLimit(route, inbound.AccountID) })
 				return
 			}
+			// Automatic quota/model-capacity retries are intentionally hidden from
+			// the native renderer. Any other failed request must remain
+			// inspectable: the stock UI may reduce an app-server failure to a lone
+			// exclamation mark, so publish a bounded Relay error for the local
+			// status surface and toast.
+			if message.Error != nil && !isModelCapacityResponse(message) {
+				m.publishProtocolError(message, threadIDFromParams(route.message.Params))
+			}
 			m.learnThreadOwner(route, inbound.AccountID, message.Result)
 			m.writeRaw(inbound.Raw)
 		}
 		return
 	}
-	if message.Method == "error" || message.Method == "turn/completed" {
+	// The unified gateway deliberately emits a sanitized recovery marker when
+	// a stream fails after visible output or a side effect. It is not a quota
+	// handoff and must never fall through to completeActiveTurn: doing so would
+	// clear the recovery state and make a failed logical turn look completed.
+	if m.unifiedPoolEnabled() && isRelayPoolRecoveryNotification(message) {
 		threadID := threadIDFromTurnNotification(message.Params)
-		if threadID != "" && isUsageLimitNotification(message) {
+		if threadID != "" {
+			m.turnMu.Lock()
+			active, activeOK := m.activeTurns[threadID]
+			if activeOK && active.route.accountID == inbound.AccountID {
+				delete(m.activeTurns, threadID)
+			}
+			m.turnMu.Unlock()
+			if activeOK && active.route.accountID == inbound.AccountID {
+				m.requireTurnRecovery(threadID, active, "Relay Pool stopped safely after output or side effects")
+			} else if task, found := m.store.TaskRecords()[threadID]; found && task.RecoveryState == "" {
+				task.RecoveryState = "recovery-required"
+				_ = m.store.PutTaskRecord(task)
+			}
+		}
+		if len(message.ID) == 0 {
+			m.writeRaw(inbound.Raw)
+		}
+		return
+	}
+	if message.Method == "error" || (message.Method == "turn/completed" && protocolNotificationHasError(message)) {
+		if !isUsageLimitNotification(message) {
+			m.publishProtocolError(message, threadIDFromTurnNotification(message.Params))
+		}
+		threadID := threadIDFromTurnNotification(message.Params)
+		if threadID != "" && isUsageLimitNotification(message) && !m.unifiedPoolEnabled() {
 			if active, ok := m.takeActiveTurnForFailure(threadID, inbound.AccountID); ok {
 				m.recordAccountFailure(inbound.AccountID, "quota rejected active turn")
 				if active.sideEffectsStarted || active.visibleOutputStarted {
@@ -1502,6 +1685,117 @@ func (m *Multiplexer) handleInbound(inbound backend.Inbound) {
 	if m.shouldForwardNotification(inbound.AccountID, message.Method, message.Params) {
 		m.writeRaw(inbound.Raw)
 	}
+}
+
+func isRelayPoolRecoveryNotification(message protocol.Message) bool {
+	value := strings.ToLower(message.Method + " " + string(message.Params) + " " + string(message.Result))
+	return strings.Contains(value, "relay_pool_recovery_required")
+}
+
+// publishProtocolError keeps a useful, credential-free explanation available
+// when the native renderer collapses an app-server failure to an exclamation
+// mark. Only the local Relay event stream receives this projection; the
+// original protocol message is still forwarded unchanged to the Codex client.
+func (m *Multiplexer) publishProtocolError(message protocol.Message, threadID string) {
+	detail, code := safeProtocolError(message)
+	if detail == "" {
+		return
+	}
+	stamp := time.Now().UnixNano()
+	if m.now != nil {
+		stamp = m.now().UnixNano()
+	}
+	event := Event{
+		ID:        fmt.Sprintf("router-error:%d", stamp),
+		Type:      "router-error",
+		ThreadID:  strings.TrimSpace(threadID),
+		Timestamp: stamp / int64(time.Millisecond),
+		Message:   detail,
+		Data: map[string]any{
+			"code":   code,
+			"method": message.Method,
+		},
+	}
+	m.publish(event)
+}
+
+// safeProtocolError extracts a stable error reason without forwarding account
+// IDs, local paths, callback URLs, prompt text, or upstream response bodies.
+// Relay-generated messages keep their bounded status detail; arbitrary
+// app-server text is reduced to a known classification and numeric code.
+func safeProtocolError(message protocol.Message) (string, int) {
+	if message.Error != nil {
+		return safeProtocolErrorText(message.Error.Message, message.Error.Code)
+	}
+	var payload struct {
+		Error struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"error"`
+		Turn struct {
+			Error struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+				Type    string `json:"type"`
+			} `json:"error"`
+		} `json:"turn"`
+	}
+	if json.Unmarshal(message.Params, &payload) != nil {
+		return "Relay request failed", 0
+	}
+	if strings.TrimSpace(payload.Error.Message) != "" {
+		return safeProtocolErrorText(payload.Error.Message, payload.Error.Code)
+	}
+	if strings.TrimSpace(payload.Turn.Error.Message) != "" {
+		return safeProtocolErrorText(payload.Turn.Error.Message, payload.Turn.Error.Code)
+	}
+	return "Relay request failed", 0
+}
+
+func safeProtocolErrorText(value string, code int) (string, int) {
+	text := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(value, "\r", " "), "\n", " "))
+	if text == "" {
+		if code != 0 {
+			return fmt.Sprintf("Relay request failed (code %d)", code), code
+		}
+		return "Relay request failed", 0
+	}
+	lower := strings.ToLower(text)
+	if strings.Contains(lower, "relay pool") || strings.HasPrefix(lower, "relay ") {
+		if len(text) > 220 {
+			text = text[:220]
+		}
+		return text, code
+	}
+	if category, summary := sanitizeRoutingFailure(text); category != "routing_operation_failed" {
+		return summary, code
+	}
+	if code != 0 {
+		return fmt.Sprintf("Relay request failed (code %d)", code), code
+	}
+	return "Relay request failed", 0
+}
+
+func protocolNotificationHasError(message protocol.Message) bool {
+	if message.Error != nil || message.Method == "error" {
+		return true
+	}
+	var payload struct {
+		Error json.RawMessage `json:"error"`
+		Turn  struct {
+			Error json.RawMessage `json:"error"`
+		} `json:"turn"`
+	}
+	if json.Unmarshal(message.Params, &payload) != nil {
+		return false
+	}
+	return rawJSONValuePresent(payload.Error) || rawJSONValuePresent(payload.Turn.Error)
+}
+
+func rawJSONValuePresent(value json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(value)
+	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
 }
 
 const (
@@ -1796,6 +2090,7 @@ func (m *Multiplexer) learnThreadOwner(route externalRoute, accountID string, re
 	case "thread/fork", "thread/resume", "thread/unarchive":
 		if threadID := threadIDFromResult(result); threadID != "" {
 			_ = m.store.SetThreadOwner(threadID, accountID)
+			m.ensureUnifiedTask(threadID)
 		}
 	}
 }
@@ -1808,6 +2103,29 @@ func (m *Multiplexer) markNewThreadOwner(threadID, accountID string) {
 		route.FirstTurnPending = true
 		_ = m.store.PutThreadRoute(route)
 	}
+	m.ensureUnifiedTask(threadID)
+}
+
+func (m *Multiplexer) ensureUnifiedTask(threadID string) {
+	if !m.unifiedPoolEnabled() || strings.TrimSpace(threadID) == "" {
+		return
+	}
+	threadID = strings.TrimSpace(threadID)
+	tasks := m.store.TaskRecords()
+	task := tasks[threadID]
+	task.ThreadID = threadID
+	if task.CreatedAt == 0 {
+		task.CreatedAt = time.Now().UnixMilli()
+	}
+	if task.CanonicalGeneration == 0 {
+		if route, ok := m.store.ThreadRoute(threadID); ok && route.Generation > 0 {
+			task.CanonicalGeneration = route.Generation
+		} else {
+			task.CanonicalGeneration = 1
+		}
+	}
+	task.UpdatedAt = time.Now().UnixMilli()
+	_ = m.store.PutTaskRecord(task)
 }
 
 func (m *Multiplexer) write(message protocol.Message) {
@@ -1948,12 +2266,18 @@ func (m *Multiplexer) startChild(ctx context.Context, account state.Account) (*b
 	if child, ok := m.child(account.ID); ok {
 		return child, nil
 	}
+	args := m.realArgs
+	environment := m.environment
+	if m.unifiedPoolEnabled() && account.ID == m.taskAuthorityID() {
+		args = unifiedProviderArgs(args, m.gatewayBaseURL)
+		environment = withMuxEnvironment(environment, "CODEX_RELAY_GATEWAY_TOKEN", m.gatewayToken)
+	}
 	child, err := backend.Start(
 		account.ID,
 		account.CodexHome,
 		m.realExecutable,
-		m.realArgs,
-		m.environment,
+		args,
+		environment,
 		m.inbound,
 	)
 	if err != nil {
@@ -1984,6 +2308,43 @@ func (m *Multiplexer) startChild(ctx context.Context, account state.Account) (*b
 		}
 	}
 	return child, nil
+}
+
+func unifiedProviderArgs(args []string, baseURL string) []string {
+	overrides := []string{
+		"-c", `model_provider="relay_pool"`,
+		"-c", `model_providers.relay_pool.name="Codex Relay Pool"`,
+		"-c", `model_providers.relay_pool.base_url="` + strings.TrimRight(baseURL, "/") + `"`,
+		"-c", `model_providers.relay_pool.wire_api="responses"`,
+		"-c", `model_providers.relay_pool.env_key="CODEX_RELAY_GATEWAY_TOKEN"`,
+		"-c", `model_providers.relay_pool.requires_openai_auth=false`,
+		"-c", `model_providers.relay_pool.request_max_retries=0`,
+		"-c", `model_providers.relay_pool.stream_max_retries=0`,
+	}
+	result := make([]string, 0, len(args)+len(overrides))
+	inserted := false
+	for _, argument := range args {
+		if !inserted && argument == "app-server" {
+			result = append(result, overrides...)
+			inserted = true
+		}
+		result = append(result, argument)
+	}
+	if !inserted {
+		result = append(overrides, result...)
+	}
+	return result
+}
+
+func withMuxEnvironment(environment []string, key, value string) []string {
+	prefix := strings.ToUpper(key) + "="
+	result := make([]string, 0, len(environment)+1)
+	for _, entry := range environment {
+		if !strings.HasPrefix(strings.ToUpper(entry), prefix) {
+			result = append(result, entry)
+		}
+	}
+	return append(result, key+"="+value)
 }
 
 func (m *Multiplexer) SubscribeEvents() (<-chan Event, func()) {

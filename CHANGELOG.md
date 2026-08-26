@@ -3,6 +3,41 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/) and
 this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-08-26
+
+### Added
+
+- Unified Pool Gateway: one public Relay API, identity, task authority, thread,
+  session, Goal and canonical history over a hidden credential pool.
+- State-v3 `PoolQuotaLedger`, sticky-until-depleted source selection, atomic
+  leases, heartbeats, crash recovery and a continuously verified v2 rollback
+  projection.
+- Local Responses transport that retries the exact request before output, keeps
+  the source transition private, and blocks unsafe replay after side effects.
+- Contract-v2 public status projections that expose only `Codex Relay Pool`;
+  source metadata remains in token-protected account management.
+- Real installed `codex.real.exe` E2E coverage with a deterministic A→B→C→D
+  upstream fixture, plus bilingual documentation for installation, security,
+  compatibility and evidence reporting.
+
+### Changed
+
+- Usage & billing and task badges now show one aggregate pool rather than
+  per-worker routing identities. The native Settings shell and official Codex
+  process remain untouched.
+- Late quota failure advances the source for future turns but keeps the already
+  observable turn in `recovery-required`; all-depleted failures do not fabricate
+  a completed turn or leave a live lease.
+
+### Validation
+
+- Go state, gateway and mux suites pass, including CAS/concurrency, migration,
+  rollback, sanitization, task lease persistence and real app-server E2E.
+- Live real-account A→B→C→D quota evidence is intentionally not claimed until
+  an authorized run records it with a sanitized report.
+
+Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.0
+
 ## [0.4.5] - 2026-08-25
 
 ### Fixed
@@ -542,6 +577,7 @@ Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.7
 - Source-only CI, draft release automation, security documentation, and smoke tests.
 
 [Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.4.5...HEAD
+[0.5.0]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.0
 [0.4.5]: https://github.com/LightHaru/codex-relay/releases/tag/v0.4.5
 [0.4.4]: https://github.com/LightHaru/codex-relay/releases/tag/v0.4.4
 [0.4.3]: https://github.com/LightHaru/codex-relay/releases/tag/v0.4.3

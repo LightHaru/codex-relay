@@ -128,6 +128,68 @@ func TestExplainabilityResponsesDoNotExposeRawIdentityErrorsOrPaths(t *testing.T
 	}
 }
 
+func TestUnifiedPoolStatusPublishesOnePoolWithoutCredentialSources(t *testing.T) {
+	pool := newRoutingTestPool(t, 20, 20, 30, 30)
+	pool.multiplexer.gatewayBaseURL = "http://127.0.0.1:1/v1"
+	pool.multiplexer.gatewayToken = "local-test-token"
+
+	status := pool.multiplexer.RouterStatus(context.Background())
+	if status.ContractVersion != 2 || status.StateVersion != state.PoolSchemaVersion {
+		t.Fatalf("unified contract versions = %d/%d", status.ContractVersion, status.StateVersion)
+	}
+	if status.Pool.PoolID != state.DefaultPoolID || status.Pool.RoutingCapacityOnly {
+		t.Fatalf("unified pool projection = %#v", status.Pool)
+	}
+	if len(status.Accounts) != 0 || len(status.AccountRoutes) != 0 || len(status.AccountHealth) != 0 || len(status.Capabilities) != 0 || len(status.EligiblePool) != 0 || status.NextCandidate != nil || len(status.Handoffs) != 0 || len(status.Timeline) != 0 {
+		t.Fatalf("unified public status exposed source-level routing state: %#v", status)
+	}
+	encoded, err := json.Marshal(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"primary", pool.secondary.ID, "test@example.invalid"} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("unified public status leaked credential source %q: %s", forbidden, encoded)
+		}
+	}
+}
+
+func TestUnifiedThreadRouteKeepsOneRelayIdentity(t *testing.T) {
+	pool := newRoutingTestPool(t, 20, 20, 30, 30)
+	pool.multiplexer.gatewayBaseURL = "http://127.0.0.1:1/v1"
+	pool.multiplexer.gatewayToken = "local-test-token"
+	if err := pool.store.SetThreadOwner("thread-unified", pool.secondary.ID); err != nil {
+		t.Fatal(err)
+	}
+	route, _ := pool.store.ThreadRoute("thread-unified")
+	route.PreviousAccountID = "primary"
+	route.LastCompletedAccountID = pool.secondary.ID
+	route.LastQuotaAccountID = "primary"
+	if err := pool.store.PutThreadRoute(route); err != nil {
+		t.Fatal(err)
+	}
+
+	status, err := pool.multiplexer.ThreadRouteStatus(context.Background(), "thread-unified")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.ContractVersion != 2 || status.Route.AccountID != state.DefaultPoolID || status.Controller == nil || status.Controller.AccountID != state.DefaultPoolID || status.CurrentOwner == nil || status.CurrentOwner.AccountID != state.DefaultPoolID {
+		t.Fatalf("thread did not project one Relay identity: %#v", status)
+	}
+	if status.ActiveWorker != nil || status.PreviousWorker != nil || status.LastCompletedWorker != nil || status.LastQuotaConsumingWorker != nil || status.NextCandidate != nil || len(status.Workers) != 0 || len(status.Handoffs) != 0 || len(status.Timeline) != 0 {
+		t.Fatalf("unified thread status exposed credential-source routing: %#v", status)
+	}
+	encoded, err := json.Marshal(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"primary", pool.secondary.ID, "test@example.invalid"} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("unified thread status leaked credential source %q: %s", forbidden, encoded)
+		}
+	}
+}
+
 func TestQuotaAttributionRequiresBeforeAndNewerAfterSnapshot(t *testing.T) {
 	before, after := 71.0, 69.5
 	confirmed := quotaAttributionFromAttempt(state.TurnAttempt{

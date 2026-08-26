@@ -29,6 +29,60 @@ func newCoordinatorTestMux(t *testing.T) (*Multiplexer, *state.Store) {
 	return multiplexer, store
 }
 
+func TestUnifiedTaskAuthorityFollowsSelectedController(t *testing.T) {
+	multiplexer, store := newCoordinatorTestMux(t)
+	secondary, err := store.AddAccount("Aira Agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetController(secondary.ID); err != nil {
+		t.Fatal(err)
+	}
+	multiplexer.gatewayBaseURL = "http://127.0.0.1:48124/v1"
+	multiplexer.gatewayToken = "relay-test-token"
+
+	if got := multiplexer.taskAuthorityID(); got != secondary.ID {
+		t.Fatalf("unified task authority=%q, want selected controller %q", got, secondary.ID)
+	}
+	accounts := multiplexer.store.Accounts()
+	for _, account := range accounts {
+		if account.ID == secondary.ID && !account.Controller {
+			t.Fatalf("selected controller lost its Controller flag: %#v", account)
+		}
+	}
+}
+
+func TestUnifiedTaskAuthorityDoesNotSilentlyFallbackWhenSelectedControllerIsDisabled(t *testing.T) {
+	multiplexer, store := newCoordinatorTestMux(t)
+	secondary, err := store.AddAccount("Aira Agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetController(secondary.ID); err != nil {
+		t.Fatal(err)
+	}
+	multiplexer.gatewayBaseURL = "http://127.0.0.1:48124/v1"
+	multiplexer.gatewayToken = "relay-test-token"
+	disabled := false
+	if _, err := store.UpdateAccount(secondary.ID, nil, &disabled); err != nil {
+		t.Fatal(err)
+	}
+	if got := multiplexer.taskAuthorityID(); got != "" {
+		t.Fatalf("disabled selected authority silently fell back to %q", got)
+	}
+}
+
+func TestSafeProtocolErrorKeepsRelayDetailButRedactsArbitraryText(t *testing.T) {
+	detail, code := safeProtocolError(protocol.Failure(protocol.StringID("request"), -32001, "Relay Pool model service rejected the request (HTTP 503)."))
+	if detail != "Relay Pool model service rejected the request (HTTP 503)." || code != -32001 {
+		t.Fatalf("Relay detail was not preserved: detail=%q code=%d", detail, code)
+	}
+	detail, code = safeProtocolError(protocol.Failure(protocol.StringID("request"), -32002, "secret upstream diagnostic C:\\Users\\ADMIN\\.codex\\auth.json"))
+	if detail != "the selected subscription must sign in again" || code != -32002 || strings.Contains(detail, "auth.json") {
+		t.Fatalf("arbitrary protocol error was not reduced safely: detail=%q code=%d", detail, code)
+	}
+}
+
 func TestTurnCoordinatorSerializesOneActiveTurnPerThread(t *testing.T) {
 	multiplexer, store := newCoordinatorTestMux(t)
 	if err := store.SetThreadOwner("thread-1", "primary"); err != nil {
@@ -142,6 +196,39 @@ func TestAsyncQuotaNotificationAfterVisibleOutputRequiresRecovery(t *testing.T) 
 	}
 	if !bytes.Contains(output.Bytes(), []byte("usage limit")) {
 		t.Fatalf("original terminal error was not forwarded: %s", output.String())
+	}
+}
+
+func TestUnifiedGatewayRecoveryMarkerDoesNotCompleteTurn(t *testing.T) {
+	multiplexer, store := newCoordinatorTestMux(t)
+	var output bytes.Buffer
+	multiplexer.output = &output
+	multiplexer.gatewayBaseURL = "http://127.0.0.1:1/v1"
+	multiplexer.gatewayToken = "local-token"
+	if err := store.SetThreadOwner("thread-unified-recovery", "primary"); err != nil {
+		t.Fatal(err)
+	}
+	message := protocol.Request("turn/start", protocol.StringID("turn-unified-recovery"), []byte(`{"threadId":"thread-unified-recovery"}`))
+	active, err := multiplexer.beginTurnAttempt("thread-unified-recovery", "primary", message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	multiplexer.markVisibleOutput("primary", "item/completed", []byte(`{"threadId":"thread-unified-recovery","item":{"type":"agentMessage"}}`))
+	recovery := protocol.Message{Method: "error", Params: []byte(`{"threadId":"thread-unified-recovery","error":{"type":"relay_pool_recovery_required","code":"relay_pool_recovery_required"}}`)}
+	raw, err := protocol.Encode(recovery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	multiplexer.handleInbound(backend.Inbound{AccountID: "primary", Message: recovery, Raw: raw})
+	route, _ := store.ThreadRoute("thread-unified-recovery")
+	if !route.RecoveryRequired || route.ActiveAttemptID != "" || route.CurrentState != "recovery-required" {
+		t.Fatalf("unified recovery marker completed or left turn active: %#v", route)
+	}
+	if attempt, ok := store.TurnAttempt(active.attemptID); !ok || attempt.Phase != "RECOVERY_REQUIRED" {
+		t.Fatalf("unified recovery marker did not close attempt safely: %#v ok=%v", attempt, ok)
+	}
+	if !bytes.Contains(output.Bytes(), []byte("relay_pool_recovery_required")) {
+		t.Fatalf("sanitized recovery marker was not forwarded: %s", output.String())
 	}
 }
 

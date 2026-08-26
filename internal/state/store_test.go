@@ -50,7 +50,7 @@ func TestStoreBootstrapsPrimaryAndPersistsThreadAffinity(t *testing.T) {
 	}
 }
 
-func TestV1StateMigratesAtomicallyToV2WithBackupAndDefaultPolicy(t *testing.T) {
+func TestV1StateMigratesAtomicallyToV3WithBackupAndDefaultPool(t *testing.T) {
 	root := t.TempDir()
 	stateRoot := filepath.Join(root, "mux")
 	primaryHome := filepath.Join(root, "primary")
@@ -90,8 +90,63 @@ func TestV1StateMigratesAtomicallyToV2WithBackupAndDefaultPolicy(t *testing.T) {
 	if err != nil || json.Unmarshal(data, &persisted) != nil {
 		t.Fatalf("read migrated state: %v", err)
 	}
-	if persisted["version"] != float64(2) {
-		t.Fatalf("migrated version = %#v, want 2", persisted["version"])
+	if persisted["version"] != float64(3) {
+		t.Fatalf("migrated version = %#v, want 3", persisted["version"])
+	}
+	pool := store.PoolState()
+	if pool.SchemaVersion != 3 || pool.PoolID != DefaultPoolID || len(pool.SourceOrder) != 1 {
+		t.Fatalf("unexpected migrated pool: %#v", pool)
+	}
+}
+
+func TestV2StateMigratesByteForByteBackupAndRecoverySafeTasks(t *testing.T) {
+	root := t.TempDir()
+	stateRoot := filepath.Join(root, "mux")
+	primaryHome := filepath.Join(root, "primary")
+	if err := os.MkdirAll(stateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	v2 := `{
+  "version": 2,
+  "accounts": [{"id":"primary","label":"Primary","codexHome":"` + filepath.ToSlash(primaryHome) + `","enabled":true,"controller":true,"createdAt":1}],
+  "threadRoutes": {"thread-v2":{"threadId":"thread-v2","accountId":"primary","generation":7,"authoritativeHistoryGeneration":6,"activeAttemptId":"turn-open","rolloutHash":"abc","rolloutSize":42,"updatedAt":10}},
+  "scheduler": {"policy":"balanced","deficits":{"primary":99},"dispatches":{"primary":8},"reservations":{"old":{"id":"old","accountId":"primary","weight":1,"expiresAt":9999999999999}}}
+}`
+	statePath := filepath.Join(stateRoot, "state.json")
+	if err := os.WriteFile(statePath, []byte(v2), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(stateRoot, primaryHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup, err := os.ReadFile(statePath + ".v2.backup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(backup) != v2 {
+		t.Fatal("v2 migration backup is not byte-for-byte")
+	}
+	if got := store.Scheduler(); len(got.Reservations) != 0 || got.Deficits["primary"] != 99 {
+		t.Fatalf("migration did not retire only unsafe reservations: %#v", got)
+	}
+	task := store.TaskRecords()["thread-v2"]
+	if task.CanonicalGeneration != 6 || task.RecoveryState != "recovery-required" || task.CheckpointSHA256 != "abc" {
+		t.Fatalf("unexpected migrated task: %#v", task)
+	}
+	first, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(stateRoot, primaryHome); err != nil {
+		t.Fatal(err)
+	}
+	second, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(first) != string(second) {
+		t.Fatal("v2 to v3 migration was not idempotent")
 	}
 }
 
@@ -151,18 +206,30 @@ func TestStoreRecoversCorruptPrimaryStateFromLastValidBackup(t *testing.T) {
 	stateRoot := filepath.Join(root, "mux")
 	primaryHome := filepath.Join(root, "primary")
 	store, err := Open(stateRoot, primaryHome)
-	if err != nil { t.Fatal(err) }
-	if err := store.SetRoutingPolicy(RoutingPolicyRotate); err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetRoutingPolicy(RoutingPolicyRotate); err != nil {
+		t.Fatal(err)
+	}
 	statePath := filepath.Join(stateRoot, "state.json")
-	if _, err := os.Stat(statePath + ".backup"); err != nil { t.Fatal(err) }
-	if err := os.WriteFile(statePath, []byte("{corrupt"), 0o600); err != nil { t.Fatal(err) }
+	if _, err := os.Stat(statePath + ".backup"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, []byte("{corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	recovered, err := Open(stateRoot, primaryHome)
-	if err != nil { t.Fatalf("open from valid backup: %v", err) }
+	if err != nil {
+		t.Fatalf("open from valid backup: %v", err)
+	}
 	if recovered.RoutingPolicy() != RoutingPolicyBalanced {
 		t.Fatalf("recovered policy = %q, want last backed-up balanced policy", recovered.RoutingPolicy())
 	}
 	data, err := os.ReadFile(statePath)
-	if err != nil || !json.Valid(data) { t.Fatalf("recovered state was not rewritten atomically: %v %q", err, data) }
+	if err != nil || !json.Valid(data) {
+		t.Fatalf("recovered state was not rewritten atomically: %v %q", err, data)
+	}
 }
 
 func TestAccountConfigInheritsManagedMCPAndPreservesLocalProjects(t *testing.T) {

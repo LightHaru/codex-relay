@@ -34,9 +34,14 @@ type RouterStatus struct {
 }
 
 // PoolStatus is the user-facing quota contract. Upstream subscriptions remain
-// credential-isolated workers, while Relay presents their schedulable quota as
-// one additive pool: five fully available subscriptions report 500/500%.
+// credential-isolated management sources, while unified Relay presents their
+// schedulable quota as one additive pool: five fully available subscriptions
+// report 500/500%.
 type PoolStatus struct {
+	PoolID                    string  `json:"poolId"`
+	Revision                  uint64  `json:"revision"`
+	Health                    string  `json:"health"`
+	ActiveLeaseCount          int     `json:"activeLeaseCount"`
 	ConnectedSubscriptions    int     `json:"connectedSubscriptions"`
 	MaximumPercent            float64 `json:"maximumPercent"`
 	ConfirmedRemainingPercent float64 `json:"confirmedRemainingPercent"`
@@ -180,6 +185,35 @@ func (m *Multiplexer) RouterStatus(ctx context.Context) RouterStatus {
 	m.turnMu.Lock()
 	activeCount := len(m.activeTurns)
 	m.turnMu.Unlock()
+	if m.unifiedPoolEnabled() {
+		// Refresh credential-free quota evidence before projecting the pool. This
+		// prevents a fresh Relay launch from reporting the persisted
+		// "warming/0%" state until a separate account-menu request happens to
+		// probe the subscriptions.
+		m.refreshUnifiedQuota(ctx)
+		recoveryCount := 0
+		for _, task := range m.store.TaskRecords() {
+			if task.RecoveryState != "" {
+				recoveryCount++
+			}
+		}
+		return RouterStatus{
+			ContractVersion: 2,
+			StateVersion:    state.PoolSchemaVersion,
+			Policy:          state.RoutingPolicySticky,
+			EffectivePolicy: state.RoutingPolicySticky,
+			Scheduler: state.SchedulerState{
+				Policy:         state.RoutingPolicySticky,
+				Deficits:       map[string]float64{},
+				Dispatches:     map[string]uint64{},
+				LastSelectedAt: map[string]int64{},
+				Reservations:   map[string]state.Reservation{},
+			},
+			Pool:              m.unifiedPoolStatus(),
+			ActiveTurnCount:   activeCount,
+			RecoveryTaskCount: recoveryCount,
+		}
+	}
 	routes := m.store.ThreadRoutes()
 	recoveryCount := 0
 	for _, route := range routes {
@@ -194,15 +228,76 @@ func (m *Multiplexer) RouterStatus(ctx context.Context) RouterStatus {
 		candidate := eligiblePool[0]
 		nextCandidate = &candidate
 	}
+	policy, effectivePolicy := m.store.RoutingPolicy(), m.effectiveRoutingPolicy()
+	poolStatus := m.poolStatus(accounts)
 	return RouterStatus{
-		ContractVersion: 1, StateVersion: 2, Policy: m.store.RoutingPolicy(), EffectivePolicy: m.effectiveRoutingPolicy(),
+		ContractVersion: 1, StateVersion: 2, Policy: policy, EffectivePolicy: effectivePolicy,
 		PolicyFallbackReason: m.policyFallbackReason(),
 		HandoffSupported:     m.safeHandoff, CompatibilityProfile: compatibilityProfileOrUnknown(m.compatibilityProfile), Scheduler: m.store.Scheduler(),
-		AccountHealth: sanitizedAccountHealth(m.store.AccountHealthAll()), Capabilities: m.routerCapabilities(), Accounts: sanitizedRoutingSnapshots(accounts), Pool: m.poolStatus(accounts),
+		AccountHealth: sanitizedAccountHealth(m.store.AccountHealthAll()), Capabilities: m.routerCapabilities(), Accounts: sanitizedRoutingSnapshots(accounts), Pool: poolStatus,
 		AccountRoutes:   m.accountRouteStatuses(accounts),
 		ActiveTurnCount: activeCount, RecoveryTaskCount: recoveryCount, Handoffs: sanitizedHandoffs(m.store.Handoffs()),
 		EligiblePool: eligiblePool, NextCandidate: nextCandidate, Timeline: m.routingTimeline("", 100),
 	}
+}
+
+func (m *Multiplexer) unifiedPoolStatus() PoolStatus {
+	pool := m.store.PoolState()
+	result := PoolStatus{
+		PoolID: pool.PoolID, Revision: pool.Revision, Health: pool.Health,
+		ActiveLeaseCount: len(pool.ActiveLeases), RoutingCapacityOnly: false,
+	}
+	for _, sourceID := range pool.SourceOrder {
+		source, ok := pool.Sources[sourceID]
+		if !ok || !source.Enabled || source.MembershipState == state.SourceRemoved || source.MembershipState == state.SourceDraining {
+			continue
+		}
+		result.MaximumPercent += 100
+		if source.Connected && source.AuthState == "authenticated" {
+			result.ConnectedSubscriptions++
+		}
+		evidence := source.QuotaEvidence
+		known := evidence.Allowed != nil || evidence.LimitReached || evidence.ShortUsed != nil || evidence.LongUsed != nil
+		if known {
+			result.KnownSubscriptions++
+			used := 0.0
+			if evidence.ShortUsed != nil && *evidence.ShortUsed > used {
+				used = *evidence.ShortUsed
+			}
+			if evidence.LongUsed != nil && *evidence.LongUsed > used {
+				used = *evidence.LongUsed
+			}
+			if evidence.ExplicitlyDepleted() {
+				used = 100
+			}
+			used = clampRoutePercent(used)
+			result.ConfirmedUsedPercent += used
+			result.ConfirmedRemainingPercent += 100 - used
+			if evidence.ObservedAt > 0 && (result.QuotaUpdatedAt == 0 || evidence.ObservedAt < result.QuotaUpdatedAt) {
+				result.QuotaUpdatedAt = evidence.ObservedAt
+			}
+		} else {
+			result.UnknownSubscriptions++
+		}
+		switch source.MembershipState {
+		case state.SourceAvailable, state.SourceActive, state.SourceProbation:
+			if source.Connected && source.AuthState == "authenticated" && !evidence.ExplicitlyDepleted() {
+				result.AvailableSubscriptions++
+			} else {
+				result.DepletedSubscriptions++
+			}
+		case state.SourceDepleted:
+			result.DepletedSubscriptions++
+		}
+		reset := source.ResetEpoch
+		if evidence.ResetEpoch > 0 {
+			reset = evidence.ResetEpoch
+		}
+		if reset > 0 && (result.NextResetAt == 0 || reset < result.NextResetAt) {
+			result.NextResetAt = reset
+		}
+	}
+	return result
 }
 
 func sanitizedRoutingSnapshots(accounts []AccountSnapshot) []AccountSnapshot {
@@ -597,6 +692,47 @@ func (m *Multiplexer) ThreadRouteStatus(ctx context.Context, threadID string) (T
 	route, ok := m.store.ThreadRoute(threadID)
 	if !ok {
 		return ThreadRouteStatus{}, fmt.Errorf("thread %q has no Relay route", threadID)
+	}
+	if m.unifiedPoolEnabled() {
+		publicRoute := route
+		publicRoute.AccountID = state.DefaultPoolID
+		publicRoute.PreviousAccountID = ""
+		publicRoute.LastCompletedAccountID = ""
+		publicRoute.LastQuotaAccountID = ""
+		publicRoute.ActiveMigrationID = ""
+		publicRoute.ActiveAttemptID = ""
+		publicRoute.RolloutRelativePath = ""
+		publicRoute.Policy = state.RoutingPolicySticky
+		if task, found := m.store.TaskRecords()[threadID]; found {
+			if task.CanonicalGeneration > 0 {
+				publicRoute.Generation = task.CanonicalGeneration
+				publicRoute.HistoryGeneration = task.CanonicalGeneration
+			}
+			publicRoute.RecoveryRequired = task.RecoveryState != ""
+			if task.RecoveryState != "" {
+				publicRoute.CurrentState = "recovery-required"
+			}
+		}
+		relayIdentity := &RoutingWorkerIdentity{
+			AccountID: state.DefaultPoolID,
+			Label:     "Codex Relay Pool",
+			PlanLabel: "Unified Pool",
+		}
+		return ThreadRouteStatus{
+			ContractVersion:        2,
+			ThreadID:               threadID,
+			Route:                  publicRoute,
+			Controller:             relayIdentity,
+			CurrentOwner:           relayIdentity,
+			RequestedPolicy:        state.RoutingPolicySticky,
+			EffectivePolicy:        state.RoutingPolicySticky,
+			NextCandidateIsPreview: false,
+			RecoveryRequired:       publicRoute.RecoveryRequired,
+			ActiveTurnState:        publicRoute.CurrentState,
+			QuotaFreshness:         "pool",
+			QuotaAttribution:       QuotaAttributionStatus{Status: "pool_routed"},
+			Pool:                   m.unifiedPoolStatus(),
+		}, nil
 	}
 	accounts := m.Accounts(ctx)
 	workers := m.accountRouteStatuses(accounts)

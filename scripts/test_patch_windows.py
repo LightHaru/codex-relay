@@ -55,6 +55,7 @@ from patch_windows import (
     next_backup_path,
     patch_windows_feature_bundles,
     patch_windows_login_bundles,
+    patch_windows_product_metadata,
     source_from_store_package,
     stop_router_processes,
     router_profile_directory,
@@ -185,6 +186,24 @@ class WindowsRendererPatchTests(unittest.TestCase):
             self.assertNotIn("new BrowserWindow", main_source)
             self.assertIn("codexMuxUpdater", preload_source)
             self.assertIn("router-updater", main_source)
+
+    def test_brands_only_the_copied_electron_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "package.json"
+            package.write_text(
+                '{"name":"openai-codex-electron","productName":"Codex",'
+                '"codexAppBrand":"chatgpt",'
+                '"codexWindowsPackageIdentity":"OpenAI.Codex"}\n',
+                encoding="utf-8",
+            )
+            patch_windows_product_metadata(root)
+            metadata = __import__("json").loads(package.read_text(encoding="utf-8"))
+            self.assertEqual(metadata["productName"], "Codex Relay")
+            self.assertEqual(metadata["description"], "Codex Relay")
+            self.assertEqual(metadata["codexWindowsPackageIdentity"], "LightHaru.CodexRelay")
+            self.assertEqual(metadata["name"], "openai-codex-electron")
+            self.assertEqual(metadata["codexAppBrand"], "chatgpt")
 
     def test_patches_the_current_renderer_profile(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

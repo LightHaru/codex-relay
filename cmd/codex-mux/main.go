@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/LightHaru/codex-relay/internal/control"
+	"github.com/LightHaru/codex-relay/internal/gateway"
 	"github.com/LightHaru/codex-relay/internal/mux"
 	"github.com/LightHaru/codex-relay/internal/protocol"
 	"github.com/LightHaru/codex-relay/internal/state"
@@ -70,6 +71,39 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if err := gateway.PrimeCredentialSources(store); err != nil {
+		return fmt.Errorf("prime Relay Pool sources: %w", err)
+	}
+	compatibilityProfile := resolveCompatibilityProfile(realExecutable)
+
+	poolListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return fmt.Errorf("start Relay Pool transport: %w", err)
+	}
+	poolToken, err := randomToken()
+	if err != nil {
+		_ = poolListener.Close()
+		return err
+	}
+	poolServer := &http.Server{
+		Handler: &gateway.Transport{
+			Store: store, LocalBearerToken: poolToken,
+			DisableFailover: strings.EqualFold(compatibilityProfile, "unknown"),
+		},
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       90 * time.Second,
+		MaxHeaderBytes:    32 * 1024,
+	}
+	go func() {
+		if serveErr := poolServer.Serve(poolListener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			fmt.Fprintf(os.Stderr, "codex-mux: Relay Pool transport: %v\n", serveErr)
+		}
+	}()
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer shutdownCancel()
+		_ = poolServer.Shutdown(shutdownCtx)
+	}()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -77,7 +111,9 @@ func run() error {
 		RealExecutable:       realExecutable,
 		RealArgs:             args,
 		Environment:          os.Environ(),
-		CompatibilityProfile: resolveCompatibilityProfile(realExecutable),
+		CompatibilityProfile: compatibilityProfile,
+		GatewayBaseURL:       "http://" + poolListener.Addr().String() + "/v1",
+		GatewayToken:         poolToken,
 		Store:                store,
 		Output:               os.Stdout,
 	})
@@ -295,15 +331,22 @@ func loadOrCreateToken(root string) (string, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("read control token: %w", err)
 	}
-	bytes := make([]byte, 32)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", fmt.Errorf("generate control token: %w", err)
+	token, err := randomToken()
+	if err != nil {
+		return "", err
 	}
-	token := hex.EncodeToString(bytes)
 	if err := os.WriteFile(path, []byte(token), 0o600); err != nil {
 		return "", fmt.Errorf("write control token: %w", err)
 	}
 	return token, nil
+}
+
+func randomToken() (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", fmt.Errorf("generate local transport token: %w", err)
+	}
+	return hex.EncodeToString(bytes), nil
 }
 
 func validateControlToken(value string) (string, error) {

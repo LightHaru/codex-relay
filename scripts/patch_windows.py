@@ -1444,6 +1444,38 @@ def patch_windows_login_bundles(
     return preload_path, main_path
 
 
+def patch_windows_product_metadata(extracted: Path) -> None:
+    """Brand only the copied Electron bundle as Codex Relay.
+
+    ``productName`` is what Electron uses for the window/taskbar display
+    name.  The package ``name`` and ``codexAppBrand`` remain upstream values;
+    changing those would alter protocol feature flags and server routing.
+    """
+    package_path = extracted / "package.json"
+    if not package_path.is_file():
+        raise RuntimeError("could not find the Windows Electron package metadata")
+    try:
+        package = json.loads(package_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"could not read the Windows Electron package metadata: {error}") from error
+    if not isinstance(package, dict):
+        raise RuntimeError("Windows Electron package metadata is not an object")
+    if not isinstance(package.get("name"), str) or not package["name"].strip():
+        raise RuntimeError("Windows Electron package metadata has no internal package name")
+    package["productName"] = ROUTER_APP_NAME
+    package["description"] = "Codex Relay"
+    # The Store build also carries the package identity used by its native
+    # Windows taskbar/AppUserModel registration. Keep the upstream app brand
+    # and internal package name intact, but give the copied process a stable
+    # Relay-only identity so Windows never groups it with ChatGPT.
+    if "codexWindowsPackageIdentity" in package:
+        package["codexWindowsPackageIdentity"] = "LightHaru.CodexRelay"
+    try:
+        package_path.write_text(json.dumps(package, indent=2) + "\n", encoding="utf-8")
+    except OSError as error:
+        raise RuntimeError(f"could not write the Windows Electron package metadata: {error}") from error
+
+
 def load_or_create_control_token(state_root: Path) -> str:
     state_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     token_path = state_root / "control-token"
@@ -1478,6 +1510,14 @@ def patch_windows_renderer(
     repacked = temporary / "app.asar"
     print("Patching the Windows subscription surfaces…")
     run_asar(node, asar, "extract", str(original_asar), str(extracted))
+
+    # The Store bundle keeps the upstream Electron product name ("Codex"),
+    # which makes an installed Relay window indistinguishable from the
+    # official app when both are open.  Change only the copied bundle's
+    # display metadata; keep the internal package name and API brand intact so
+    # the upstream app-server contract is not altered.  The Store tree itself
+    # is never edited.
+    patch_windows_product_metadata(extracted)
 
     index_path = extracted / "webview" / "index.html"
     if not index_path.is_file():

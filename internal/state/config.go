@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -39,6 +40,13 @@ func syncIsolatedConfig(primaryCodexHome, isolatedCodexHome string) error {
 		return !isProjectSection(section)
 	})
 	managed = removeTopLevelCredentialSettings(managed)
+	// MCP servers are launched by the Codex child and inherit the values from
+	// their TOML environment table. Older Router builds copied the native
+	// Store value verbatim, which made node_repl and other helpers read
+	// C:\\Users\\<user>\\.codex even though the app-server itself had an
+	// isolated CODEX_HOME. Rewrite only the two home selectors; plugin code
+	// paths remain shared by design and do not contain credentials.
+	managed = rewriteIsolatedCodexHomeEnvironment(managed, isolatedCodexHome)
 	// The Windows elevated sandbox currently fails on a number of supported
 	// desktop installations (and can block every chat before a turn starts).
 	// Secondary homes are Router-owned, so make their safe fallback explicit.
@@ -64,10 +72,47 @@ func syncIsolatedConfig(primaryCodexHome, isolatedCodexHome string) error {
 	if err := os.Chmod(temporaryPath, 0o600); err != nil {
 		return fmt.Errorf("secure temporary config: %w", err)
 	}
-	if err := os.Rename(temporaryPath, configPath); err != nil {
+	// Windows app-server/plugin readers can briefly hold config.toml open.
+	// Reuse the bounded atomic-rename retry used by the state ledger so a
+	// transient sharing violation never surfaces as a user-visible Access is
+	// denied failure during a normal pool refresh.
+	if err := renameStateFile(temporaryPath, configPath); err != nil {
 		return fmt.Errorf("commit config: %w", err)
 	}
 	return nil
+}
+
+// rewriteIsolatedCodexHomeEnvironment rewrites explicit MCP environment
+// selectors that point at the native Codex home. It deliberately does not
+// parse and re-encode TOML: keeping the original fragment intact preserves
+// comments, unknown future keys, and plugin definitions across Store updates.
+// The helper is safe to call on both the Relay primary config and every
+// secondary subscription config.
+func rewriteIsolatedCodexHomeEnvironment(contents, isolatedCodexHome string) string {
+	isolatedCodexHome = strings.TrimSpace(isolatedCodexHome)
+	if isolatedCodexHome == "" || strings.TrimSpace(contents) == "" {
+		return contents
+	}
+	quoted := strconv.Quote(isolatedCodexHome)
+	lines := strings.Split(contents, "\n")
+	for index, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		equal := strings.IndexByte(trimmed, '=')
+		if equal < 0 {
+			continue
+		}
+		key := strings.TrimSpace(trimmed[:equal])
+		if key != "CODEX_HOME" && key != "CODEX_SQLITE_HOME" {
+			continue
+		}
+		indentLength := len(line) - len(strings.TrimLeft(line, " \t"))
+		indent := line[:indentLength]
+		lines[index] = indent + key + " = " + quoted
+	}
+	return strings.Join(lines, "\n")
 }
 
 // forceWindowsSandboxUnelevated returns a config fragment with exactly one
