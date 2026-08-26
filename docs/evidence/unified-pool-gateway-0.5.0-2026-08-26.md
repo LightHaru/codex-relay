@@ -8,7 +8,7 @@ account IDs, prompts, model output, or full history paths.
 | Item | Value |
 | --- | --- |
 | Version | `0.5.0` (installed and working tree) |
-| Baseline commit | `4e901fe` plus the changes in this checkout |
+| Source commit | `fce9fce` (`main`, pushed to `origin`) |
 | Pool schema | `3` |
 | Public contract | Router/route contract `2` in unified mode |
 | Installed source | Microsoft Store Codex `26.818.8289.0` |
@@ -155,6 +155,6 @@ no duplicate output or side effect.
 
 ## Release/publish status
 
-The working tree is ready for the final commit/push after this audit. A GitHub
-release publication is not implied by this evidence file; the release archive
-must be built from the final commit and its manifest/hash must be regenerated.
+Source commit `fce9fce` is pushed to `origin/main`. A GitHub release
+publication is not implied by this evidence file; the release archive must be
+built from the pushed commit and its manifest/hash must be regenerated.
