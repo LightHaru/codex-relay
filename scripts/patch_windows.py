@@ -501,6 +501,96 @@ STORE_26_818_8289_RENDERER_PROFILE = {
     ),
 }
 
+# Codex 26.820.7780.0 (Windows Store). The August 27 renderer keeps the
+# reviewed Usage & billing, Profile, Plugins, and reset contracts but advances
+# the generated module aliases again. The anchors below were discovered from
+# the installed Store ASAR and checked for one exact match before being pinned
+# here. Keeping the hash and anchors together prevents a later Store update
+# from silently applying the wrong Relay patch.
+STORE_26_820_7780_RENDERER_PROFILE = {
+    "profile_query_anchor": "async function n2a(){let e=await Ob.safeGet(`/wham/profiles/me`);",
+    "profile_query_replacement": (
+        "async function n2a(){let e=await(globalThis.CodexMuxWindows?.profileData?.()??"
+        "Ob.safeGet(`/wham/profiles/me`));"
+    ),
+    "usage_status_anchor": (
+        "let e=await Ob.safeGet(`/wham/usage`,{additionalHeaders:{\"OAI-App-Brand\":wb}})"
+    ),
+    "usage_status_replacement": (
+        "let e=typeof globalThis.CodexMuxWindows?.usageStatus===`function`?"
+        "await globalThis.CodexMuxWindows.usageStatus():{}"
+    ),
+    "plugin_request_anchor": (
+        "async sendRequest(e,t,n){if(this.dispatchMessage==null)throw Error(`AppServerRequestClient is missing a message dispatcher`);"
+        "return e===`config/read`?this.sendConfigReadRequest(t,n):this.enqueueRequest(e,t,"
+        "e===`plugin/list`&&n?.timeoutMs==null?{...n,timeoutMs:HLt}:n)}"
+    ),
+    "plugin_request_replacement": (
+        "async sendRequest(e,t,n){t=globalThis.CodexMuxWindows?.scopePluginRequest?.(e,t)??t;"
+        "if(this.dispatchMessage==null)throw Error(`AppServerRequestClient is missing a message dispatcher`);"
+        "return e===`config/read`?this.sendConfigReadRequest(t,n):this.enqueueRequest(e,t,"
+        "e===`plugin/list`&&n?.timeoutMs==null?{...n,timeoutMs:HLt}:n)}"
+    ),
+    "reset_query_anchor": (
+        "function WAa(){let e=(0,uH.c)(1),t;return e[0]===Symbol.for(`react.memo_cache_sentinel`)?"
+        "(t={queryKey:[`rate-limit-reset-credits`],queryFn:GAa,refetchInterval:nm.ONE_MINUTE,"
+        "staleTime:nm.FIVE_SECONDS},e[0]=t):t=e[0],Lt(t)}"
+    ),
+    "reset_query_replacement": (
+        "function WAa(){let n=(0,d1.useSyncExternalStore)("
+        "e=>globalThis.CodexMuxWindows?.subscribeReset?.(e)??(()=>{}),"
+        "()=>globalThis.CodexMuxWindows?.getResetAccountId?.()??null,()=>null);"
+        "return Lt({queryKey:[`rate-limit-reset-credits`,n??`primary`],"
+        "queryFn:()=>globalThis.CodexMuxWindows?.rateLimitResets?.(n??`primary`)??GAa(),"
+        "refetchInterval:nm.ONE_MINUTE,staleTime:nm.FIVE_SECONDS})}"
+    ),
+    "reset_mutation_anchor": (
+        "function KAa(){let e=(0,uH.c)(3),t=lt(),n=AS(),r;return e[0]!==n||e[1]!==t?"
+        "(r={mutationFn:qAa,onSuccess:(e,r)=>{let{creditId:i}=r,a=e.code;"
+        "if(a===`reset`||a===`already_redeemed`){let n=e.code===`reset`?e.credit?.id??i:i;"
+        "t.setQueryData([`rate-limit-reset-credits`],e=>gAa(e,a,n))}"
+        "Promise.all([n([`rate-limit-status`]),n([`rate-limit-reset-credits`])])}},"
+        "e[0]=n,e[1]=t,e[2]=r):r=e[2],$t(r)}"
+    ),
+    "reset_mutation_replacement": (
+        "function KAa(){let e=lt(),t=AS(),n=globalThis.CodexMuxWindows?.getResetAccountId?.()??null,"
+        "r=[`rate-limit-reset-credits`,n??`primary`];return $t({mutationFn:n?"
+        "i=>globalThis.CodexMuxWindows.consumeRateLimitReset(n,i):qAa,onSuccess:(n,i)=>{"
+        "let{creditId:a}=i,o=n.code;if(o===`reset`||o===`already_redeemed`){"
+        "let s=o===`reset`?n.credit?.id??a:a;e.setQueryData(r,e=>gAa(e,o,s))}"
+        "Promise.all([t([`rate-limit-status`]),t(r)])}})}"
+    ),
+    "selected_usage_anchor": "let y=v;if(g!=null){",
+    "selected_usage_replacement": (
+        "let y=globalThis.CodexMuxWindows?.selectedResetUsageWindows?.()??v;if(g!=null){"
+    ),
+    "reset_header_anchor": (
+        "let ve;t[46]===ge?ve=t[47]:(ve=(0,d1.jsxs)(bz,{children:[ge,_e]}),"
+        "t[46]=ge,t[47]=ve);"
+    ),
+    "reset_header_replacement": (
+        "let ve=(0,d1.jsxs)(bz,{children:[ge,_e,(0,d1.jsx)(`codex-mux-reset-picker`,{})]});"
+    ),
+    "profile_picker_anchor": "Dn=(0,$.jsxs)(Ct,{ref:be,header:Gt,children:[Sn,wn,Tn]})",
+    "profile_picker_replacement": (
+        "Dn=(0,$.jsxs)(Ct,{ref:be,header:Gt,children:[(0,$.jsx)(`codex-mux-profile-picker`,{}),Sn,wn,Tn]})"
+    ),
+    "plugin_picker_anchor": "I=(0,D.jsx)(m,{title:O,subtitle:k,action:F,children:w})",
+    "plugin_picker_replacement": (
+        "I=(0,D.jsx)(m,{title:O,subtitle:k,action:F,children:(0,D.jsxs)(`div`,"
+        "{className:`contents`,children:[(0,D.jsx)(`codex-mux-plugin-picker`,{}),w]})})"
+    ),
+}
+
+# Reviewed against Store 26.820.9563.0 on 2026-08-28. The profile is kept as
+# data because this release changed every minified symbol. Structural discovery
+# produced the exact anchors, the full Windows patch suite accepted them, and
+# probe_unified_provider.py proved custom Responses request/resume compatibility
+# without reading user credentials.
+STORE_26_820_9563_RENDERER_PROFILE = json.loads(
+    (ROOT / "scripts" / "windows_profiles" / "store-26.820.9563.json").read_text(encoding="utf-8")
+)
+
 LEGACY_RENDERER_PROFILE = {
     "profile_query_anchor": PROFILE_QUERY_ANCHOR,
     "profile_query_replacement": PROFILE_QUERY_REPLACEMENT,
@@ -530,6 +620,8 @@ WINDOWS_RENDERER_PROFILES = {
     "c5d839bc9b122b7ef2a2f0f45186b3e5895923de5b6cef5253c936fe670c0479": STORE_26_818_5229_RENDERER_PROFILE,
     "819b966c725fe9d80a9fd54d0949cc447464c983380dd4ee458437e963713bf1": STORE_26_818_5345_RENDERER_PROFILE,
     "e2f04d6aa921d07981b42368df0a28a8bebe8cd21375d4a1f9286757b51c1313": STORE_26_818_8289_RENDERER_PROFILE,
+    "5df8bf5a9d30742919390ab11fa419e83aab0891152569a42c6ea4abf15386c2": STORE_26_820_7780_RENDERER_PROFILE,
+    "e353c580ef4939d36f4ae32a35c896d089205c1d06b9f711cf78ffa4a3578a8a": STORE_26_820_9563_RENDERER_PROFILE,
 }
 TESTED_ASAR_HASHES = set(WINDOWS_RENDERER_PROFILES)
 

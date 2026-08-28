@@ -229,6 +229,9 @@ func (m *Multiplexer) syncManagedConfigLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// syncIsolatedConfig preserves a target authority's
+			// model_providers.relay_pool block, so shared plugin/settings
+			// refreshes remain live without removing the one public provider.
 			if err := m.store.SyncManagedConfig(); err != nil {
 				fmt.Fprintf(os.Stderr, "codex-mux: sync shared plugin config: %v\n", err)
 			}
@@ -497,6 +500,18 @@ func (m *Multiplexer) routeNewThread(message protocol.Message) {
 			m.write(protocol.Failure(message.ID, -32020, "Relay task authority is unavailable"))
 			return
 		}
+		// New Codex builds include the selected native provider in thread/start
+		// (normally "openai").  In pool mode that field must never escape to the
+		// authority, otherwise the new thread is pinned to one account and the
+		// gateway cannot use the remaining pool sources after that account is
+		// depleted.  Keep the public authority/thread unchanged and only rewrite
+		// the internal provider selector.
+		var err error
+		message, err = forceUnifiedProvider(message)
+		if err != nil {
+			m.write(protocol.Failure(message.ID, -32020, fmt.Sprintf("prepare Relay provider for new chat: %v", err)))
+			return
+		}
 		if err := m.forward(authorityID, message); err != nil {
 			m.write(protocol.Failure(message.ID, -32021, err.Error()))
 		}
@@ -549,6 +564,12 @@ func (m *Multiplexer) routeExistingRequest(message protocol.Message) {
 		if message.Method == "thread/resume" && threadID != "" {
 			m.ensureUnifiedTask(threadID)
 			m.runAsync(func() { m.routeThreadResume(message, threadID, authorityID) })
+			return
+		}
+		var err error
+		message, err = forceUnifiedProvider(message)
+		if err != nil {
+			m.write(protocol.Failure(message.ID, -32023, fmt.Sprintf("prepare Relay provider: %v", err)))
 			return
 		}
 		if err := m.forward(authorityID, message); err != nil {
@@ -714,9 +735,61 @@ func (m *Multiplexer) routeThreadResume(message protocol.Message, threadID, acco
 		m.write(protocol.Failure(message.ID, -32027, fmt.Sprintf("prepare chat history: %v", err)))
 		return
 	}
+	// A rollout created by the native Codex app can carry its original
+	// provider (usually "openai") in persisted thread metadata.  The authority
+	// process itself is started with relay_pool, but newer Codex builds prefer
+	// that persisted provider during thread/resume/startup prewarm.  If we pass
+	// the request through unchanged, an old chat bypasses the local gateway and
+	// talks to the exhausted authority account directly.  Explicitly pin the
+	// resume operation to Relay's one public provider; this changes no history,
+	// model, prompt, or thread identity and keeps credential selection inside the
+	// pool transport.
+	if m.unifiedPoolEnabled() {
+		var err error
+		message, err = forceUnifiedProvider(message)
+		if err != nil {
+			m.write(protocol.Failure(message.ID, -32027, fmt.Sprintf("prepare Relay provider for chat resume: %v", err)))
+			return
+		}
+	}
 	if err := m.forward(accountID, message); err != nil {
 		m.write(protocol.Failure(message.ID, -32023, err.Error()))
 	}
+}
+
+// forceUnifiedProvider pins every app-server operation that accepts a
+// modelProvider field to Relay's single public provider.  The native Codex
+// protocol calls this field modelProvider (camel case); the value is not an
+// upstream account and must not be allowed to select one directly in unified
+// pool mode.  Unknown methods are returned byte-for-byte unchanged so this
+// compatibility shim cannot add fields to methods that do not accept them.
+func forceUnifiedProvider(message protocol.Message) (protocol.Message, error) {
+	switch message.Method {
+	case "thread/start", "thread/resume", "thread/fork":
+		// These are the reviewed v2 methods whose schemas expose modelProvider.
+	default:
+		return message, nil
+	}
+	params := map[string]json.RawMessage{}
+	trimmed := bytes.TrimSpace(message.Params)
+	if len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null")) {
+		if err := json.Unmarshal(trimmed, &params); err != nil {
+			return message, fmt.Errorf("decode %s parameters: %w", message.Method, err)
+		}
+	}
+	params["modelProvider"] = json.RawMessage(`"relay_pool"`)
+	encoded, err := json.Marshal(params)
+	if err != nil {
+		return message, fmt.Errorf("encode %s parameters: %w", message.Method, err)
+	}
+	message.Params = encoded
+	return message, nil
+}
+
+// forceUnifiedResumeProvider is kept as a small compatibility wrapper for
+// callers/tests that specifically document the resume path.
+func forceUnifiedResumeProvider(message protocol.Message) (protocol.Message, error) {
+	return forceUnifiedProvider(message)
 }
 
 // ensureThreadHistoryOnAccount migrates a single rollout from the old native
@@ -1625,7 +1698,12 @@ func (m *Multiplexer) handleInbound(inbound backend.Inbound) {
 			}
 		}
 		if len(message.ID) == 0 {
-			m.writeRaw(inbound.Raw)
+			// Native app-server versions wrap response.failed in the generic
+			// "stream disconnected before completion" text even though Relay has
+			// deliberately supplied a terminal recovery event. Keep the terminal
+			// notification (so the renderer stops the turn) but replace that
+			// misleading wrapper with the stable, actionable Relay explanation.
+			m.write(sanitizeRelayRecoveryNotification(message))
 		}
 		return
 	}
@@ -1718,6 +1796,49 @@ func (m *Multiplexer) handleInbound(inbound backend.Inbound) {
 func isRelayPoolRecoveryNotification(message protocol.Message) bool {
 	value := strings.ToLower(message.Method + " " + string(message.Params) + " " + string(message.Result))
 	return strings.Contains(value, "relay_pool_recovery_required")
+}
+
+const relayPoolRecoveryMessage = "Relay Pool stopped safely after output or side effects; continue with a new turn."
+
+// sanitizeRelayRecoveryNotification keeps the app-server's terminal shape and
+// status while removing its misleading transport prefix. The function is
+// called only after isRelayPoolRecoveryNotification has positively identified
+// Relay's own marker, so ordinary user content is never rewritten.
+func sanitizeRelayRecoveryNotification(message protocol.Message) protocol.Message {
+	if message.Error != nil {
+		copyError := *message.Error
+		copyError.Message = relayPoolRecoveryMessage
+		message.Error = &copyError
+	}
+	if len(message.Params) > 0 {
+		var value any
+		if json.Unmarshal(message.Params, &value) == nil {
+			sanitizeRelayRecoveryJSON(value)
+			if encoded, err := json.Marshal(value); err == nil {
+				message.Params = encoded
+			}
+		}
+	}
+	return message
+}
+
+func sanitizeRelayRecoveryJSON(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if strings.EqualFold(key, "message") {
+				if text, ok := child.(string); ok && strings.Contains(strings.ToLower(text), "relay_pool_recovery_required") {
+					typed[key] = relayPoolRecoveryMessage
+					continue
+				}
+			}
+			sanitizeRelayRecoveryJSON(child)
+		}
+	case []any:
+		for _, child := range typed {
+			sanitizeRelayRecoveryJSON(child)
+		}
+	}
 }
 
 // publishProtocolError keeps a useful, credential-free explanation available
@@ -2359,6 +2480,9 @@ func (m *Multiplexer) startChild(ctx context.Context, account state.Account) (*b
 	args := m.realArgs
 	environment := m.environment
 	if m.unifiedPoolEnabled() && account.ID == m.taskAuthorityID() {
+		if err := state.EnsureRelayPoolProvider(account.CodexHome, m.gatewayBaseURL); err != nil {
+			return nil, err
+		}
 		args = unifiedProviderArgs(args, m.gatewayBaseURL)
 		environment = withMuxEnvironment(environment, "CODEX_RELAY_GATEWAY_TOKEN", m.gatewayToken)
 	}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -116,6 +117,164 @@ func TestPoolStickyUntilExplicitQuotaRejection(t *testing.T) {
 	}
 	if again.SourceID != ids[1] || again.FailoverCount != 1 {
 		t.Fatalf("duplicate rejection transitioned twice: %#v", again)
+	}
+}
+
+func TestTransientFailureRotatesWithoutDepletingOrDisconnectingSource(t *testing.T) {
+	store, _ := newPoolTestStore(t)
+	lease, err := store.AcquireBalancedPoolLease(PoolLease{
+		LeaseID: "transient-lease", LogicalTurnID: "transient-turn", ThreadID: "transient-thread",
+	}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedSource := lease.SourceID
+	lease, err = store.MarkPoolTransientFailure(lease.LeaseID, failedSource, "unexpected EOF before terminal event")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.SourceID == "" || lease.SourceID == failedSource || lease.AttemptNumber != 2 || lease.RetryCount != 1 {
+		t.Fatalf("transient failure did not create a fresh alternate attempt: %#v", lease)
+	}
+	failed := store.PoolState().Sources[failedSource]
+	if !failed.Connected || failed.AuthState != "authenticated" || failed.MembershipState == SourceDepleted || failed.QuotaEvidence.ExplicitlyDepleted() {
+		t.Fatalf("transport failure corrupted quota/auth membership: %#v", failed)
+	}
+	if failed.CircuitState != "suspect" || failed.TransientFailures != 1 || failed.CooldownUntil != 0 {
+		t.Fatalf("first transient failure should only mark the source suspect: %#v", failed)
+	}
+	if !slices.Contains(lease.ExcludedSources, failedSource) {
+		t.Fatalf("failed source was not excluded from the current logical turn: %#v", lease)
+	}
+	if err := store.CompletePoolLease(lease.LeaseID); err != nil {
+		t.Fatal(err)
+	}
+	if _, active := store.PoolState().ActiveLeases[lease.LeaseID]; active {
+		t.Fatal("successful fallback retained its active lease")
+	}
+}
+
+func TestRepeatedTransientFailuresOpenCooldownWithoutChangingQuota(t *testing.T) {
+	store, ids := newPoolTestStore(t)
+	failedSource := ids[0]
+	for index := 0; index < transientCircuitThreshold; index++ {
+		pool := store.PoolState()
+		if _, err := store.UpdatePool(pool.Revision, func(next *PoolState) error {
+			next.ActiveSourceID = failedSource
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		lease, err := store.AcquirePoolLease(PoolLease{
+			LeaseID: fmt.Sprintf("circuit-%d", index), LogicalTurnID: fmt.Sprintf("circuit-turn-%d", index),
+		}, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lease.SourceID != failedSource {
+			t.Fatalf("fixture selected %q, want %q", lease.SourceID, failedSource)
+		}
+		lease, err = store.MarkPoolTransientFailure(lease.LeaseID, failedSource, "connection reset")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.AbortPoolLease(lease.LeaseID, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	source := store.PoolState().Sources[failedSource]
+	if source.CircuitState != "cooldown" || source.CooldownUntil <= time.Now().UnixMilli() || source.TransientFailures != transientCircuitThreshold {
+		t.Fatalf("repeated transport failures did not open cooldown: %#v", source)
+	}
+	if !source.Connected || source.MembershipState == SourceDepleted || source.QuotaEvidence.ExplicitlyDepleted() {
+		t.Fatalf("transport cooldown changed auth/quota state: %#v", source)
+	}
+	pool := store.PoolState()
+	if _, err := store.UpdatePool(pool.Revision, func(next *PoolState) error {
+		next.ActiveSourceID = failedSource
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := store.AcquirePoolLease(PoolLease{LeaseID: "after-cooldown", LogicalTurnID: "after-cooldown"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lease.SourceID == failedSource {
+		t.Fatal("scheduler selected a source whose transport circuit is cooling down")
+	}
+}
+
+func TestBalancedPoolLeaseUsesOnePoolCursorAcrossConfirmedSources(t *testing.T) {
+	store, ids := newPoolTestStore(t)
+	// Give the first source a different short/weekly projection. A true pool
+	// must still use every confirmed source; it must not pin all traffic to the
+	// account that happens to report the largest percentage.
+	if _, err := store.UpdateCredentialSource(ids[0], func(source *CredentialSourceState) error {
+		shortUsed, longUsed := 10.0, 80.0
+		source.QuotaEvidence.ShortUsed = &shortUsed
+		source.QuotaEvidence.LongUsed = &longUsed
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	seen := make([]string, 0, len(ids)*2)
+	for index := 0; index < len(ids)*2; index++ {
+		lease, err := store.AcquireBalancedPoolLease(PoolLease{
+			LeaseID:       fmt.Sprintf("balanced-%d", index),
+			LogicalTurnID: fmt.Sprintf("balanced-turn-%d", index),
+		}, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen = append(seen, lease.SourceID)
+		if err := store.CompletePoolLease(lease.LeaseID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index, sourceID := range seen {
+		want := ids[index%len(ids)]
+		if sourceID != want {
+			t.Fatalf("balanced lease %d selected %q, want round-robin source %q; sequence=%v", index, sourceID, want, seen)
+		}
+	}
+	if cursor := store.PoolState().DispatchCursor; cursor != uint64(len(seen)) {
+		t.Fatalf("balanced cursor=%d, want %d", cursor, len(seen))
+	}
+}
+
+func TestBalancedPoolLeaseSkipsDepletedAndUnknownSources(t *testing.T) {
+	store, ids := newPoolTestStore(t)
+	if _, err := store.UpdateCredentialSource(ids[1], func(source *CredentialSourceState) error {
+		allowed := false
+		source.QuotaEvidence.Allowed = &allowed
+		source.QuotaEvidence.LimitReached = true
+		source.MembershipState = SourceDepleted
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateCredentialSource(ids[2], func(source *CredentialSourceState) error {
+		source.QuotaEvidence = QuotaEvidence{}
+		source.MembershipState = SourceProbation
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 4; index++ {
+		lease, err := store.AcquireBalancedPoolLease(PoolLease{
+			LeaseID:       fmt.Sprintf("eligible-%d", index),
+			LogicalTurnID: fmt.Sprintf("eligible-turn-%d", index),
+		}, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lease.SourceID == ids[1] || lease.SourceID == ids[2] {
+			t.Fatalf("balanced lease selected depleted/unknown source %q", lease.SourceID)
+		}
+		if err := store.CompletePoolLease(lease.LeaseID); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -272,9 +431,106 @@ func TestPoolCASHeartbeatAndCrashRecovery(t *testing.T) {
 	if err := store.RecoverPoolLeases(time.UnixMilli(heartbeat.ExpiresAt + 1)); err != nil {
 		t.Fatal(err)
 	}
+	if _, exists := store.PoolState().ActiveLeases[lease.LeaseID]; exists {
+		t.Fatal("startup retained an expired pre-commit lease")
+	}
+}
+
+func TestPoolRestartReleasesUncommittedLeaseForSameRequestReplay(t *testing.T) {
+	store, _ := newPoolTestStore(t)
+	lease, err := store.AcquirePoolLease(PoolLease{
+		LeaseID: "lease-restart", LogicalTurnID: "turn-restart", ThreadID: "thread-restart",
+	}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecoverPoolLeases(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := store.PoolState().ActiveLeases[lease.LeaseID]; exists {
+		t.Fatal("restart retained an uncommitted lease and would reject the native replay with HTTP 409")
+	}
+	task := store.TaskRecords()[lease.ThreadID]
+	if task.ActiveLeaseID != "" || task.RecoveryState != "" {
+		t.Fatalf("restart retained stale pre-commit task state: %#v", task)
+	}
+	replayed, err := store.AcquirePoolLease(PoolLease{
+		LeaseID: lease.LeaseID, LogicalTurnID: lease.LogicalTurnID, ThreadID: lease.ThreadID,
+	}, time.Minute)
+	if err != nil {
+		t.Fatalf("same native request ID could not be replayed after restart: %v", err)
+	}
+	if replayed.AttemptNumber != 1 || replayed.State != PoolLeaseBound {
+		t.Fatalf("replayed lease was not a fresh attempt: %#v", replayed)
+	}
+	if err := store.AbortPoolLease(replayed.LeaseID, ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPoolRestartKeepsCommittedLeaseRecoveryRequired(t *testing.T) {
+	store, _ := newPoolTestStore(t)
+	lease, err := store.AcquirePoolLease(PoolLease{
+		LeaseID: "lease-restart-visible", LogicalTurnID: "turn-restart-visible", ThreadID: "thread-restart-visible",
+	}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.MarkPoolLeaseProgress(lease.LeaseID, PoolLeaseStreaming, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecoverPoolLeases(time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	recovered := store.PoolState().ActiveLeases[lease.LeaseID]
 	if recovered.State != PoolLeaseRecoveryRequired {
-		t.Fatalf("expired uncertain lease=%q", recovered.State)
+		t.Fatalf("restart replayed a committed lease instead of requiring review: %#v", recovered)
+	}
+	if _, err := store.AcquirePoolLease(PoolLease{
+		LeaseID: lease.LeaseID, LogicalTurnID: lease.LogicalTurnID, ThreadID: lease.ThreadID,
+	}, time.Minute); err == nil || !strings.Contains(err.Error(), "requires recovery review") {
+		t.Fatalf("committed stale lease was silently replayed: %v", err)
+	}
+	if err := store.AcknowledgeTaskRecovery(lease.ThreadID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.PoolState().ActiveLeases[lease.LeaseID]; ok {
+		t.Fatal("acknowledged recovery retained its committed stale lease")
+	}
+}
+
+func TestAcquireReclaimsExpiredUncommittedLeaseButNotExpiredCommittedLease(t *testing.T) {
+	store, _ := newPoolTestStore(t)
+	first, err := store.AcquirePoolLease(PoolLease{
+		LeaseID: "expired-precommit", LogicalTurnID: "expired-precommit", ThreadID: "expired-thread",
+	}, time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if _, err := store.AcquirePoolLease(PoolLease{
+		LeaseID: first.LeaseID, LogicalTurnID: first.LogicalTurnID, ThreadID: first.ThreadID,
+	}, time.Minute); err != nil {
+		t.Fatalf("expired pre-commit lease was not reclaimed: %v", err)
+	}
+	if err := store.AbortPoolLease(first.LeaseID, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	committed, err := store.AcquirePoolLease(PoolLease{
+		LeaseID: "expired-committed", LogicalTurnID: "expired-committed", ThreadID: "expired-committed-thread",
+	}, time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.MarkPoolLeaseProgress(committed.LeaseID, PoolLeaseStreaming, false, true); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if _, err := store.AcquirePoolLease(PoolLease{
+		LeaseID: committed.LeaseID, LogicalTurnID: committed.LogicalTurnID, ThreadID: committed.ThreadID,
+	}, time.Minute); err == nil || !strings.Contains(err.Error(), "requires recovery review") {
+		t.Fatalf("expired committed lease was replayed: %v", err)
 	}
 }
 

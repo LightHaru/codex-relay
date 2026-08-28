@@ -28,13 +28,20 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--executable", required=True, type=Path)
     parser.add_argument("--timeout", type=float, default=45.0)
+    parser.add_argument(
+        "--terminal-mode",
+        choices=("completed", "failed", "completed-failed", "incomplete", "error"),
+        default="completed",
+        help="terminal Responses event to emit after the deterministic output",
+    )
     return parser.parse_args()
 
 
 class ProviderState:
-    def __init__(self) -> None:
+    def __init__(self, terminal_mode: str) -> None:
         self.lock = threading.Lock()
         self.requests: list[dict[str, Any]] = []
+        self.terminal_mode = terminal_mode
 
     def append(self, request: dict[str, Any]) -> None:
         with self.lock:
@@ -131,9 +138,33 @@ def handler_for(state: ProviderState):
                     "part": item["content"][0]}),
                 ("response.output_item.done", {"type": "response.output_item.done", "sequence_number": 6,
                     "output_index": 0, "item": item}),
-                ("response.completed", {"type": "response.completed", "sequence_number": 7,
-                    "response": response_payload(response_id, [item], "completed")}),
             ]
+            terminal_response = response_payload(response_id, [item], "completed")
+            terminal_name = "response.completed"
+            if state.terminal_mode == "failed":
+                terminal_name = "response.failed"
+                terminal_response["status"] = "failed"
+                terminal_response["error"] = {
+                    "code": "relay_pool_recovery_required",
+                    "message": "Relay Pool stopped safely after output began; continue with a new turn.",
+                }
+            elif state.terminal_mode == "completed-failed":
+                terminal_response["status"] = "failed"
+                terminal_response["error"] = {
+                    "code": "relay_pool_recovery_required",
+                    "message": "Relay Pool stopped safely after output began; continue with a new turn.",
+                }
+            elif state.terminal_mode == "incomplete":
+                terminal_name = "response.incomplete"
+                terminal_response["status"] = "incomplete"
+                terminal_response["incomplete_details"] = {"reason": "max_output_tokens"}
+            if state.terminal_mode == "error":
+                events.append(("error", {"type": "error", "sequence_number": 7,
+                    "code": "relay_pool_recovery_required",
+                    "message": "Relay Pool stopped safely after output began; continue with a new turn."}))
+            else:
+                events.append((terminal_name, {"type": terminal_name, "sequence_number": 7,
+                    "response": terminal_response}))
             encoded = "".join(
                 f"event: {name}\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n"
                 for name, payload in events
@@ -180,7 +211,7 @@ def wait_for(output: queue.Queue[dict[str, Any]], predicate: Any, timeout: float
 def main() -> int:
     args = parse_args()
     executable = args.executable.resolve(strict=True)
-    state = ProviderState()
+    state = ProviderState(args.terminal_mode)
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(state))
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
@@ -230,7 +261,7 @@ def main() -> int:
                 raise RuntimeError("initialize failed")
             send(process, {"method": "initialized"})
             send(process, {"id": 2, "method": "thread/start", "params": {
-                "cwd": str(workspace), "approvalPolicy": "never", "sandbox": "read-only", "ephemeral": True,
+                "cwd": str(workspace), "approvalPolicy": "never", "sandbox": "read-only",
             }})
             started = wait_for(output, lambda value: value.get("id") == 2, args.timeout)
             if started.get("error") is not None:
@@ -254,11 +285,42 @@ def main() -> int:
                 args.timeout,
             )
             status = str(((completed.get("params") or {}).get("turn") or {}).get("status") or "")
+            turn_error = ((completed.get("params") or {}).get("turn") or {}).get("error")
+            # Exercise the same resume path used by an existing Codex chat.
+            # A provider override that only works for thread/start would still
+            # let a resumed chat fall back to the native OpenAI transport.
+            send(process, {"id": 4, "method": "thread/resume", "params": {
+                "threadId": thread_id,
+                "modelProvider": "relay_pool",
+            }})
+            resumed = wait_for(output, lambda value: value.get("id") == 4, args.timeout)
+            resume_error = resumed.get("error")
+            send(process, {"id": 5, "method": "turn/start", "params": {
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": "Return the resumed deterministic probe token."}],
+                "cwd": str(workspace), "approvalPolicy": "never",
+            }})
+            resumed_turn = wait_for(output, lambda value: value.get("id") == 5, args.timeout)
+            resumed_turn_error = resumed_turn.get("error")
+            resumed_completed = wait_for(
+                output,
+                lambda value: value.get("method") == "turn/completed" and
+                    str(((value.get("params") or {}).get("turn") or {}).get("status") or "").lower() in {"completed", "failed"},
+                args.timeout,
+            )
+            resumed_status = str(((resumed_completed.get("params") or {}).get("turn") or {}).get("status") or "")
+            resumed_turn_error = ((resumed_completed.get("params") or {}).get("turn") or {}).get("error")
             evidence = {
                 "oneAppServer": True,
                 "oneThread": bool(thread_id),
                 "turnAccepted": True,
                 "turnStatus": status,
+                "turnError": turn_error,
+                "resumeAccepted": resume_error is None,
+                "resumeError": resume_error,
+                "resumedTurnAccepted": resumed_turn_error is None,
+                "resumedTurnStatus": resumed_status,
+                "resumedTurnError": resumed_turn_error,
                 "providerRequestCount": len(state.requests),
                 "providerRequests": state.requests,
                 "temporaryCodexHome": True,

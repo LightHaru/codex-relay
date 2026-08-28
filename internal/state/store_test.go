@@ -344,6 +344,42 @@ func TestSyncManagedConfigPropagatesPluginsWithoutRestart(t *testing.T) {
 	}
 }
 
+func TestSyncManagedConfigPreservesUnifiedAuthorityProvider(t *testing.T) {
+	root := t.TempDir()
+	primaryHome := filepath.Join(root, "primary")
+	if err := os.MkdirAll(primaryHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(primaryHome, "config.toml"), []byte("model = \"shared\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(root, "mux"), primaryHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority, err := store.AddAccount("Authority")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetController(authority.ID); err != nil {
+		t.Fatal(err)
+	}
+	authorityConfig := filepath.Join(authority.CodexHome, "config.toml")
+	if err := os.WriteFile(authorityConfig, []byte("model = \"relay\"\n[model_providers.relay_pool]\nname = \"Codex Relay Pool\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SyncManagedConfig(); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(authorityConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(contents), "model_providers.relay_pool") || !strings.Contains(string(contents), "model = \"shared\"") {
+		t.Fatalf("unified authority config was overwritten:\n%s", contents)
+	}
+}
+
 func TestUpdateAccountPreservesController(t *testing.T) {
 	root := t.TempDir()
 	store, err := Open(root, filepath.Join(root, "primary"))

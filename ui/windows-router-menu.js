@@ -11,6 +11,8 @@
   const API = "http://127.0.0.1:__CODEX_MUX_CONTROL_PORT__/v1";
   const TOKEN = "__CODEX_MUX_CONTROL_TOKEN__";
   const MENU_ID = "codex-mux-windows-menu";
+  const FALLBACK_TRIGGER_ID = "codex-mux-windows-account-trigger";
+  const FALLBACK_MENU_ID = "codex-mux-windows-account-popover";
   const TASK_ROUTE_BADGE_ID = "codex-mux-windows-task-route";
   const USAGE_SURFACE_ID = "codex-mux-windows-usage-surface";
   const STYLE_ID = "codex-mux-windows-menu-style";
@@ -19,6 +21,8 @@
   const RESET_ACCOUNT_KEY = "codex-mux.windows.reset-account";
   const CURRENT_THREAD_KEY = "codex-mux.windows.current-thread";
   const ROUTING_EVENT_IDS_KEY = "codex-mux.windows.routing-event-ids";
+  const LIVE_QUOTA_REFRESH_MS = 1000;
+  const LIVE_QUOTA_MAX_AGE_MS = 2500;
   const SCOPED_PLUGIN_METHODS = new Set([
     "app/installed",
     "app/list",
@@ -41,6 +45,8 @@
   let routingWatcherStarted = false;
   let routingEventSource = null;
   let latestAccounts = [];
+  let latestAccountsFetchedAt = 0;
+  let accountsRefreshPromise = null;
   let usageSurfaceVersion = 0;
   const resetSubscribers = new Set();
 
@@ -331,9 +337,15 @@
       let payload = null;
       try { payload = JSON.parse(event?.data || "null"); } catch { return; }
       const eventType = String(payload?.type || "").replaceAll("-", "_");
-      if (!/^(route_|routing_|turn_|quota_circuit_|handoff_|recovery_|all_accounts_|policy_|router_error$)/.test(eventType)) return;
+      if (!/^(account_updated$|route_|routing_|turn_|quota_circuit_|handoff_|recovery_|all_accounts_|policy_|router_error$)/.test(eventType)) return;
       const reasonCode = payload?.data?.reasonCode || payload?.data?.ReasonCode || "";
-      const shouldNotify = eventType === "router_error" || eventType === "handoff_failed" || eventType === "recovery_required" || eventType === "all_accounts_depleted" || eventType === "policy_downgraded" || (eventType === "handoff_committed" && reasonCode === "handoff_quota_exhausted");
+      // Request-level protocol errors and recovery markers remain available in
+      // the task badge, Usage & billing, and Router status surfaces. They must
+      // never become global desktop toasts: opening the OAuth browser, closing
+      // a window, or reconnecting the renderer can emit a harmless native
+      // -32600 wrapper and repeatedly cover unrelated work. Reserve toasts for
+      // explicit routing transitions that need immediate user attention.
+      const shouldNotify = eventType === "handoff_failed" || eventType === "all_accounts_depleted" || eventType === "policy_downgraded" || (eventType === "handoff_committed" && reasonCode === "handoff_quota_exhausted");
       if (payload?.id && shouldNotify && rememberRoutingEvent(payload.id)) {
         const detail = payload?.message || [payload?.previousAccountId, payload?.accountId].filter(Boolean).join(" → ");
         const title = eventType === "router_error"
@@ -347,6 +359,10 @@
       }
       const menu = document.getElementById?.(MENU_ID);
       if (menu?.isConnected) void refreshMenu(menu);
+      const fallbackMenu = document.getElementById?.(FALLBACK_MENU_ID);
+      if (fallbackMenu?.isConnected) void refreshMenu(fallbackMenu);
+      const fallbackTrigger = document.getElementById?.(FALLBACK_TRIGGER_ID);
+      if (fallbackTrigger?.isConnected) void refreshFallbackPoolTrigger(fallbackTrigger);
       const badge = document.getElementById?.(TASK_ROUTE_BADGE_ID);
       if (badge?.isConnected) void refreshTaskRouteBadge(badge);
     };
@@ -634,8 +650,14 @@
   }
 
   function remainingUsage(account) {
-    const usage = longestUsageWindow(account);
-    return usage ? usage.remainingPercent : null;
+    const windows = usageWindows(account?.rateLimits);
+    if (windows.length === 0) return null;
+    // The Relay scheduler treats a subscription as available only up to the
+    // tighter of its short (5-hour) and long (weekly) windows. Keep every
+    // account row and the additive pool on that same effective capacity so a
+    // popup cannot briefly show 408/500 (weekly-only) before settling on the
+    // scheduler's 350/500 (short-window constrained) value.
+    return windows.reduce((remaining, window) => Math.min(remaining, window.remainingPercent), 100);
   }
 
   function usageLabel(account) {
@@ -792,6 +814,12 @@
     style.textContent = `
       #${MENU_ID} { box-sizing: border-box; color: var(--text-primary, var(--token-text-primary, inherit)); font-family: inherit; }
       #${MENU_ID} *, #${MENU_ID} *::before, #${MENU_ID} *::after { box-sizing: border-box; }
+      #${FALLBACK_TRIGGER_ID} { display: flex; width: calc(100% - 16px); height: 40px; min-height: 40px; align-items: center; gap: 9px; margin: 0 8px; overflow: hidden; border: 0; border-radius: 9px; background: transparent; color: inherit; cursor: pointer; font: inherit; padding: 7px 9px; text-align: left; }
+      #${FALLBACK_TRIGGER_ID}:hover, #${FALLBACK_TRIGGER_ID}:focus-visible, #${FALLBACK_TRIGGER_ID}[aria-expanded="true"] { background: color-mix(in srgb, currentColor 9%, transparent); outline: none; }
+      #${FALLBACK_TRIGGER_ID} .codex-mux-win-summary-label { display: block; min-width: 0; }
+      .codex-mux-win-footer-chevron { display: grid; width: 22px; height: 22px; flex: 0 0 22px; margin-left: auto; place-items: center; color: var(--text-secondary, var(--token-text-secondary, currentColor)); font-size: 14px; opacity: .78; transition: transform 120ms ease; }
+      #${FALLBACK_TRIGGER_ID}[aria-expanded="true"] .codex-mux-win-footer-chevron { transform: rotate(180deg); }
+      #${FALLBACK_MENU_ID} { position: fixed; z-index: 2147483645; box-sizing: border-box; max-height: min(620px, calc(100vh - 90px)); overflow: auto; border: 1px solid color-mix(in srgb, currentColor 18%, transparent); border-radius: 14px; background: var(--main-surface-background, var(--token-main-surface-background, #292929)); box-shadow: 0 18px 52px rgb(0 0 0 / .4); color: var(--text-primary, var(--token-text-primary, #f7f7f7)); padding: 8px; }
       .codex-mux-win-divider { height: 1px; margin: 6px 8px; background: color-mix(in srgb, currentColor 18%, transparent); opacity: .65; }
       .codex-mux-win-summary, .codex-mux-win-row, .codex-mux-win-add { display: flex; align-items: center; min-height: 42px; gap: 10px; margin: 0 3px; padding: 7px 9px; border-radius: 9px; color: inherit; }
       .codex-mux-win-summary { cursor: default; }
@@ -925,6 +953,67 @@
       .codex-mux-win-account-reset-json { max-height: 160px; margin: 5px 0 0; overflow: auto; border-radius: 7px; background: rgb(0 0 0 / .16); color: var(--text-secondary, var(--token-text-secondary, currentColor)); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 10px; line-height: 14px; padding: 7px; white-space: pre-wrap; word-break: break-word; }
       .codex-mux-win-reset-surface { margin-top: 10px; }
       .codex-mux-win-reset-surface .codex-mux-win-surface-title { font-size: 12px; }
+      /* Manage pool sources is deliberately a native-feeling management
+         surface: one calm header, one compact pool summary, then readable
+         source cards in their own scroll region. */
+      .codex-mux-win-modal-manager { width: min(680px, calc(100vw - 32px)); height: min(760px, calc(100vh - 32px)); max-height: calc(100vh - 32px); display: flex; flex-direction: column; overflow: hidden; padding: 0; }
+      .codex-mux-win-modal-manager .codex-mux-win-manager-header { flex: 0 0 auto; align-items: flex-start; border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent); padding: 20px 22px 16px; }
+      .codex-mux-win-manager-heading { min-width: 0; flex: 1; }
+      .codex-mux-win-manager-kicker { color: #91a5ff; font-size: 10px; font-weight: 700; letter-spacing: .09em; line-height: 14px; text-transform: uppercase; }
+      .codex-mux-win-modal-manager .codex-mux-win-manager-header h2 { margin-top: 2px; font-size: 20px; line-height: 26px; }
+      .codex-mux-win-manager-description { max-width: 560px; margin-top: 6px; color: var(--text-secondary, var(--token-text-secondary, #c7c7c7)); font-size: 12px; line-height: 17px; }
+      .codex-mux-win-manager-add { display: inline-flex; min-height: 32px; flex: 0 0 auto; align-items: center; gap: 6px; margin-top: 1px; border: 0; border-radius: 8px; background: #5873e8; color: white; cursor: pointer; font: inherit; font-size: 12px; font-weight: 650; padding: 7px 11px; }
+      .codex-mux-win-manager-add:hover, .codex-mux-win-manager-add:focus-visible { background: #6d86f4; outline: none; }
+      .codex-mux-win-manager-add:disabled { cursor: wait; opacity: .6; }
+      .codex-mux-win-modal-manager .codex-mux-win-close-button { margin: 0 0 0 8px; }
+      .codex-mux-win-manager-content { min-height: 0; overflow: auto; padding: 16px 22px 22px; scrollbar-gutter: stable; }
+      .codex-mux-win-manager-overview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+      .codex-mux-win-manager-overview-card { min-width: 0; border: 1px solid color-mix(in srgb, currentColor 13%, transparent); border-radius: 11px; background: color-mix(in srgb, currentColor 4%, transparent); padding: 10px 11px; }
+      .codex-mux-win-manager-overview-label { overflow: hidden; color: var(--text-secondary, var(--token-text-secondary, #aaa)); font-size: 10px; line-height: 14px; text-overflow: ellipsis; white-space: nowrap; }
+      .codex-mux-win-manager-overview-value { margin-top: 2px; color: inherit; font-size: 17px; font-variant-numeric: tabular-nums; font-weight: 700; line-height: 22px; }
+      .codex-mux-win-manager-overview-detail { margin-top: 2px; color: var(--text-secondary, var(--token-text-secondary, #aaa)); font-size: 10px; line-height: 14px; }
+      .codex-mux-win-manager-overview-note { display: flex; align-items: center; gap: 6px; margin: 11px 0 0; color: var(--text-secondary, var(--token-text-secondary, #aaa)); font-size: 11px; line-height: 16px; }
+      .codex-mux-win-manager-overview-dot { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: #42c887; box-shadow: 0 0 0 3px color-mix(in srgb, #42c887 16%, transparent); }
+      .codex-mux-win-manager-overview-dot-updating { background: #e4ae55; box-shadow: 0 0 0 3px color-mix(in srgb, #e4ae55 16%, transparent); }
+      .codex-mux-win-manager-overview-dot-attention { background: #de6a73; box-shadow: 0 0 0 3px color-mix(in srgb, #de6a73 16%, transparent); }
+      .codex-mux-win-manager-list-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin: 20px 1px 8px; }
+      .codex-mux-win-manager-list-title { font-size: 13px; font-weight: 700; line-height: 18px; }
+      .codex-mux-win-manager-list-count { color: var(--text-secondary, var(--token-text-secondary, #aaa)); font-size: 11px; line-height: 16px; }
+      .codex-mux-win-modal-manager .codex-mux-win-account-list { display: grid; gap: 10px; margin-top: 0; }
+      .codex-mux-win-modal-manager .codex-mux-win-account-card { display: block; border: 1px solid color-mix(in srgb, currentColor 15%, transparent); border-radius: 14px; background: color-mix(in srgb, currentColor 4%, transparent); padding: 14px; transition: border-color 120ms ease, background 120ms ease; }
+      .codex-mux-win-modal-manager .codex-mux-win-account-card:hover { border-color: color-mix(in srgb, #8195ff 42%, transparent); background: color-mix(in srgb, #8195ff 6%, transparent); }
+      .codex-mux-win-account-card-top { display: flex; min-width: 0; align-items: flex-start; gap: 10px; }
+      .codex-mux-win-account-card-top .codex-mux-win-identity { min-width: 0; flex: 1; }
+      .codex-mux-win-account-card-status { flex: 0 0 auto; border: 1px solid color-mix(in srgb, #42c887 42%, transparent); border-radius: 999px; background: color-mix(in srgb, #42c887 16%, transparent); color: #9af0c5; font-size: 10px; font-weight: 650; line-height: 18px; padding: 0 8px; }
+      .codex-mux-win-account-card-status-depleted { border-color: color-mix(in srgb, #e0a04e 48%, transparent); background: color-mix(in srgb, #e0a04e 16%, transparent); color: #f4cb8a; }
+      .codex-mux-win-account-card-status-error, .codex-mux-win-account-card-status-disconnected { border-color: color-mix(in srgb, #df6a73 45%, transparent); background: color-mix(in srgb, #df6a73 16%, transparent); color: #f3aeb2; }
+      .codex-mux-win-account-card-status-updating { border-color: color-mix(in srgb, #e0a04e 42%, transparent); background: color-mix(in srgb, #e0a04e 12%, transparent); color: #edc47e; }
+      .codex-mux-win-account-quota { margin: 14px 0 0 39px; }
+      .codex-mux-win-account-quota-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+      .codex-mux-win-account-quota-label { color: var(--text-secondary, var(--token-text-secondary, #aaa)); font-size: 10px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; }
+      .codex-mux-win-account-quota-value { color: inherit; font-size: 12px; font-variant-numeric: tabular-nums; font-weight: 700; }
+      .codex-mux-win-account-quota-value-muted { color: var(--text-secondary, var(--token-text-secondary, #aaa)); font-weight: 500; }
+      .codex-mux-win-account-quota-track { height: 6px; margin-top: 7px; overflow: hidden; border-radius: 999px; background: color-mix(in srgb, currentColor 14%, transparent); }
+      .codex-mux-win-account-quota-fill { height: 100%; border-radius: inherit; background: linear-gradient(90deg, #5873e8, #79a2ff); transition: width 180ms ease; }
+      .codex-mux-win-account-quota-fill-low { background: linear-gradient(90deg, #d56a62, #e4a452); }
+      .codex-mux-win-account-quota-meta { margin-top: 6px; color: var(--text-secondary, var(--token-text-secondary, #aaa)); font-size: 10px; line-height: 14px; }
+      .codex-mux-win-account-window-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+      .codex-mux-win-account-window-chip { border: 1px solid color-mix(in srgb, currentColor 13%, transparent); border-radius: 999px; background: color-mix(in srgb, currentColor 4%, transparent); color: var(--text-secondary, var(--token-text-secondary, #bbb)); font-size: 10px; line-height: 18px; padding: 0 7px; }
+      .codex-mux-win-account-window-chip-low { border-color: color-mix(in srgb, #df6a73 35%, transparent); color: #efaaad; }
+      .codex-mux-win-account-card-footer { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-top: 13px; border-top: 1px solid color-mix(in srgb, currentColor 10%, transparent); padding-top: 11px; }
+      .codex-mux-win-account-card-footer .codex-mux-win-account-card-note { margin-right: auto; color: var(--text-secondary, var(--token-text-secondary, #aaa)); font-size: 10px; line-height: 14px; }
+      .codex-mux-win-modal-manager .codex-mux-win-account-action { min-height: 31px; border-radius: 8px; font-size: 11px; font-weight: 600; padding: 6px 10px; }
+      .codex-mux-win-modal-manager .codex-mux-win-account-resets { margin: 12px 0 0 39px; border-top: 0; padding-top: 0; }
+      .codex-mux-win-modal-manager .codex-mux-win-account-resets-header { border-top: 1px solid color-mix(in srgb, currentColor 10%, transparent); padding-top: 11px; }
+      .codex-mux-win-modal-manager .codex-mux-win-account-resets-title { color: var(--text-secondary, var(--token-text-secondary, #c6c6c6)); font-size: 11px; }
+      .codex-mux-win-modal-manager .codex-mux-win-account-resets-summary { font-size: 10px; line-height: 15px; }
+      .codex-mux-win-modal-manager .codex-mux-win-account-reset-list { gap: 6px; margin-top: 7px; }
+      .codex-mux-win-modal-manager .codex-mux-win-account-reset { min-height: 44px; border-radius: 8px; background: color-mix(in srgb, currentColor 4%, transparent); padding: 7px 8px; }
+      .codex-mux-win-modal-manager .codex-mux-win-account-reset-name { font-size: 11px; }
+      .codex-mux-win-modal-manager .codex-mux-win-account-reset-meta, .codex-mux-win-modal-manager .codex-mux-win-account-reset-details summary { font-size: 10px; }
+      .codex-mux-win-modal-manager .codex-mux-win-status { margin: 12px 0 0; border-radius: 8px; background: color-mix(in srgb, #e0a04e 13%, transparent); color: #f0c881; font-size: 11px; line-height: 16px; padding: 8px 9px; }
+      @media (max-width: 560px) { .codex-mux-win-modal-manager { width: calc(100vw - 20px); height: calc(100vh - 20px); max-height: calc(100vh - 20px); } .codex-mux-win-modal-manager .codex-mux-win-manager-header, .codex-mux-win-manager-content { padding-left: 15px; padding-right: 15px; } .codex-mux-win-manager-overview { grid-template-columns: 1fr 1fr; } .codex-mux-win-manager-overview-card:first-child { grid-column: 1 / -1; } .codex-mux-win-account-quota, .codex-mux-win-modal-manager .codex-mux-win-account-resets { margin-left: 0; } .codex-mux-win-account-card-footer { flex-wrap: wrap; justify-content: flex-start; } .codex-mux-win-account-card-footer .codex-mux-win-account-card-note { flex: 1 0 100%; } }
+      @media (prefers-reduced-motion: reduce) { .codex-mux-win-modal-manager .codex-mux-win-account-card, .codex-mux-win-account-quota-fill { transition: none; } }
       #${USAGE_SURFACE_ID} { box-sizing: border-box; width: 100%; margin: 24px 0 0; border-top: 1px solid color-mix(in srgb, currentColor 14%, transparent); padding-top: 20px; }
       #${USAGE_SURFACE_ID} *, #${USAGE_SURFACE_ID} *::before, #${USAGE_SURFACE_ID} *::after { box-sizing: border-box; }
       .codex-mux-win-usage-heading { font-size: 16px; font-weight: 650; line-height: 22px; }
@@ -1006,10 +1095,149 @@
     return null;
   }
 
+  function sidebarSettingsPlacement() {
+    const viewportHeight = Number(globalThis.innerHeight) || 900;
+    const candidates = rowsForProfileLabel(PROFILE_SETTINGS_LABELS)
+      .map((row) => ({ row, rect: row.getBoundingClientRect() }))
+      .filter(({ row, rect }) => row.parentElement && rect.width >= 80 && rect.width <= 420 && rect.height >= 24 && rect.height <= 90 && rect.left < 420 && rect.bottom > viewportHeight * 0.55)
+      .sort((left, right) => right.rect.bottom - left.rect.bottom);
+    const selected = candidates[0]?.row || null;
+    return selected ? { parent: selected.parentElement, before: selected } : null;
+  }
+
+  function renderFallbackPoolTrigger(trigger, accounts, routing = null) {
+    const connected = connectedAccounts(accounts);
+    const pool = poolPresentation(connected, routing);
+    const authority = connected.find((account) => account.relayAuthority || account.controller) || connected[0] || null;
+    const identity = authority ? accountName(authority) : "Codex Relay";
+    const detail = pool.connected > 0 && pool.known > 0
+      ? `${pool.connected} subscriptions · ${Math.round(pool.remaining)}% ${routingText("left")}`
+      : routingText("poolUpdating");
+    trigger.replaceChildren();
+    append(
+      trigger,
+      authority ? avatar(authority) : make("span", "codex-mux-win-summary-icon", "◔"),
+      (() => {
+        const labels = make("span", "codex-mux-win-summary-label");
+        append(labels, make("span", "codex-mux-win-title", identity));
+        return labels;
+      })(),
+      make("span", "codex-mux-win-footer-chevron", "⌃"),
+    );
+    trigger.title = "Open Codex Relay accounts";
+    trigger.setAttribute("aria-label", `${identity}. ${detail}. Open Codex Relay accounts.`);
+  }
+
+  function closeFallbackPoolMenu() {
+    document.getElementById(FALLBACK_MENU_ID)?.remove();
+    document.getElementById(FALLBACK_TRIGGER_ID)?.setAttribute("aria-expanded", "false");
+  }
+
+  async function toggleFallbackPoolMenu(trigger) {
+    if (document.getElementById(FALLBACK_MENU_ID)) {
+      closeFallbackPoolMenu();
+      return;
+    }
+    const popover = make("section", "");
+    popover.id = FALLBACK_MENU_ID;
+    popover.dataset.codexMuxFallback = "true";
+    popover.setAttribute("role", "dialog");
+    popover.setAttribute("aria-label", "Codex Relay accounts");
+    popover.addEventListener("pointerdown", (event) => event.stopPropagation());
+    popover.addEventListener("click", (event) => event.stopPropagation());
+    const rect = trigger.getBoundingClientRect();
+    const left = Math.max(8, Number(rect.left) || 8);
+    const availableWidth = Math.max(1, (Number(globalThis.innerWidth) || 1280) - left - 8);
+    const sidebarWidth = Math.max(1, Number(rect.width) || 259);
+    popover.style.left = `${left}px`;
+    popover.style.width = `${Math.min(sidebarWidth, availableWidth)}px`;
+    popover.style.bottom = `${Math.max(12, (Number(globalThis.innerHeight) || 900) - (Number(rect.top) || 0) + 8)}px`;
+    // Paint identity data synchronously, but never paint an expired quota
+    // number. A cold/reopened app shows "Updating…" for the first live read
+    // instead of briefly claiming an incorrect 400/500 or 500/500 balance.
+    renderMenu(popover, accountsForImmediatePaint(), null);
+    document.body.append(popover);
+    trigger.setAttribute("aria-expanded", "true");
+    await refreshMenu(popover);
+  }
+
+  function installFallbackPoolTrigger() {
+    let trigger = document.getElementById(FALLBACK_TRIGGER_ID);
+    if (trigger?.isConnected) {
+      const lastRefresh = Number(trigger.dataset.codexMuxLastRefresh || 0);
+      if (Date.now() - lastRefresh >= LIVE_QUOTA_REFRESH_MS) {
+        void refreshFallbackPoolTrigger(trigger);
+      }
+      return;
+    }
+    const placement = sidebarSettingsPlacement();
+    if (!placement || typeof placement.parent.replaceChild !== "function") return;
+    let inserted = false;
+    trigger = make("button", "");
+    trigger.id = FALLBACK_TRIGGER_ID;
+    trigger.type = "button";
+    trigger.setAttribute("aria-haspopup", "dialog");
+    trigger.setAttribute("aria-expanded", "false");
+    trigger.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void toggleFallbackPoolMenu(trigger);
+    });
+    // Render synchronously so the footer never flashes empty while the local
+    // account/usage requests are being refreshed.
+    renderFallbackPoolTrigger(trigger, accountsForImmediatePaint(), null);
+    placement.parent.replaceChild(trigger, placement.before);
+    inserted = true;
+    const lastRefresh = Number(trigger.dataset.codexMuxLastRefresh || 0);
+    if (inserted || Date.now() - lastRefresh >= LIVE_QUOTA_REFRESH_MS) {
+      void refreshFallbackPoolTrigger(trigger);
+    }
+  }
+
+  async function refreshFallbackPoolTrigger(trigger) {
+    trigger.dataset.codexMuxLastRefresh = String(Date.now());
+    try {
+      const accounts = await loadAccounts();
+      if (trigger.isConnected) renderFallbackPoolTrigger(trigger, accounts, null);
+    } catch {
+      if (trigger.isConnected) renderFallbackPoolTrigger(trigger, accountsForImmediatePaint(), null);
+    }
+  }
+
+  function openNativeSettingsFromFallback() {
+    closeFallbackPoolMenu();
+    // Codex's renderer listens for this same host message when its native
+    // Settings command is invoked. Dispatching the route message preserves the
+    // Relay profile footer until React performs the real page transition; a
+    // detached/reinserted native button no longer owns a valid React handler.
+    window.postMessage({ type: "navigate-to-route", path: "/settings/general-settings" }, "*");
+  }
+
   async function loadAccounts() {
-    const result = await request("/accounts");
-    latestAccounts = Array.isArray(result.accounts) ? result.accounts : [];
-    return latestAccounts;
+    if (accountsRefreshPromise) return accountsRefreshPromise;
+    accountsRefreshPromise = request("/accounts")
+      .then((result) => {
+        latestAccounts = Array.isArray(result.accounts) ? result.accounts : [];
+        latestAccountsFetchedAt = Date.now();
+        return latestAccounts;
+      })
+      .finally(() => { accountsRefreshPromise = null; });
+    return accountsRefreshPromise;
+  }
+
+  function accountsForImmediatePaint() {
+    if (Date.now() - latestAccountsFetchedAt <= LIVE_QUOTA_MAX_AGE_MS) return latestAccounts;
+    return latestAccounts.map((account) => {
+      const copy = { ...account };
+      delete copy.rateLimits;
+      delete copy.rateLimitsObservedAt;
+      delete copy.rateLimitAvailable;
+      delete copy.quotaAllowed;
+      delete copy.quotaLimitReached;
+      delete copy.nextRateLimitResetAt;
+      delete copy.quotaSource;
+      return copy;
+    });
   }
 
   function surface(title, description, className = "") {
@@ -1815,105 +2043,216 @@
     }
   }
 
+  function managerStatus(account, quota) {
+    if (!account?.connected) return hasPendingLogin(account) ? "Sign-in pending" : "Not connected";
+    if (account.error && quota == null) return "Connection error";
+    if (account.rateLimitError && quota == null) return "Quota unavailable";
+    if (quota == null) return "Quota updating";
+    if (quota <= 0) return "Quota depleted";
+    return "Connected";
+  }
+
+  function managerStatusClass(status) {
+    return status === "Connected" ? ""
+      : status === "Quota depleted" ? " codex-mux-win-account-card-status-depleted"
+        : status === "Quota updating" ? " codex-mux-win-account-card-status-updating"
+          : " codex-mux-win-account-card-status-error";
+  }
+
+  function managerOverviewCard(label, value, detail) {
+    const card = make("div", "codex-mux-win-manager-overview-card");
+    append(card, make("div", "codex-mux-win-manager-overview-label", label), make("div", "codex-mux-win-manager-overview-value", value), make("div", "codex-mux-win-manager-overview-detail", detail));
+    return card;
+  }
+
+  function renderManagerOverview(state) {
+    if (!state.overview?.replaceChildren) return;
+    const accounts = Array.isArray(state.accounts) ? state.accounts : [];
+    const connected = connectedAccounts(accounts);
+    const pool = poolPresentation(accounts, null);
+    const known = pool.connected > 0 && pool.known > 0;
+    const available = connected.filter((account) => {
+      const quota = remainingUsage(account);
+      return quota != null && quota > 0;
+    }).length;
+    const poolValue = known ? `${Math.round(pool.remaining)}% / ${Math.round(pool.maximum)}%` : "Updating…";
+    const status = pool.unknown > 0 ? "Quota updating" : available > 0 ? "Ready" : "Needs attention";
+    const statusClass = status === "Ready" ? "" : status === "Quota updating" ? " codex-mux-win-manager-overview-dot-updating" : " codex-mux-win-manager-overview-dot-attention";
+    state.overview.replaceChildren(
+      managerOverviewCard("Pool quota", poolValue, `${pool.known}/${pool.connected} sources verified`),
+      managerOverviewCard("Connected", String(pool.connected), "private sources"),
+      managerOverviewCard("Available now", String(available), `${pool.connected} connected`),
+      (() => {
+        const note = make("div", "codex-mux-win-manager-overview-note");
+        append(note, make("span", `codex-mux-win-manager-overview-dot${statusClass}`), make("span", "", `${status} · one Relay authority owns every task`));
+        return note;
+      })(),
+    );
+  }
+
   function renderAccountManager(state) {
     const accounts = Array.isArray(state.accounts) ? state.accounts : [];
     state.resetRenderVersion = (state.resetRenderVersion || 0) + 1;
     const renderVersion = state.resetRenderVersion;
+    renderManagerOverview(state);
     state.list.replaceChildren();
+    const listHeading = make("div", "codex-mux-win-manager-list-heading");
+    append(listHeading, make("div", "codex-mux-win-manager-list-title", "Pool sources"), make("div", "codex-mux-win-manager-list-count", `${accounts.length} configured`));
+    state.list.append(listHeading);
     if (accounts.length === 0) {
       state.list.append(make("div", "codex-mux-win-picker-empty", "No subscriptions are configured."));
       return;
     }
     accounts.forEach((account) => {
-      const card = make("div", "codex-mux-win-account-card");
+      const quota = remainingUsage(account);
+      const statusLabel = managerStatus(account, quota);
+      const card = make("article", `codex-mux-win-account-card${quota != null && quota <= 0 ? " codex-mux-win-account-card-depleted" : ""}`);
+      card.setAttribute("data-account-id", account.id || "");
+      const top = make("div", "codex-mux-win-account-card-top");
       const identity = make("div", "codex-mux-win-identity");
       const meta = make("div", "codex-mux-win-account-meta");
       const name = make("div", "codex-mux-win-name", accountName(account));
       if (isRelayPrimary(account)) name.append(make("span", "codex-mux-win-account-badge", "Relay authority"));
       const identityDetail = accountIdentityDetail(account);
-      const status = account.connected
-        ? usageStatus(account)
-        : isRelayHost(account) ? "Relay host · separate from Codex"
-        : hasPendingLogin(account) ? "Waiting for sign-in" : "Not connected — sign in again or remove this subscription";
-      append(meta, name, identityDetail ? make("div", "codex-mux-win-account-id", identityDetail) : null, make("div", "codex-mux-win-account-hint", status));
+      append(meta, name, identityDetail ? make("div", "codex-mux-win-account-id", identityDetail) : null);
       append(identity, avatar(account), meta);
-      const actions = make("div", "codex-mux-win-account-card-actions");
-      if (isRelayPrimary(account)) {
-        const authority = make("button", "codex-mux-win-account-action", "Relay authority");
-        authority.type = "button";
-        authority.disabled = true;
-        authority.title = "This subscription is the selected Relay task authority and cannot be removed while it owns the active logical worker";
-        actions.append(authority);
-      } else if (isRelayHost(account) && !account.connected) {
+      append(top, identity, make("span", `codex-mux-win-account-card-status${managerStatusClass(statusLabel)}`, statusLabel));
+      card.append(top);
+
+      if (account.connected) {
+        const quotaSection = make("section", "codex-mux-win-account-quota");
+        quotaSection.setAttribute("aria-label", "Effective quota");
+        const quotaHead = make("div", "codex-mux-win-account-quota-head");
+        append(quotaHead, make("span", "codex-mux-win-account-quota-label", "Effective quota"), make("span", `codex-mux-win-account-quota-value${quota == null ? " codex-mux-win-account-quota-value-muted" : ""}`, quota == null ? "Updating…" : `${Math.round(quota)}% available`));
+        const track = make("div", "codex-mux-win-account-quota-track");
+        track.setAttribute("role", "progressbar");
+        track.setAttribute("aria-valuemin", "0");
+        track.setAttribute("aria-valuemax", "100");
+        track.setAttribute("aria-valuenow", quota == null ? "0" : String(Math.round(quota)));
+        const fill = make("div", `codex-mux-win-account-quota-fill${quota != null && quota <= 10 ? " codex-mux-win-account-quota-fill-low" : ""}`);
+        fill.style.width = `${quota == null ? 0 : Math.max(0, Math.min(100, quota))}%`;
+        track.append(fill);
+        const windows = usageWindows(account.rateLimits).sort((left, right) => left.windowMinutes - right.windowMinutes);
+        const chips = make("div", "codex-mux-win-account-window-chips");
+        windows.forEach((window) => chips.append(make("span", `codex-mux-win-account-window-chip${window.remainingPercent <= 10 ? " codex-mux-win-account-window-chip-low" : ""}`, `${formatWindowDuration(window.windowMinutes)} · ${Math.round(window.remainingPercent)}% left`)));
+        append(quotaSection, quotaHead, track, make("div", "codex-mux-win-account-quota-meta", quotaResetSummary(account)), chips);
+        card.append(quotaSection);
+      }
+
+      const resetHost = make("div", "codex-mux-win-account-reset-host");
+      resetHost.append(renderAccountResetSection(account));
+      card.append(resetHost);
+
+      const footer = make("div", "codex-mux-win-account-card-footer");
+      const relayHostOnly = isRelayHost(account) && !account.connected;
+      const note = relayHostOnly ? "Relay host · separate from Codex" : isRelayPrimary(account) ? "Current task authority" : account.connected ? "Credential source only" : "Needs sign-in";
+      footer.append(make("span", "codex-mux-win-account-card-note", note));
+      if (relayHostOnly) {
         const host = make("button", "codex-mux-win-account-action", "Relay host");
         host.type = "button";
         host.disabled = true;
         host.title = "This private Relay home is kept as the app host and cannot be removed";
-        actions.append(host);
+        footer.append(host);
+      } else if (isRelayPrimary(account)) {
+        const authority = make("button", "codex-mux-win-account-action", "Relay authority");
+        authority.type = "button";
+        authority.disabled = true;
+        authority.title = "This subscription is the selected Relay task authority and cannot be removed while it owns the active logical worker";
+        footer.append(authority);
       } else if (account.connected) {
         const select = make("button", "codex-mux-win-account-action codex-mux-win-account-action-primary", "Use as authority");
         select.type = "button";
         select.title = "Make this connected subscription the Relay task authority; active turns must finish first";
         select.addEventListener("click", () => { void setPrimaryAccount(state, account, select); });
-        actions.append(select);
+        footer.append(select);
         if (isRelayHost(account)) {
           const host = make("button", "codex-mux-win-account-action", "Relay host");
           host.type = "button";
           host.disabled = true;
           host.title = "This private Relay home is kept as the app host and cannot be removed";
-          actions.append(host);
+          footer.append(host);
         } else {
           const remove = make("button", "codex-mux-win-account-action codex-mux-win-account-action-danger", "Remove");
           remove.type = "button";
           remove.addEventListener("click", () => { void removeManagedAccount(state, account, remove); });
-          actions.append(remove);
+          footer.append(remove);
         }
       } else if (hasPendingLogin(account)) {
         const cancel = make("button", "codex-mux-win-account-action", "Cancel sign-in");
         cancel.type = "button";
         cancel.addEventListener("click", () => { void cancelManagedPending(state, account, cancel); });
-        actions.append(cancel);
+        footer.append(cancel);
       } else {
         const remove = make("button", "codex-mux-win-account-action codex-mux-win-account-action-danger", "Remove");
         remove.type = "button";
         remove.addEventListener("click", () => { void removeManagedAccount(state, account, remove); });
-        actions.append(remove);
+        footer.append(remove);
       }
-      const resetHost = make("div", "codex-mux-win-account-reset-host");
-      resetHost.append(renderAccountResetSection(account));
-      append(card, identity, actions, resetHost);
+      card.append(footer);
       state.list.append(card);
       void loadAccountResetSection(state, account, resetHost, renderVersion);
     });
     accountManagerStatus(state, "");
   }
 
-  function openAccountSettings(menu, accounts) {
+  function openAccountSettings(menu, accounts, routing = null) {
     closeAccountManager();
     const backdrop = make("div", "codex-mux-win-modal-backdrop");
     const dialog = make("section", "codex-mux-win-modal codex-mux-win-modal-manager");
     dialog.setAttribute("role", "dialog");
     dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("tabindex", "-1");
+    const title = make("h2", "", "Manage pool sources");
+    title.id = `codex-mux-manager-title-${Date.now()}`;
+    dialog.setAttribute("aria-labelledby", title.id);
+    const description = make("div", "codex-mux-win-manager-description", "Manage the private quota sources behind this Relay. Chats, Goals, tools, history, and the visible Relay identity stay in one app.");
+    description.id = `${title.id}-description`;
+    dialog.setAttribute("aria-describedby", description.id);
+    const list = make("div", "codex-mux-win-account-list");
+    const overview = make("section", "codex-mux-win-manager-overview");
+    overview.setAttribute("aria-label", "Pool overview");
+    const status = make("div", "codex-mux-win-status");
+    status.hidden = true;
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    const state = { accounts: Array.isArray(accounts) ? accounts.slice() : [], routing, backdrop, dialog, list, overview, menu, status };
     const header = make("div", "codex-mux-win-manager-header");
-    append(header, make("h2", "", "Manage pool sources"));
+    const heading = make("div", "codex-mux-win-manager-heading");
+    append(heading, make("div", "codex-mux-win-manager-kicker", "Codex Relay Pool"), title, description);
     const close = make("button", "codex-mux-win-toast-close codex-mux-win-close-button", "×");
     close.type = "button";
     close.setAttribute("aria-label", "Close account settings");
+    close.title = "Close";
     close.addEventListener("click", () => closeAccountManager(state));
-    header.append(close);
-    const description = make("p", "", "Add, sign in, or remove private quota sources. Sources never become task workers: one fixed Relay authority continues to own every chat, Goal, tool call, and history file.");
-    const list = make("div", "codex-mux-win-account-list");
-    const status = make("div", "codex-mux-win-status");
-    status.hidden = true;
-    const state = { accounts: Array.isArray(accounts) ? accounts.slice() : [], backdrop, dialog, list, menu, status };
-    append(dialog, header, description, list, status);
+    const add = make("button", "codex-mux-win-manager-add");
+    add.type = "button";
+    add.setAttribute("aria-label", "Add another subscription");
+    append(add, make("span", "", "+"), make("span", "", "Add subscription"));
+    add.addEventListener("click", async () => {
+      if (add.disabled) return;
+      try {
+        await startSubscription(menu, add, state.accounts);
+        state.accounts = await loadAccounts();
+        renderAccountManager(state);
+      } catch (error) {
+        accountManagerStatus(state, `Could not add subscription: ${error.message}`);
+      }
+    });
+    append(header, heading, add, close);
+    const content = make("div", "codex-mux-win-manager-content");
+    append(content, overview, list, status);
+    append(dialog, header, content);
     backdrop.append(dialog);
     backdrop.addEventListener("click", (event) => {
       if (event.target === backdrop) closeAccountManager(state);
     });
+    backdrop.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeAccountManager(state);
+    });
     document.body.append(backdrop);
     activeAccountManager = state;
     renderAccountManager(state);
+    if (typeof close.focus === "function") close.focus();
     return state;
   }
 
@@ -1997,18 +2336,31 @@
     menu.replaceChildren();
     const pool = poolPresentation(accounts, routing);
 
+    if (menu.dataset?.codexMuxFallback === "true") {
+      const connected = connectedAccounts(accounts);
+      const authority = connected.find((account) => account.relayAuthority || account.controller) || connected[0] || null;
+      const profile = make("div", "codex-mux-win-row");
+      const identity = make("div", "codex-mux-win-identity");
+      const labels = make("div", "codex-mux-win-labels");
+      append(labels, make("div", "codex-mux-win-name", authority ? accountName(authority) : "Codex Relay"));
+      append(identity, authority ? avatar(authority) : make("span", "codex-mux-win-summary-icon", "◔"), labels);
+      profile.append(identity);
+      menu.append(profile, make("div", "codex-mux-win-divider"));
+    }
+
     const summary = make("div", "codex-mux-win-summary");
     const icon = make("div", "codex-mux-win-summary-icon", "◔");
     const label = make("div", "codex-mux-win-summary-label");
     append(
       label,
-      make("div", "codex-mux-win-title", routingText("sharedPool")),
+      make("div", "codex-mux-win-title", menu.dataset?.codexMuxFallback === "true" ? "Usage remaining" : routingText("sharedPool")),
       make("div", "codex-mux-win-subtext", pool.unknown > 0
         ? `${pool.known}/${pool.connected} ${routingText("poolUpdating")} · ${pool.unknown} updating`
         : `${pool.connected} ${routingText("poolWorkers")}`),
     );
-    const totalLabel = pool.connected === 0 ? "Updating…" : `${Math.round(pool.remaining)}% / ${Math.round(pool.maximum)}% ${routingText("left")}`;
-    append(summary, icon, label, make("div", `codex-mux-win-total${pool.connected === 0 ? " codex-mux-win-percent-muted" : ""}`, totalLabel));
+    const quotaKnown = pool.connected > 0 && pool.known > 0;
+    const totalLabel = quotaKnown ? `${Math.round(pool.remaining)}% / ${Math.round(pool.maximum)}% ${routingText("left")}` : "Updating…";
+    append(summary, icon, label, make("div", `codex-mux-win-total${quotaKnown ? "" : " codex-mux-win-percent-muted"}`, totalLabel));
     menu.append(summary);
 
     const add = make("button", "codex-mux-win-add");
@@ -2020,13 +2372,24 @@
       startSubscription(menu, add, accounts).catch((error) => setMenuStatus(menu, error.message));
     });
     menu.append(make("div", "codex-mux-win-divider"), add);
+    if (menu.dataset?.codexMuxFallback === "true") {
+      const nativeSettings = make("button", "codex-mux-win-add codex-mux-win-settings");
+      nativeSettings.type = "button";
+      append(nativeSettings, make("span", "codex-mux-win-settings-icon", "⚙"), make("span", "", "Settings"));
+      nativeSettings.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openNativeSettingsFromFallback();
+      });
+      menu.append(nativeSettings);
+    }
     const settings = make("button", "codex-mux-win-add codex-mux-win-settings");
     settings.type = "button";
     append(settings, make("span", "codex-mux-win-settings-icon", "⚙"), make("span", "", "Manage pool sources"));
     settings.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      openAccountSettings(menu, accounts);
+      openAccountSettings(menu, accounts, routing);
     });
     menu.append(settings);
     if (priorError) setMenuStatus(menu, priorError);
@@ -2400,8 +2763,14 @@
     scheduled = true;
     window.setTimeout(() => {
       installIntoProfileMenu();
+      installFallbackPoolTrigger();
       installUsageBillingSurface();
       installTaskRouteBadge();
+      const fallbackMenu = document.getElementById?.(FALLBACK_MENU_ID);
+      const lastMenuRefresh = Number(fallbackMenu?.dataset?.codexMuxLastRefresh || 0);
+      if (fallbackMenu?.isConnected && Date.now() - lastMenuRefresh >= LIVE_QUOTA_REFRESH_MS) {
+        void refreshMenu(fallbackMenu);
+      }
     }, 50);
   }
 

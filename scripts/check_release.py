@@ -34,6 +34,7 @@ REQUIRED_FILES = (
     "cmd/router-updater/main.go",
     "cmd/router-updater/main_test.go",
     "scripts/bootstrap_windows.ps1",
+    "scripts/windows_profiles/store-26.820.9563.json",
     "ui/windows-router-update-main.js",
     "ui/windows-router-update-preload.js",
     "ui/test-windows-router-update-main.cjs",

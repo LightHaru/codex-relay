@@ -3,8 +3,8 @@
 Releases are source-only. Never attach a patched app, ASAR, extracted official
 file, signing certificate, provisioning profile, credential, or account data.
 
-Release `0.5.0` is the Unified Pool Gateway line: one public Relay API and task
-authority over a hidden sticky quota pool. Do not describe deterministic fake
+Release `0.5.x` is the Unified Pool Gateway line: one public Relay API and task
+authority over a hidden quota-aware fair-share pool. Do not describe deterministic fake
 upstream tests as real-account quota evidence, and do not publish while any
 required live transition is still `LIVE PENDING` unless the release explicitly
 states that limitation.

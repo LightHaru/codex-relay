@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,6 +31,34 @@ func TestIsUsageLimitResponseIgnoresUnrelatedError(t *testing.T) {
 	}}
 	if isUsageLimitResponse(message) {
 		t.Fatal("unrelated error was misclassified as a usage limit")
+	}
+}
+
+func TestSanitizeRelayRecoveryNotificationRemovesNativeStreamPrefix(t *testing.T) {
+	message := protocol.Message{
+		Method: "turn/completed",
+		Params: json.RawMessage(`{"threadId":"thread-1","turn":{"status":"failed","error":{"message":"stream disconnected before completion: Relay Pool stopped safely after output began; continue with a new turn to avoid replaying side effects. (relay_pool_recovery_required)"}}}`),
+	}
+	if !isRelayPoolRecoveryNotification(message) {
+		t.Fatal("expected Relay recovery marker")
+	}
+	sanitized := sanitizeRelayRecoveryNotification(message)
+	if strings.Contains(strings.ToLower(string(sanitized.Params)), "stream disconnected") {
+		t.Fatalf("native stream prefix was not removed: %s", sanitized.Params)
+	}
+	if !strings.Contains(string(sanitized.Params), relayPoolRecoveryMessage) {
+		t.Fatalf("clean Relay recovery message was not preserved: %s", sanitized.Params)
+	}
+	var payload struct {
+		Turn struct {
+			Status string `json:"status"`
+		} `json:"turn"`
+	}
+	if err := json.Unmarshal(sanitized.Params, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Turn.Status != "failed" {
+		t.Fatalf("terminal status changed during sanitization: %q", payload.Turn.Status)
 	}
 }
 
@@ -144,6 +173,76 @@ func TestThreadIDParserSupportsReviewedProtocolShapes(t *testing.T) {
 		if got := threadIDFromAnyParams(json.RawMessage(fixture)); got != "thread-1" {
 			t.Fatalf("thread ID from %s = %q", fixture, got)
 		}
+	}
+}
+
+func TestForceUnifiedResumeProviderOverridesPersistedProvider(t *testing.T) {
+	message := protocol.Request("thread/resume", protocol.StringID("resume-1"), json.RawMessage(`{
+		"threadId":"thread-1","path":"C:\\sessions\\rollout.jsonl","modelProvider":"openai","cwd":"C:\\workspace"
+	}`))
+	updated, err := forceUnifiedResumeProvider(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var params map[string]json.RawMessage
+	if err := json.Unmarshal(updated.Params, &params); err != nil {
+		t.Fatal(err)
+	}
+	var provider string
+	if err := json.Unmarshal(params["modelProvider"], &provider); err != nil {
+		t.Fatal(err)
+	}
+	if provider != "relay_pool" {
+		t.Fatalf("provider = %q, want relay_pool", provider)
+	}
+	if string(params["threadId"]) != `"thread-1"` || string(params["path"]) != `"C:\\sessions\\rollout.jsonl"` {
+		t.Fatalf("resume parameters were not preserved: %s", updated.Params)
+	}
+}
+
+func TestForceUnifiedResumeProviderRejectsMalformedParameters(t *testing.T) {
+	message := protocol.Request("thread/resume", protocol.StringID("resume-2"), json.RawMessage(`[]`))
+	if _, err := forceUnifiedResumeProvider(message); err == nil {
+		t.Fatal("expected malformed object parameters to be rejected")
+	}
+}
+
+func TestForceUnifiedProviderPinsNewThreadAndFork(t *testing.T) {
+	for _, method := range []string{"thread/start", "thread/fork"} {
+		t.Run(method, func(t *testing.T) {
+			message := protocol.Request(method, protocol.StringID(method+"-1"), json.RawMessage(`{
+				"threadId":"thread-1","model":"gpt-5.6","modelProvider":"openai","cwd":"C:\\workspace"
+			}`))
+			updated, err := forceUnifiedProvider(message)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var params map[string]json.RawMessage
+			if err := json.Unmarshal(updated.Params, &params); err != nil {
+				t.Fatal(err)
+			}
+			var provider string
+			if err := json.Unmarshal(params["modelProvider"], &provider); err != nil {
+				t.Fatal(err)
+			}
+			if provider != "relay_pool" {
+				t.Fatalf("provider = %q, want relay_pool", provider)
+			}
+			if string(params["model"]) != `"gpt-5.6"` || string(params["cwd"]) != `"C:\\workspace"` {
+				t.Fatalf("provider rewrite did not preserve parameters: %s", updated.Params)
+			}
+		})
+	}
+}
+
+func TestForceUnifiedProviderLeavesTurnStartUnchanged(t *testing.T) {
+	message := protocol.Request("turn/start", protocol.StringID("turn-1"), json.RawMessage(`{"threadId":"thread-1","model":"gpt-5.6"}`))
+	updated, err := forceUnifiedProvider(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(updated.Params, message.Params) {
+		t.Fatalf("turn/start parameters unexpectedly changed: %s", updated.Params)
 	}
 }
 

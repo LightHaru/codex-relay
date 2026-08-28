@@ -18,22 +18,31 @@ Codex desktop
      ▼
 Relay Unified Pool Gateway
      │  one logical task authority
-     ▼
-PoolQuotaLedger + StickyQuotaSource
+      ▼
+PoolQuotaLedger + QuotaAwarePoolScheduler
      ├── credential source A (hidden)
      ├── credential source B (hidden)
      ├── credential source C (hidden)
      └── credential source D (hidden)
 ```
 
-Relay keeps the current source until upstream provides real quota/rate-limit evidence. Only after A is rejected does it mark A `DEPLETED` and try B with the same body, session, thread, turn, and connection. B, C, and D follow the same rule. There is no round-robin, weighted fair-share, new chat, or “move chat” event.
+Every request enters the same Relay API and the same task authority. The scheduler
+reads both quota windows (5-hour and weekly), removes depleted sources, and
+fair-shares requests across eligible sources with a persistent cursor. If upstream
+still rejects one source, Relay marks it `DEPLETED` and retries the exact body,
+session, thread, turn, and connection through the next source inside the **same
+logical request**. It never creates a worker, task, thread, or “move chat” event
+when changing a hidden credential.
 
 ### Guarantees and safety boundary
 
 - One `RelayGatewayWorker` owns the thread, session, Goal, tools/approvals, canonical history, and output stream.
 - Every logical turn has one `PoolLease`; pool revisions and source transitions are atomic, idempotent, and heartbeat-protected.
 - A→B→C→D retry is allowed only before visible output or a side effect. Body, model, thread, and Goal remain unchanged.
+- Network failures, HTTP 502/503/504, and SSE streams that end before `response.completed` are transport failures, not quota evidence. Before output the Gateway rotates sources; the failed source only enters a temporary `suspect/cooldown` state and keeps its credentials/quota intact.
+- On app or machine restart, an old lease that emitted no output/tool event is released before the Gateway accepts requests. The same request ID can continue without a false `409`; concurrent duplicates join one upstream flight instead of running twice.
 - If quota is rejected after output, a command, file change, or tool side effect, Relay does not replay. The turn becomes `recovery-required`; the source is excluded from later turns and the result must be reviewed.
+- If an upstream pauses or closes after `response.output_item.done` without a terminal, Relay gives `response.completed` a very short grace window; if it is still absent, Relay emits a standards-shaped recovery terminal and the mux shows an actionable Relay reason instead of `stream closed before response.completed`.
 - When every source is depleted, Relay returns one pool-level error. Network, timeout, and model errors are not guessed to be quota exhaustion.
 
 ## Quick Windows install
@@ -72,6 +81,8 @@ Open **Codex Relay**, open the account menu, and choose **Add another subscripti
 
 In Settings → **Usage & billing**, Relay keeps the native child page and sidebar, then inserts exactly one in-flow panel in the content column. It contains the **Codex Relay Pool** summary plus one card per connected account: short/long quota, reset time, plan, credits, reset credits, and a concrete error when that source cannot be read. This is billing information inside Settings; task routes and public status still hide source identities.
 
+The name/photo shown in the menu is the **Relay authority** (for example, Agent Aira), the one public identity of the single logical worker; it does not prove that every request is pinned to that credential. When the authority is depleted, the Gateway marks that source exhausted and retries the same request through the next pool source while thread, session, Goal, and UI remain one continuous flow. The actual source is used only for hidden routing and is visible in the Usage & billing panel.
+
 Task notifications are pool-level, such as “Relay Pool continued the session” or “Relay Pool has no usable quota”. They never say “Move chat to Subscription 2”, name a worker, or expose an account owner.
 
 ## Local API
@@ -95,7 +106,12 @@ npm run release:check
 git diff --check
 ```
 
-The suite covers state-v3 migration/rollback, sticky quota ledger, CAS, heartbeat/crash recovery, same-body retry, early-stream failover, late-stream no-replay, sanitization, in-flow Usage & billing UI, and a real installed `codex.real.exe` against a fake upstream. That E2E proves one task authority and A→B→C→D ordering inside one session; it is not live quota evidence.
+The suite covers state-v3 migration/rollback, quota-aware fair-share pool ledger,
+CAS, heartbeat/crash recovery, same-body retry, early-stream failover,
+late-stream no-replay, sanitization, in-flow Usage & billing UI, and a real
+installed `codex.real.exe` against a fake upstream. That E2E proves one task
+authority and A→B→C→D source rotation inside one session; it is not live quota
+evidence.
 
 Real-account E2E must be run separately with short prompts, authorized accounts, and a sanitized report. Record observed transitions, lease/pool revision, canonical hash/size, Goal continuity, duplicate/lost-output checks, the final exit code, and that the official Codex remained open. If live evidence does not exist, record `LIVE PENDING`, never `PASS`.
 

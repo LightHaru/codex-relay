@@ -48,21 +48,26 @@ caps size, verifies stable bytes and SHA-256, fsyncs a sibling temporary file,
 and installs atomically. On Windows access denied, an immutable sibling
 generation is used; a locked old rollout is never overwritten.
 
-Only pre-output, pre-side-effect quota rejection can be retried. After visible
-output or any command, approval, hook, file mutation or tool side effect, the
-lease becomes `recovery-required`; source depletion is recorded for future
-turns and the request is never replayed. A generic timeout/network error is not
-treated as quota evidence. Partial-stream seamless continuation is not claimed
-without a real upstream continuation primitive and proof.
+Only a pre-output, pre-side-effect failure can be retried. This includes quota
+rejection and classified transient transport/HTTP/SSE failure; transport
+failure updates a separate bounded circuit and never changes quota/auth state.
+After visible output or any command, approval, hook, file mutation or tool side
+effect, the lease becomes `recovery-required` and the request is never replayed.
+Partial-stream seamless continuation is not claimed without a real upstream
+continuation primitive and proof.
 
 ## Pool state integrity
 
 `PoolState.Revision` and `CredentialSourceState.Revision` are CAS-protected.
 One source transition is committed for concurrent duplicate quota events.
-`PoolLease` heartbeats prevent an interactive turn from expiring silently;
-startup converts expired uncertain leases to recovery-required. A continuous
-v2 rollback projection has no active reservations and marks active tasks for
-review. Its manifest records the projection hash and source pool revision.
+`PoolLease` heartbeats prevent an interactive turn from expiring silently.
+Before the Gateway listens, startup atomically releases only leases that never
+crossed the output/side-effect commit boundary; committed leases become
+recovery-required. A 30-second in-memory single-flight replay coalesces native
+duplicate request IDs without persisting model output or credentials. A
+continuous v2 rollback projection has no active reservations and marks active
+tasks for review. Its manifest records the projection hash and source pool
+revision.
 
 The only public pool capacity is normalized routing headroom. It is not an
 OpenAI billing balance, and upstream accounting remains per real credential.

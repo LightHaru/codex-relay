@@ -70,6 +70,58 @@ func TestEarliestRateLimitResetAtIsPerAccountWindow(t *testing.T) {
 	}
 }
 
+func TestCachedUsageQuotaCannotOverwriteNewerAppServerSnapshot(t *testing.T) {
+	weeklyMinutes := int64(10_080)
+	newerObservedAt := time.Date(2026, time.August, 27, 14, 0, 10, 0, time.UTC).UnixMilli()
+	olderObservedAt := newerObservedAt - int64((10*time.Second)/time.Millisecond)
+	allowed := true
+	limitReached := false
+	snapshot := AccountSnapshot{
+		ID: "account-1", Enabled: true, Connected: true, AuthType: "chatgpt",
+		RateLimitAvailable: true, RateLimitsObservedAt: newerObservedAt, QuotaSource: "app-server",
+		RateLimits: &RateLimits{Primary: &RateLimitWindow{UsedPercent: 14, WindowDurationMins: &weeklyMinutes}},
+	}
+	staleUsage := usageQuotaSignal{
+		Allowed: &allowed, LimitReached: &limitReached, ObservedAt: olderObservedAt,
+		RateLimits: &RateLimits{Primary: &RateLimitWindow{UsedPercent: 0, WindowDurationMins: &weeklyMinutes}},
+	}
+
+	if applyUsageQuotaSignal(&snapshot, staleUsage) {
+		t.Fatal("stale Usage cache must not replace a newer direct app-server quota snapshot")
+	}
+	if got := snapshot.RateLimits.Primary.UsedPercent; got != 14 {
+		t.Fatalf("fresh app-server usage changed to %.0f%%, want 14%%", got)
+	}
+	if snapshot.QuotaSource != "app-server" || snapshot.RateLimitsObservedAt != newerObservedAt {
+		t.Fatalf("fresh quota provenance changed: %#v", snapshot)
+	}
+}
+
+func TestNewerUsageQuotaCanRepairAppServerSnapshot(t *testing.T) {
+	weeklyMinutes := int64(10_080)
+	observedAt := time.Date(2026, time.August, 27, 14, 0, 10, 0, time.UTC).UnixMilli()
+	allowed := true
+	limitReached := false
+	snapshot := AccountSnapshot{
+		RateLimitAvailable: true, RateLimitsObservedAt: observedAt, QuotaSource: "app-server",
+		RateLimits: &RateLimits{Primary: &RateLimitWindow{UsedPercent: 14, WindowDurationMins: &weeklyMinutes}},
+	}
+	newerUsage := usageQuotaSignal{
+		Allowed: &allowed, LimitReached: &limitReached, ObservedAt: observedAt + 1,
+		RateLimits: &RateLimits{Primary: &RateLimitWindow{UsedPercent: 15, WindowDurationMins: &weeklyMinutes}},
+	}
+
+	if !applyUsageQuotaSignal(&snapshot, newerUsage) {
+		t.Fatal("newer Usage evidence should be applied")
+	}
+	if got := snapshot.RateLimits.Primary.UsedPercent; got != 15 {
+		t.Fatalf("newer Usage evidence was not applied: got %.0f%%", got)
+	}
+	if snapshot.QuotaSource != "app-server+usage" {
+		t.Fatalf("quota source=%q, want app-server+usage", snapshot.QuotaSource)
+	}
+}
+
 func TestAggregateRateLimitsKeepsPoolAvailable(t *testing.T) {
 	weeklyMinutes := int64(10_080)
 	limits, err := aggregateRateLimits([]AccountSnapshot{

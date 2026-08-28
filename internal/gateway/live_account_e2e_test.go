@@ -18,11 +18,79 @@ import (
 	"github.com/LightHaru/codex-relay/internal/state"
 )
 
-// TestLiveAccountStickyFailover is intentionally opt-in. It reads only the
+// TestLiveAccountPoolSmoke is the non-destructive counterpart to the forced
+// failover test below. It copies one operator-selected credential into an
+// isolated temporary Relay state and sends exactly one short turn through the
+// real Gateway transport. It is useful when every available subscription has
+// quota and deliberately exhausting one would be unsafe.
+func TestLiveAccountPoolSmoke(t *testing.T) {
+	if os.Getenv("CODEX_RELAY_LIVE_SMOKE") != "1" {
+		t.Skip("set CODEX_RELAY_LIVE_SMOKE=1 to run the non-destructive real-account smoke test")
+	}
+	sourceDirs := splitLiveSourceDirs(os.Getenv("CODEX_RELAY_LIVE_SOURCE_DIRS"))
+	if len(sourceDirs) == 0 {
+		t.Fatal("CODEX_RELAY_LIVE_SOURCE_DIRS must list at least one operator-selected source home")
+	}
+	sourceDir := sourceDirs[0]
+	auth, err := os.ReadFile(filepath.Join(sourceDir, "auth.json"))
+	if err != nil {
+		t.Fatalf("read selected source credential: %v", err)
+	}
+
+	root := t.TempDir()
+	store, err := state.Open(filepath.Join(root, "mux"), filepath.Join(root, "authority-home"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := store.Accounts()[0]
+	if err := os.MkdirAll(account.CodexHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	authPath := filepath.Join(account.CodexHome, "auth.json")
+	if err := os.WriteFile(authPath, auth, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(authPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateCredentialSource(account.ID, func(source *state.CredentialSourceState) error {
+		source.Connected = true
+		source.AuthState = "authenticated"
+		source.MembershipState = state.SourceProbation
+		source.QuotaEvidence = state.QuotaEvidence{}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	token := "live-local-smoke-token"
+	transport := &Transport{
+		Store: store, LocalBearerToken: token,
+		Client: &http.Client{Timeout: 3 * time.Minute}, BalancedPool: true,
+	}
+	server := httptest.NewServer(transport)
+	defer server.Close()
+	model := strings.TrimSpace(os.Getenv("CODEX_RELAY_LIVE_MODEL"))
+	if model == "" {
+		model = "gpt-5.6-terra"
+	}
+	status, body := sendLiveTurn(t, server.URL, token, model, "live-relay-smoke-thread", 1)
+	terminal := classifySSETerminal([]byte(body))
+	if status != http.StatusOK || terminal != "completed" {
+		t.Fatalf("live smoke did not complete; status=%d terminal=%q pool=%s", status, terminal, sanitizedLivePool(store.PoolState()))
+	}
+	pool := store.PoolState()
+	if len(pool.ActiveLeases) != 0 {
+		t.Fatalf("live smoke left unfinished Relay state: %s", sanitizedLivePool(pool))
+	}
+	t.Logf("LIVE SMOKE PASS: turns=1 terminal=response.completed health=%s", pool.Health)
+}
+
+// TestLiveAccountPoolFailover is intentionally opt-in. It reads only the
 // operator-selected source auth files, copies them into temporary isolated
 // homes, sends up to three short harmless turns to the real Responses service,
 // and never prints credential material or raw upstream output.
-func TestLiveAccountStickyFailover(t *testing.T) {
+func TestLiveAccountPoolFailover(t *testing.T) {
 	if os.Getenv("CODEX_RELAY_LIVE_ACCOUNTS") != "1" {
 		t.Skip("set CODEX_RELAY_LIVE_ACCOUNTS=1 to run the real-account E2E")
 	}
@@ -77,7 +145,7 @@ func TestLiveAccountStickyFailover(t *testing.T) {
 	}
 
 	token := "live-local-test-token"
-	transport := &Transport{Store: store, LocalBearerToken: token, Client: &http.Client{Timeout: 3 * time.Minute}}
+	transport := &Transport{Store: store, LocalBearerToken: token, Client: &http.Client{Timeout: 3 * time.Minute}, BalancedPool: true}
 	server := httptest.NewServer(transport)
 	defer server.Close()
 	model := strings.TrimSpace(os.Getenv("CODEX_RELAY_LIVE_MODEL"))
@@ -89,8 +157,8 @@ func TestLiveAccountStickyFailover(t *testing.T) {
 	threadID := "live-relay-thread"
 	for turn := 1; turn <= 3; turn++ {
 		status, body := sendLiveTurn(t, server.URL, token, model, threadID, turn)
-		if status != http.StatusOK || !strings.Contains(body, "response.completed") {
-			t.Fatalf("live turn %d did not complete; status=%d pool=%s", turn, status, sanitizedLivePool(store.PoolState()))
+		if status != http.StatusOK || classifySSETerminal([]byte(body)) != "completed" {
+			t.Fatalf("live turn %d did not complete; status=%d terminal=%q pool=%s", turn, status, classifySSETerminal([]byte(body)), sanitizedLivePool(store.PoolState()))
 		}
 	}
 
@@ -102,7 +170,7 @@ func TestLiveAccountStickyFailover(t *testing.T) {
 		t.Fatalf("LIVE PENDING: first source was not marked depleted; pool=%s", sanitizedLivePool(pool))
 	}
 	if pool.Sources[pool.SourceOrder[1]].MembershipState != state.SourceActive {
-		t.Fatalf("live continuation did not remain sticky on the next source; pool=%s", sanitizedLivePool(pool))
+		t.Fatalf("live continuation did not remain on the next eligible pool source; pool=%s", sanitizedLivePool(pool))
 	}
 	t.Logf("LIVE PASS: turns=3 failovers=%d activeSourceOrdinal=2 health=%s", pool.FailoverCount, pool.Health)
 }
@@ -121,7 +189,7 @@ func splitLiveSourceDirs(value string) []string {
 func sendLiveTurn(t *testing.T, endpoint, token, model, threadID string, turn int) (int, string) {
 	t.Helper()
 	payload := map[string]any{
-		"model": model, "stream": true,
+		"model": model, "stream": true, "store": false,
 		"input": []any{map[string]any{"role": "user", "content": []any{map[string]any{
 			"type": "input_text", "text": "Reply with exactly OK. Live Relay smoke turn " + strconv.Itoa(turn),
 		}}}},

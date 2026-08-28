@@ -78,7 +78,7 @@ class FakeElement {
   closest() { return null; }
 }
 
-function loadBridge({ fetchImpl, privateLoginImpl, updaterImpl, eventSourceImpl, navigatorLanguage = "en-US" } = {}) {
+function loadBridge({ fetchImpl, privateLoginImpl, updaterImpl, eventSourceImpl, navigatorLanguage = "en-US", postMessageImpl } = {}) {
   const filename = path.join(__dirname, "windows-router-menu.js");
   const source = fs.readFileSync(filename, "utf8");
   const startupAnchor = '  if (document.readyState === "loading") {';
@@ -101,7 +101,13 @@ function loadBridge({ fetchImpl, privateLoginImpl, updaterImpl, eventSourceImpl,
        "    renderAccountResetSection,",
        "    consumeRateLimitReset,",
       "    renderMenu,",
+      "    renderFallbackPoolTrigger,",
+      "    toggleFallbackPoolMenu,",
+      "    accountsForImmediatePaint,",
+      "    seedAccountsCache: (accounts, fetchedAt) => { latestAccounts = accounts; latestAccountsFetchedAt = fetchedAt; },",
+      "    openNativeSettingsFromFallback,",
       "    remainingUsage,",
+      "    longestUsageWindow,",
       "    accountName,",
       "    accountIdentityDetail,",
       "    quotaResetSummary,",
@@ -185,6 +191,7 @@ function loadBridge({ fetchImpl, privateLoginImpl, updaterImpl, eventSourceImpl,
     },
     setTimeout: fakeSetTimeout,
     codexMuxLoginWindow: browserLogin,
+    postMessage: postMessageImpl || (() => {}),
     codexMuxUpdater: updaterImpl || {
       async getState() { return { available: false }; },
       async install() { return { installing: false }; },
@@ -570,6 +577,70 @@ test("Relay host remains visibly separate and cannot be removed from Account set
   assert.doesNotMatch(text, /Remove/);
 });
 
+test("Manage pool sources uses a readable native-feeling modal with pool overview and accessible quota cards", async () => {
+  const { document, hooks } = loadBridge({
+    fetchImpl: async (url) => ({
+      ok: true,
+      json: async () => url.endsWith("/rate-limit-resets")
+        ? { available_count: 1, applicable_available_count: 1, credits: [{ id: "reset-1", status: "available", title: "Weekly reset" }] }
+        : { accounts: [] },
+    }),
+  });
+  const accounts = [
+    {
+      id: "primary",
+      displayName: "Agent Aira",
+      email: "aira@example.invalid",
+      planLabel: "Plus",
+      enabled: true,
+      connected: true,
+      relayAuthority: true,
+      rateLimits: {
+        primary: { usedPercent: 12, windowDurationMins: 300 },
+        secondary: { usedPercent: 31, windowDurationMins: 10080 },
+      },
+    },
+    {
+      id: "secondary",
+      displayName: "Susan Jones",
+      email: "susan@example.invalid",
+      planLabel: "Plus",
+      enabled: true,
+      connected: true,
+      rateLimits: { primary: { usedPercent: 100, windowDurationMins: 10080 } },
+    },
+  ];
+  const state = hooks.openAccountSettings(new FakeElement("menu"), accounts);
+  const dialog = state.dialog;
+  assert.equal(document.body.children.length, 1);
+  assert.match(dialog.className, /codex-mux-win-modal-manager/);
+  assert.equal(dialog.getAttribute("role"), "dialog");
+  assert.equal(dialog.getAttribute("aria-modal"), "true");
+  assert.equal(dialog.getAttribute("tabindex"), "-1");
+  assert.ok(dialog.getAttribute("aria-labelledby"));
+  assert.ok(dialog.getAttribute("aria-describedby"));
+  assert.equal(state.status.getAttribute("role"), "status");
+  assert.equal(state.status.getAttribute("aria-live"), "polite");
+  assert.equal(state.overview.children.length, 4, "the modal should expose pool summary cards and health note");
+  assert.equal(state.list.children[0].className, "codex-mux-win-manager-list-heading");
+  assert.equal(state.list.children.filter((child) => child?.tagName === "article").length, 2);
+  const text = collectText(dialog);
+  assert.match(text, /Codex Relay Pool/);
+  assert.match(text, /Manage pool sources/);
+  assert.match(text, /Pool quota/);
+  assert.match(text, /Available now/);
+  assert.match(text, /Pool sources/);
+  assert.match(text, /Agent Aira/);
+  assert.match(text, /Susan Jones/);
+  assert.match(text, /Effective quota/);
+  assert.match(text, /5h · 88% left/);
+  assert.match(text, /1w · 69% left/);
+  assert.match(text, /Use as authority/);
+  assert.match(text, /Remove/);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(collectText(dialog), /Weekly reset/);
+});
+
 test("the Windows bridge keeps the native Usage & billing page and adds an in-flow Relay surface", () => {
   const source = fs.readFileSync(path.join(__dirname, "windows-router-menu.js"), "utf8");
   assert.match(source, /const USAGE_SURFACE_ID = "codex-mux-windows-usage-surface"/);
@@ -607,6 +678,26 @@ test("usage summary keeps known quota visible when another account has no quota 
   assert.match(text, /97% \/ 200% left/);
   assert.match(text, /quota updating/);
   assert.doesNotMatch(text, /–/);
+});
+
+test("effective quota uses the tighter 5-hour or weekly window", () => {
+  const { hooks } = loadBridge();
+  const account = {
+    id: "account-1",
+    enabled: true,
+    connected: true,
+    rateLimits: {
+      primary: { usedPercent: 92, windowDurationMins: 300 },
+      secondary: { usedPercent: 32, windowDurationMins: 10080 },
+    },
+  };
+  assert.equal(hooks.remainingUsage(account), 8);
+  assert.equal(hooks.longestUsageWindow(account).remainingPercent, 68);
+
+  const menu = new FakeElement("menu");
+  hooks.renderMenu(menu, [account], null);
+  assert.match(collectText(menu), /8% \/ 100% left/);
+  assert.doesNotMatch(collectText(menu), /68% \/ 100% left/);
 });
 
 test("five fresh subscriptions are presented as one 500 percent quota pool", () => {
@@ -806,7 +897,168 @@ test("replayed handoff event shows only one session-scoped toast", async () => {
   assert.equal(document.body.children.length, toastCount);
 });
 
-test("Relay error event shows the actionable reason instead of only an exclamation mark", () => {
+test("task recovery never becomes a global toast", () => {
+  let source;
+  class FakeEventSource {
+    constructor() { source = this; }
+  }
+  const { hooks, storage } = loadBridge({
+    eventSourceImpl: FakeEventSource,
+    fetchImpl: async () => ({ ok: true, json: async () => ({ accounts: [], decisions: [] }) }),
+  });
+  hooks.startRoutingWatcher();
+  const threadId = "019fe645-f42f-7a20-8b2b-054f46c0af0a";
+  source.onmessage({ data: JSON.stringify({
+    id: "recovery:hidden",
+    type: "recovery-required",
+    threadId,
+    message: "A background task needs review",
+  }) });
+  assert.equal(hooks.getActiveToast(), null, "a blank/new chat must not show another task's recovery toast");
+
+  storage.set("codex-mux.windows.current-thread", threadId);
+  source.onmessage({ data: JSON.stringify({
+    id: "recovery:visible",
+    type: "recovery-required",
+    threadId,
+    message: "This open task needs review",
+  }) });
+  assert.equal(hooks.getActiveToast(), null, "the open task keeps recovery in its badge instead of a global toast");
+});
+
+test("independent Relay footer keeps account access when the native profile row is hidden", () => {
+  const { hooks } = loadBridge();
+  const trigger = new FakeElement("button");
+  hooks.renderFallbackPoolTrigger(trigger, [
+    { id: "authority", displayName: "Agent Aira", relayAuthority: true, controller: true, enabled: true, connected: true, rateLimits: { primary: { usedPercent: 10 }, secondary: { usedPercent: 20 } } },
+    { id: "second", displayName: "Second", enabled: true, connected: true, rateLimits: { primary: { usedPercent: 0 }, secondary: { usedPercent: 0 } } },
+  ], { status: { pool: { connectedSubscriptions: 2, maximumPercent: 200, confirmedRemainingPercent: 170 } } });
+  const text = collectText(trigger);
+  assert.match(text, /Agent Aira/);
+  assert.doesNotMatch(text, /subscriptions/);
+  assert.doesNotMatch(text, /170% left/);
+  assert.match(trigger.getAttribute("aria-label"), /2 subscriptions/);
+  assert.match(trigger.getAttribute("aria-label"), /170% left/);
+  assert.equal(trigger.getAttribute("aria-label").includes("Open Codex Relay accounts"), true);
+});
+
+test("fallback profile popover keeps native-style usage settings and account management", () => {
+  const { hooks } = loadBridge();
+  const menu = new FakeElement("section");
+  menu.dataset.codexMuxFallback = "true";
+  hooks.renderMenu(menu, [
+    { id: "authority", displayName: "Agent Aira", planLabel: "Plus", relayAuthority: true, controller: true, enabled: true, connected: true, rateLimits: { primary: { usedPercent: 10 }, secondary: { usedPercent: 20 } } },
+  ], { status: { pool: { connectedSubscriptions: 1, maximumPercent: 100, confirmedRemainingPercent: 80 } } });
+  const text = collectText(menu);
+  assert.match(text, /Agent Aira · Plus/);
+  assert.match(text, /Usage remaining/);
+  assert.match(text, /Add another subscription/);
+  assert.match(text, /Settings/);
+  assert.match(text, /Manage pool sources/);
+});
+
+test("fallback profile Settings uses Codex's real route message without restoring a detached footer row", () => {
+  const messages = [];
+  const { hooks } = loadBridge({
+    postMessageImpl(message, targetOrigin) {
+      messages.push({ message, targetOrigin });
+    },
+  });
+
+  hooks.openNativeSettingsFromFallback();
+
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].message.type, "navigate-to-route");
+  assert.equal(messages[0].message.path, "/settings/general-settings");
+  assert.equal(messages[0].targetOrigin, "*");
+});
+
+test("fallback profile menu paints immediately and stays within the sidebar width", async () => {
+  const { document, hooks } = loadBridge({
+    fetchImpl: async () => ({ ok: true, json: async () => ({ accounts: [] }) }),
+  });
+  const trigger = new FakeElement("button");
+  trigger.rect = { left: 8, top: 990, width: 259, height: 40 };
+
+  const refresh = hooks.toggleFallbackPoolMenu(trigger);
+  const menu = document.body.children.at(-1);
+
+  assert.ok(menu, "the menu shell must be appended synchronously");
+  assert.equal(menu.style.left, "8px");
+  assert.equal(menu.style.width, "259px");
+  assert.match(collectText(menu), /Usage remaining/);
+  assert.match(collectText(menu), /Add another subscription/);
+  assert.match(collectText(menu), /Settings/);
+  await refresh;
+});
+
+test("a cold popup never paints an expired quota before the live response", async () => {
+  let accountReads = 0;
+  const { document, hooks } = loadBridge({
+    fetchImpl: async (url) => {
+      if (url.endsWith("/accounts")) {
+        accountReads += 1;
+        return { ok: true, json: async () => ({ accounts: [{
+          id: "authority", displayName: "Agent Aira", relayAuthority: true,
+          enabled: true, connected: true,
+          rateLimits: { primary: { usedPercent: 14, windowDurationMins: 10080 } },
+        }] }) };
+      }
+      if (url.endsWith("/router/status")) return { ok: true, json: async () => ({}) };
+      return { ok: true, json: async () => ({ decisions: [] }) };
+    },
+  });
+  const trigger = new FakeElement("button");
+  trigger.rect = { left: 8, top: 990, width: 259, height: 40 };
+  hooks.seedAccountsCache([{
+    id: "authority", displayName: "Agent Aira", relayAuthority: true,
+    enabled: true, connected: true,
+    rateLimits: { primary: { usedPercent: 0, windowDurationMins: 10080 } },
+  }], Date.now() - 30_000);
+
+  const refresh = hooks.toggleFallbackPoolMenu(trigger);
+  const menu = document.body.children.at(-1);
+  assert.match(collectText(menu), /Updating…/, "cold synchronous paint must not guess 100% quota");
+  assert.doesNotMatch(collectText(menu), /100% \/ 100%/);
+  await refresh;
+  assert.match(collectText(menu), /86% \/ 100% left/);
+  assert.equal(accountReads, 1);
+});
+
+test("account-updated SSE refreshes both the open popup and its footer trigger", async () => {
+  let source;
+  let usedPercent = 0;
+  class FakeEventSource {
+    constructor() { source = this; }
+  }
+  const { document, hooks } = loadBridge({
+    eventSourceImpl: FakeEventSource,
+    fetchImpl: async (url) => {
+      if (url.endsWith("/accounts")) return { ok: true, json: async () => ({ accounts: [{
+        id: "authority", displayName: "Agent Aira", relayAuthority: true,
+        enabled: true, connected: true,
+        rateLimits: { primary: { usedPercent, windowDurationMins: 10080 } },
+      }] }) };
+      if (url.endsWith("/router/status")) return { ok: true, json: async () => ({}) };
+      return { ok: true, json: async () => ({ decisions: [] }) };
+    },
+  });
+  const menu = new FakeElement("section");
+  menu.dataset.codexMuxFallback = "true";
+  const trigger = new FakeElement("button");
+  document.elementsById.set("codex-mux-windows-account-popover", menu);
+  document.elementsById.set("codex-mux-windows-account-trigger", trigger);
+  hooks.startRoutingWatcher();
+
+  usedPercent = 14;
+  source.onmessage({ data: JSON.stringify({ type: "account-updated", accountId: "authority" }) });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.match(collectText(menu), /86% \/ 100% left/);
+  assert.match(trigger.getAttribute("aria-label"), /86% left/);
+});
+
+test("Relay protocol errors stay in diagnostics and never create a global toast", () => {
   let source;
   class FakeEventSource {
     constructor() { source = this; }
@@ -821,10 +1073,8 @@ test("Relay error event shows the actionable reason instead of only an exclamati
     type: "router-error",
     message: "Relay Pool has exhausted every usable quota source",
   }) });
-  const toast = hooks.getActiveToast();
-  assert.ok(toast, "Relay error should create a visible toast");
-  assert.match(collectText(document.body), /Relay request failed/);
-  assert.match(collectText(document.body), /exhausted every usable quota source/);
+  assert.equal(hooks.getActiveToast(), null, "Relay request errors must not create a desktop toast");
+  assert.doesNotMatch(collectText(document.body), /Relay request failed/);
 });
 
 test("public profile menu hides credential-source identity and reset details", () => {

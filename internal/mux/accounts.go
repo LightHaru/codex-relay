@@ -588,27 +588,43 @@ func (m *Multiplexer) accountSnapshotWithProfile(ctx context.Context, accountID 
 			// data after an upstream reset. The direct result is cached briefly so
 			// renderer polling does not amplify network traffic.
 			if usageSignal, usageErr := m.usageQuotaSignal(ctx, account); usageErr == nil {
-				snapshot.QuotaAllowed = cloneBoolPointer(usageSignal.Allowed)
-				snapshot.QuotaLimitReached = cloneBoolPointer(usageSignal.LimitReached)
-				if usageSignal.RateLimits != nil &&
-					(usageSignal.RateLimits.Primary != nil || usageSignal.RateLimits.Secondary != nil) {
-					snapshot.RateLimits = usageSignal.RateLimits
-					snapshot.RateLimitAvailable = true
-					snapshot.RateLimitsObservedAt = usageSignal.ObservedAt
-					snapshot.NextRateLimitResetAt = earliestRateLimitResetAt(snapshot.RateLimits)
-				}
-				if snapshot.QuotaSource == "app-server" {
-					snapshot.QuotaSource = "app-server+usage"
-				} else {
-					snapshot.QuotaSource = "usage"
-				}
-				snapshot.RateLimitError = ""
+				applyUsageQuotaSignal(&snapshot, usageSignal)
 			}
 		}
 	}
 	m.applyRateLimitPreview(&snapshot)
 	m.observeAccountQuotaSnapshot(snapshot)
 	return snapshot, nil
+}
+
+// applyUsageQuotaSignal merges the authenticated Usage projection only when it
+// is at least as new as the direct app-server quota snapshot. usageQuotaSignal
+// is intentionally cached for a few seconds; without this ordering guard an
+// old 500/500 response can overwrite a newer 486/500 app-server response and
+// make the desktop menu visibly count backwards after it opens.
+func applyUsageQuotaSignal(snapshot *AccountSnapshot, signal usageQuotaSignal) bool {
+	if snapshot == nil {
+		return false
+	}
+	if snapshot.RateLimitsObservedAt > 0 && signal.ObservedAt < snapshot.RateLimitsObservedAt {
+		return false
+	}
+	snapshot.QuotaAllowed = cloneBoolPointer(signal.Allowed)
+	snapshot.QuotaLimitReached = cloneBoolPointer(signal.LimitReached)
+	if signal.RateLimits != nil &&
+		(signal.RateLimits.Primary != nil || signal.RateLimits.Secondary != nil) {
+		snapshot.RateLimits = signal.RateLimits
+		snapshot.RateLimitAvailable = true
+		snapshot.RateLimitsObservedAt = signal.ObservedAt
+		snapshot.NextRateLimitResetAt = earliestRateLimitResetAt(snapshot.RateLimits)
+	}
+	if snapshot.QuotaSource == "app-server" {
+		snapshot.QuotaSource = "app-server+usage"
+	} else {
+		snapshot.QuotaSource = "usage"
+	}
+	snapshot.RateLimitError = ""
+	return true
 }
 
 func loginIdentifier(payload json.RawMessage) string {

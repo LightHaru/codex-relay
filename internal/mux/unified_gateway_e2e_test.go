@@ -100,7 +100,9 @@ func realResponseSSE(text string) string {
 			"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}}},
 		{"type": "response.output_text.delta", "sequence_number": 3, "item_id": itemID, "output_index": 0, "content_index": 0, "delta": text, "logprobs": []any{}},
 		{"type": "response.output_text.done", "sequence_number": 4, "item_id": itemID, "output_index": 0, "content_index": 0, "text": text, "logprobs": []any{}},
-		{"type": "response.output_item.done", "sequence_number": 5, "output_index": 0, "item": item},
+		{"type": "response.content_part.done", "sequence_number": 5, "item_id": itemID, "output_index": 0, "content_index": 0,
+			"part": map[string]any{"type": "output_text", "text": text, "annotations": []any{}}},
+		{"type": "response.output_item.done", "sequence_number": 6, "output_index": 0, "item": item},
 	}
 	completed := make(map[string]any, len(base))
 	for key, value := range base {
@@ -108,7 +110,7 @@ func realResponseSSE(text string) string {
 	}
 	completed["status"] = "completed"
 	completed["output"] = []any{item}
-	events = append(events, map[string]any{"type": "response.completed", "sequence_number": 6, "response": completed})
+	events = append(events, map[string]any{"type": "response.completed", "sequence_number": 7, "response": completed})
 	var result strings.Builder
 	for _, event := range events {
 		encoded, _ := json.Marshal(event)
@@ -167,10 +169,12 @@ func TestUnifiedGatewayUsesOneTaskAuthorityAndFailsOverInsideRequest(t *testing.
 	var upstreamSources []string
 	var requestBodies [][]byte
 	sourceCalls := make(map[string]int)
+	var rejectedCalls []int
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		body, _ := io.ReadAll(request.Body)
 		source := request.Header.Get("ChatGPT-Account-ID")
 		upstreamMu.Lock()
+		callIndex := len(upstreamSources)
 		upstreamSources = append(upstreamSources, source)
 		requestBodies = append(requestBodies, body)
 		sourceCalls[source]++
@@ -178,16 +182,23 @@ func TestUnifiedGatewayUsesOneTaskAuthorityAndFailsOverInsideRequest(t *testing.
 		upstreamMu.Unlock()
 		if source == "source-a" {
 			// Exercise the real provider failure shape that motivated this
-			// regression test: a successful HTTP response followed by a
-			// message-only streaming usage-limit failure.
+			// regression test: a successful HTTP response followed by the
+			// message-only “You're out of Codex messages” limit shown by the
+			// native UI (there is no usage_limit machine code in this event).
 			writer.Header().Set("Content-Type", "text/event-stream")
-			_, _ = io.WriteString(writer, "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"You've hit your usage limit. Try again later.\"}}}\n\n")
+			_, _ = io.WriteString(writer, "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"You're out of Codex messages. Your rate limit resets at 6:17 PM.\"}}}\n\n")
+			upstreamMu.Lock()
+			rejectedCalls = append(rejectedCalls, callIndex)
+			upstreamMu.Unlock()
 			return
 		}
 		if (source == "source-b" || source == "source-c") && call == 3 {
 			writer.Header().Set("Content-Type", "application/json")
 			writer.WriteHeader(http.StatusTooManyRequests)
 			_, _ = io.WriteString(writer, `{"error":{"code":"usage_limit_reached"}}`)
+			upstreamMu.Lock()
+			rejectedCalls = append(rejectedCalls, callIndex)
+			upstreamMu.Unlock()
 			return
 		}
 		writer.Header().Set("Content-Type", "text/event-stream")
@@ -197,6 +208,7 @@ func TestUnifiedGatewayUsesOneTaskAuthorityAndFailsOverInsideRequest(t *testing.
 	localToken := "local-e2e-token"
 	poolGateway := httptest.NewServer(&gateway.Transport{
 		Store: store, UpstreamURL: upstream.URL, Client: upstream.Client(), LocalBearerToken: localToken,
+		BalancedPool: true,
 		// The real app-server intentionally rejects these fixture tokens and may
 		// rewrite auth.json while warming plugins. Keep transport credentials in
 		// memory so the E2E exercises pool routing rather than filesystem races.
@@ -267,7 +279,10 @@ func TestUnifiedGatewayUsesOneTaskAuthorityAndFailsOverInsideRequest(t *testing.
 		t.Fatal(err)
 	}
 	threadIDRequest := protocol.StringID("thread-e2e")
-	threadParams, _ := json.Marshal(map[string]any{"cwd": workspace, "approvalPolicy": "never", "sandbox": "read-only", "ephemeral": true})
+	// Deliberately send the native provider value.  Production Codex sends this
+	// on new threads; unified Relay must rewrite it to relay_pool before the
+	// authority app-server can persist the thread's provider.
+	threadParams, _ := json.Marshal(map[string]any{"cwd": workspace, "approvalPolicy": "never", "sandbox": "read-only", "ephemeral": true, "modelProvider": "openai"})
 	multiplexer.HandleClient(protocol.Request("thread/start", threadIDRequest, threadParams))
 	threadResponse := sink.wait(t, 30*time.Second, func(message protocol.Message) bool {
 		return protocol.RequestIDKey(message.ID) == protocol.RequestIDKey(threadIDRequest)
@@ -283,9 +298,9 @@ func TestUnifiedGatewayUsesOneTaskAuthorityAndFailsOverInsideRequest(t *testing.
 	if err := json.Unmarshal(threadResponse.Result, &started); err != nil || started.Thread.ID == "" {
 		t.Fatalf("thread/start result: %s err=%v", threadResponse.Result, err)
 	}
-	// Twenty harmless logical turns make this an actual long-session fixture;
-	// the source changes below happen only on structured pre-output quota
-	// rejections, never because another source has a higher balance.
+	// Twenty harmless logical turns make this an actual long-session fixture.
+	// The hidden source may rotate between turns for fair-share, and a structured
+	// pre-output quota rejection must still retry the same logical request.
 	for index := 0; index < 20; index++ {
 		restoreFakeSources()
 		turnRequestID := protocol.StringID(fmt.Sprintf("turn-e2e-%d", index))
@@ -319,21 +334,24 @@ func TestUnifiedGatewayUsesOneTaskAuthorityAndFailsOverInsideRequest(t *testing.
 
 	upstreamMu.Lock()
 	defer upstreamMu.Unlock()
-	if len(upstreamSources) != 23 || upstreamSources[0] != "source-a" || upstreamSources[1] != "source-b" ||
-		upstreamSources[2] != "source-b" || upstreamSources[3] != "source-b" ||
-		upstreamSources[4] != "source-c" || upstreamSources[5] != "source-c" || upstreamSources[6] != "source-c" ||
-		upstreamSources[7] != "source-d" {
-		t.Fatalf("hidden failover path=%v", upstreamSources)
+	if len(upstreamSources) != 23 || upstreamSources[0] != "source-a" {
+		t.Fatalf("unexpected hidden pool request count/path=%v", upstreamSources)
 	}
-	for index, source := range upstreamSources {
-		if index >= 1 && source == "source-a" || index >= 4 && source == "source-b" || index >= 7 && source == "source-c" {
-			t.Fatalf("depleted source was reused at call %d: %v", index, upstreamSources)
+	if sourceCalls["source-a"] != 1 || sourceCalls["source-b"] != 3 || sourceCalls["source-c"] != 3 || sourceCalls["source-d"] == 0 {
+		t.Fatalf("fair-share/failover source counts=%v path=%v", sourceCalls, upstreamSources)
+	}
+	for _, rejected := range rejectedCalls {
+		if rejected+1 >= len(upstreamSources) || !bytes.Equal(requestBodies[rejected], requestBodies[rejected+1]) {
+			t.Fatalf("quota retry did not preserve request body at call %d: path=%v", rejected, upstreamSources)
+		}
+		for later := rejected + 1; later < len(upstreamSources); later++ {
+			if upstreamSources[later] == upstreamSources[rejected] {
+				t.Fatalf("depleted source %q was reused at call %d after rejection at %d: path=%v", upstreamSources[rejected], later, rejected, upstreamSources)
+			}
 		}
 	}
-	for _, pair := range [][2]int{{0, 1}, {3, 4}, {6, 7}} {
-		if len(requestBodies) <= pair[1] || !bytes.Equal(requestBodies[pair[0]], requestBodies[pair[1]]) {
-			t.Fatalf("gateway changed logical model request during pre-output failover at calls %v", pair)
-		}
+	if len(rejectedCalls) != 3 {
+		t.Fatalf("quota rejection count=%d want 3: path=%v", len(rejectedCalls), upstreamSources)
 	}
 	owner, ok := store.ThreadOwner(started.Thread.ID)
 	if !ok || owner != accounts[0].ID {
@@ -347,4 +365,131 @@ func TestUnifiedGatewayUsesOneTaskAuthorityAndFailsOverInsideRequest(t *testing.
 	// time to release their temporary clone handles before Go removes TempDir.
 	multiplexer.Close()
 	time.Sleep(2 * time.Second)
+}
+
+func TestUnifiedGatewayPostCommitIdleEmitsRecoverableTerminal(t *testing.T) {
+	executable := strings.TrimSpace(os.Getenv("CODEX_RELAY_REAL_E2E"))
+	if executable == "" {
+		t.Skip("set CODEX_RELAY_REAL_E2E to run the real app-server E2E")
+	}
+	if _, err := os.Stat(executable); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	store, err := state.Open(filepath.Join(root, "mux"), filepath.Join(root, "authority-home"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := store.AddAccount("Idle terminal fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFakeAuth(t, account, "idle-token", "idle-source")
+	if err := gateway.PrimeCredentialSources(store); err != nil {
+		t.Fatal(err)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		response := realResponseSSE("IDLE_RECOVERY_E2E_OK")
+		terminalIndex := strings.LastIndex(response, "event: response.completed")
+		if terminalIndex < 0 {
+			t.Fatal("deterministic response fixture has no response.completed event")
+		}
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(writer, response[:terminalIndex])
+		if flusher, ok := writer.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		// Keep the upstream open long enough for Relay's bounded idle recovery
+		// timer to emit response.failed before the native client watchdog fires.
+		time.Sleep(6 * time.Second)
+	}))
+	defer upstream.Close()
+	localToken := "idle-terminal-token"
+	poolGateway := httptest.NewServer(&gateway.Transport{
+		Store: store, UpstreamURL: upstream.URL, Client: upstream.Client(), LocalBearerToken: localToken,
+		BalancedPool: true,
+		LoadCredentials: func(source state.Account) (string, string, error) {
+			if source.ID != account.ID {
+				return "", "", fmt.Errorf("unexpected fixture source %s", source.ID)
+			}
+			return "idle-token", "idle-source", nil
+		},
+	})
+	defer poolGateway.Close()
+
+	sink := newProtocolSink()
+	multiplexer, err := mux.New(mux.Options{
+		RealExecutable: executable, RealArgs: []string{"app-server", "--stdio"},
+		Environment: os.Environ(), CompatibilityProfile: "real-e2e",
+		GatewayBaseURL: poolGateway.URL + "/v1", GatewayToken: localToken,
+		Store: store, Output: sink,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	if err := multiplexer.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer multiplexer.Close()
+
+	initializeID := protocol.StringID("idle-initialize")
+	multiplexer.HandleClient(protocol.Request("initialize", initializeID, json.RawMessage(`{"clientInfo":{"name":"relay-idle-e2e","version":"1"},"capabilities":{"experimentalApi":true}}`)))
+	initialized := sink.wait(t, 30*time.Second, func(message protocol.Message) bool {
+		return protocol.RequestIDKey(message.ID) == protocol.RequestIDKey(initializeID)
+	})
+	if initialized.Error != nil {
+		t.Fatalf("initialize failed: %s", initialized.Error.Message)
+	}
+	multiplexer.HandleClient(protocol.Message{Method: "initialized"})
+
+	workspace := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	threadRequestID := protocol.StringID("idle-thread")
+	threadParams, _ := json.Marshal(map[string]any{
+		"cwd": workspace, "approvalPolicy": "never", "sandbox": "read-only", "ephemeral": true,
+		"modelProvider": "openai",
+	})
+	multiplexer.HandleClient(protocol.Request("thread/start", threadRequestID, threadParams))
+	threadResponse := sink.wait(t, 30*time.Second, func(message protocol.Message) bool {
+		return protocol.RequestIDKey(message.ID) == protocol.RequestIDKey(threadRequestID)
+	})
+	if threadResponse.Error != nil {
+		t.Fatalf("thread/start failed: %s", threadResponse.Error.Message)
+	}
+	var started struct {
+		Thread struct {
+			ID string `json:"id"`
+		} `json:"thread"`
+	}
+	if err := json.Unmarshal(threadResponse.Result, &started); err != nil || started.Thread.ID == "" {
+		t.Fatalf("thread/start result: %s err=%v", threadResponse.Result, err)
+	}
+
+	turnRequestID := protocol.StringID("idle-turn")
+	turnParams, _ := json.Marshal(map[string]any{
+		"threadId": started.Thread.ID,
+		"input":    []any{map[string]string{"type": "text", "text": "Return the idle recovery fixture token."}},
+		"cwd":      workspace, "approvalPolicy": "never",
+	})
+	multiplexer.HandleClient(protocol.Request("turn/start", turnRequestID, turnParams))
+	accepted := sink.wait(t, 30*time.Second, func(message protocol.Message) bool {
+		return protocol.RequestIDKey(message.ID) == protocol.RequestIDKey(turnRequestID)
+	})
+	if accepted.Error != nil {
+		t.Fatalf("turn/start failed: %s", accepted.Error.Message)
+	}
+	completed := sink.wait(t, 30*time.Second, func(message protocol.Message) bool {
+		return message.Method == "turn/completed" && bytes.Contains(message.Params, []byte(`"status":"failed"`))
+	})
+	if bytes.Contains(bytes.ToLower(completed.Params), []byte("stream disconnected")) {
+		t.Fatalf("idle recovery was still reported as a stream disconnect: %s", completed.Params)
+	}
+	if !bytes.Contains(completed.Params, []byte("Relay Pool stopped safely after output or side effects")) {
+		t.Fatalf("idle recovery terminal did not preserve the Relay diagnostic: %s", completed.Params)
+	}
 }

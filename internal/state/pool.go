@@ -9,8 +9,12 @@ import (
 )
 
 const (
-	PoolSchemaVersion = 3
-	DefaultPoolID     = "relay"
+	PoolSchemaVersion         = 3
+	DefaultPoolID             = "relay"
+	transientFailureWindow    = 2 * time.Minute
+	transientCircuitThreshold = 3
+	transientCooldownBase     = 15 * time.Second
+	transientCooldownMax      = 2 * time.Minute
 )
 
 type SourceMembershipState string
@@ -129,20 +133,24 @@ func (e QuotaEvidence) ConfirmedAvailable(now time.Time, staleAfter time.Duratio
 }
 
 type CredentialSourceState struct {
-	SourceID        string                `json:"sourceId"`
-	Enabled         bool                  `json:"enabled"`
-	Connected       bool                  `json:"connected"`
-	AuthState       string                `json:"authState,omitempty"`
-	MembershipState SourceMembershipState `json:"membershipState"`
-	QuotaState      string                `json:"quotaState,omitempty"`
-	QuotaEvidence   QuotaEvidence         `json:"quotaEvidence,omitempty"`
-	ResetEpoch      int64                 `json:"resetEpoch,omitempty"`
-	Revision        uint64                `json:"revision"`
-	LastObservedAt  int64                 `json:"lastObservedAt,omitempty"`
-	DepletedAt      int64                 `json:"depletedAt,omitempty"`
-	RecoveredAt     int64                 `json:"recoveredAt,omitempty"`
-	CircuitState    string                `json:"circuitState,omitempty"`
-	Compatibility   string                `json:"compatibility,omitempty"`
+	SourceID          string                `json:"sourceId"`
+	Enabled           bool                  `json:"enabled"`
+	Connected         bool                  `json:"connected"`
+	AuthState         string                `json:"authState,omitempty"`
+	MembershipState   SourceMembershipState `json:"membershipState"`
+	QuotaState        string                `json:"quotaState,omitempty"`
+	QuotaEvidence     QuotaEvidence         `json:"quotaEvidence,omitempty"`
+	ResetEpoch        int64                 `json:"resetEpoch,omitempty"`
+	Revision          uint64                `json:"revision"`
+	LastObservedAt    int64                 `json:"lastObservedAt,omitempty"`
+	DepletedAt        int64                 `json:"depletedAt,omitempty"`
+	RecoveredAt       int64                 `json:"recoveredAt,omitempty"`
+	CircuitState      string                `json:"circuitState,omitempty"`
+	TransientFailures uint64                `json:"transientFailures,omitempty"`
+	TransientWindowAt int64                 `json:"transientWindowAt,omitempty"`
+	LastTransientAt   int64                 `json:"lastTransientAt,omitempty"`
+	CooldownUntil     int64                 `json:"cooldownUntil,omitempty"`
+	Compatibility     string                `json:"compatibility,omitempty"`
 }
 
 type PoolLease struct {
@@ -163,6 +171,7 @@ type PoolLease struct {
 	ExpiresAt            int64          `json:"expiresAt"`
 	FailoverCount        uint64         `json:"failoverCount"`
 	RetryCount           uint64         `json:"retryCount"`
+	AttemptNumber        uint64         `json:"attemptNumber,omitempty"`
 	ExcludedSources      []string       `json:"excludedSources,omitempty"`
 }
 
@@ -175,12 +184,17 @@ type PoolTransition struct {
 }
 
 type PoolState struct {
-	PoolID            string                           `json:"poolId"`
-	SchemaVersion     int                              `json:"schemaVersion"`
-	Revision          uint64                           `json:"revision"`
-	MembershipEpoch   uint64                           `json:"membershipEpoch"`
-	QuotaEpoch        uint64                           `json:"quotaEpoch"`
-	ActiveSourceID    string                           `json:"activeSourceId,omitempty"`
+	PoolID          string `json:"poolId"`
+	SchemaVersion   int    `json:"schemaVersion"`
+	Revision        uint64 `json:"revision"`
+	MembershipEpoch uint64 `json:"membershipEpoch"`
+	QuotaEpoch      uint64 `json:"quotaEpoch"`
+	ActiveSourceID  string `json:"activeSourceId,omitempty"`
+	// DispatchCursor is the persistent tie-break cursor for the unified
+	// Relay API. ActiveSourceID remains a diagnostic (last selected source),
+	// while this cursor prevents a healthy source from monopolising every
+	// request when several sources have equivalent quota headroom.
+	DispatchCursor    uint64                           `json:"dispatchCursor"`
 	SourceOrder       []string                         `json:"sourceOrder"`
 	Sources           map[string]CredentialSourceState `json:"sources"`
 	ActiveLeases      map[string]PoolLease             `json:"activeLeases"`
@@ -563,6 +577,9 @@ func sourceEligible(source CredentialSourceState) bool {
 	if !source.Enabled || !source.Connected || source.AuthState != "authenticated" {
 		return false
 	}
+	if source.CooldownUntil > time.Now().UnixMilli() {
+		return false
+	}
 	switch source.MembershipState {
 	case SourceAvailable, SourceActive, SourceProbation:
 		return !source.QuotaEvidence.ExplicitlyDepleted()
@@ -610,7 +627,107 @@ func nextEligibleSource(pool *PoolState, excluded map[string]struct{}) string {
 	return ""
 }
 
+// sourceQuotaHeadroom returns the most conservative remaining percentage for
+// a source's two independent Codex windows. The service exposes both a short
+// (5-hour) and a long (weekly) limit; a request is only useful while both are
+// available, so the smaller remaining window is the dispatch capacity. The
+// boolean is false when the source has no quota evidence yet. Unknown sources
+// are deliberately used only when no source with known evidence is eligible.
+func sourceQuotaHeadroom(source CredentialSourceState) (float64, bool) {
+	evidence := source.QuotaEvidence
+	known := evidence.Allowed != nil || evidence.LimitReached || evidence.ShortUsed != nil || evidence.LongUsed != nil
+	if !known {
+		return 100, false
+	}
+	used := 0.0
+	if evidence.ShortUsed != nil && *evidence.ShortUsed > used {
+		used = *evidence.ShortUsed
+	}
+	if evidence.LongUsed != nil && *evidence.LongUsed > used {
+		used = *evidence.LongUsed
+	}
+	if evidence.ExplicitlyDepleted() {
+		used = 100
+	}
+	if used < 0 {
+		used = 0
+	}
+	if used > 100 {
+		used = 100
+	}
+	return 100 - used, true
+}
+
+// nextBalancedSource selects a source for the one public Relay API. Quota
+// evidence is used to remove depleted sources and to keep warming/unknown
+// sources behind sources with a confirmed window. Among confirmed sources it
+// uses a persistent round-robin cursor instead of always choosing the account
+// with the largest remaining percentage; that is what makes the percentages
+// additive in practice rather than allowing a single 100%-remaining account
+// to monopolise every request. This is intentionally a credential scheduler
+// only: the app-server still has one task authority and never changes its
+// public worker, thread, or API identity.
+func nextBalancedSource(pool *PoolState, excluded map[string]struct{}) string {
+	if pool == nil || len(pool.SourceOrder) == 0 {
+		return ""
+	}
+	type candidate struct {
+		id       string
+		headroom float64
+		known    bool
+	}
+	candidates := make([]candidate, 0, len(pool.SourceOrder))
+	hasKnown := false
+	for _, sourceID := range pool.SourceOrder {
+		if _, skip := excluded[sourceID]; skip {
+			continue
+		}
+		source, ok := pool.Sources[sourceID]
+		if !ok || !sourceEligible(source) {
+			continue
+		}
+		headroom, known := sourceQuotaHeadroom(source)
+		if known {
+			hasKnown = true
+		}
+		candidates = append(candidates, candidate{id: sourceID, headroom: headroom, known: known})
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	start := int(pool.DispatchCursor % uint64(len(pool.SourceOrder)))
+	for offset := 0; offset < len(pool.SourceOrder); offset++ {
+		index := (start + offset) % len(pool.SourceOrder)
+		sourceID := pool.SourceOrder[index]
+		for _, value := range candidates {
+			if value.id != sourceID {
+				continue
+			}
+			// Once any eligible source has known evidence, probationary/unknown
+			// sources cannot hide it. They remain a safe last resort when every
+			// source is still warming and no quota snapshot exists.
+			if hasKnown && !value.known {
+				continue
+			}
+			return value.id
+		}
+	}
+	return ""
+}
+
 func (s *Store) AcquirePoolLease(lease PoolLease, ttl time.Duration) (PoolLease, error) {
+	return s.acquirePoolLease(lease, ttl, false)
+}
+
+// AcquireBalancedPoolLease is used by the unified Gateway transport. It keeps
+// one logical API/authority while selecting the best eligible credential from
+// the additive pool for each request. The legacy AcquirePoolLease method stays
+// sticky for compatibility with pre-pool callers and migration tests.
+func (s *Store) AcquireBalancedPoolLease(lease PoolLease, ttl time.Duration) (PoolLease, error) {
+	return s.acquirePoolLease(lease, ttl, true)
+}
+
+func (s *Store) acquirePoolLease(lease PoolLease, ttl time.Duration, balanced bool) (PoolLease, error) {
 	if strings.TrimSpace(lease.LeaseID) == "" || strings.TrimSpace(lease.LogicalTurnID) == "" {
 		return PoolLease{}, errors.New("lease ID and logical turn ID are required")
 	}
@@ -621,11 +738,48 @@ func (s *Store) AcquirePoolLease(lease PoolLease, ttl time.Duration) (PoolLease,
 	defer s.mu.Unlock()
 	previousPool := clonePoolState(s.pool)
 	previousTasks := cloneMap(s.tasks)
+	now := time.Now().UnixMilli()
 	if existing, ok := s.pool.ActiveLeases[lease.LeaseID]; ok {
-		return existing, nil
+		if existing.ExpiresAt > 0 && existing.ExpiresAt <= now && !poolLeaseCommitted(existing) {
+			s.releasePreCommitLeaseLocked(existing, now)
+		} else {
+			if existing.ExpiresAt > 0 && existing.ExpiresAt <= now && poolLeaseCommitted(existing) && existing.State != PoolLeaseRecoveryRequired {
+				existing.State = PoolLeaseRecoveryRequired
+				s.pool.ActiveLeases[existing.LeaseID] = existing
+				s.markTaskRecoveryLocked(existing, now)
+				s.pool.Revision++
+				if err := s.saveLocked(); err != nil {
+					s.pool = previousPool
+					s.tasks = previousTasks
+					return PoolLease{}, err
+				}
+			}
+			if existing.State == PoolLeaseRecoveryRequired {
+				return PoolLease{}, fmt.Errorf("logical turn %q requires recovery review", lease.LogicalTurnID)
+			}
+			return PoolLease{}, fmt.Errorf("logical turn %q already has active lease %q", lease.LogicalTurnID, existing.LeaseID)
+		}
 	}
 	for _, active := range s.pool.ActiveLeases {
 		if active.LogicalTurnID == lease.LogicalTurnID && active.State != PoolLeaseCompleted && active.State != PoolLeaseRolledBack {
+			if active.ExpiresAt > 0 && active.ExpiresAt <= now && !poolLeaseCommitted(active) {
+				s.releasePreCommitLeaseLocked(active, now)
+				continue
+			}
+			if active.ExpiresAt > 0 && active.ExpiresAt <= now && poolLeaseCommitted(active) && active.State != PoolLeaseRecoveryRequired {
+				active.State = PoolLeaseRecoveryRequired
+				s.pool.ActiveLeases[active.LeaseID] = active
+				s.markTaskRecoveryLocked(active, now)
+				s.pool.Revision++
+				if err := s.saveLocked(); err != nil {
+					s.pool = previousPool
+					s.tasks = previousTasks
+					return PoolLease{}, err
+				}
+			}
+			if active.State == PoolLeaseRecoveryRequired || poolLeaseCommitted(active) {
+				return PoolLease{}, fmt.Errorf("logical turn %q requires recovery review", lease.LogicalTurnID)
+			}
 			return PoolLease{}, fmt.Errorf("logical turn %q already has active lease %q", lease.LogicalTurnID, active.LeaseID)
 		}
 	}
@@ -633,15 +787,25 @@ func (s *Store) AcquirePoolLease(lease PoolLease, ttl time.Duration) (PoolLease,
 	for _, sourceID := range lease.ExcludedSources {
 		excluded[sourceID] = struct{}{}
 	}
-	sourceID := s.pool.ActiveSourceID
-	_, activeExcluded := excluded[sourceID]
-	if source, ok := s.pool.Sources[sourceID]; sourceID == "" || activeExcluded || !ok || !sourceEligible(source) {
-		sourceID = nextEligibleSource(&s.pool, excluded)
+	sourceID := ""
+	if balanced {
+		sourceID = nextBalancedSource(&s.pool, excluded)
+	} else {
+		sourceID = s.pool.ActiveSourceID
+		_, activeExcluded := excluded[sourceID]
+		if source, ok := s.pool.Sources[sourceID]; sourceID == "" || activeExcluded || !ok || !sourceEligible(source) {
+			sourceID = nextEligibleSource(&s.pool, excluded)
+		}
 	}
 	if sourceID == "" {
 		return PoolLease{}, errors.New("Relay Pool has no usable quota source")
 	}
-	now := time.Now().UnixMilli()
+	if balanced {
+		// Advance only after a source was chosen. Persisting the cursor with the
+		// lease makes concurrent requests and process restarts continue the same
+		// deterministic fair-share sequence.
+		s.pool.DispatchCursor++
+	}
 	source := s.pool.Sources[sourceID]
 	if source.MembershipState != SourceActive {
 		source.MembershipState = SourceActive
@@ -656,6 +820,7 @@ func (s *Store) AcquirePoolLease(lease PoolLease, ttl time.Duration) (PoolLease,
 	lease.PoolRevision = s.pool.Revision
 	lease.SourceRevision = source.Revision
 	lease.State = PoolLeaseBound
+	lease.AttemptNumber = 1
 	lease.CreatedAt = now
 	lease.HeartbeatAt = now
 	lease.ExpiresAt = now + ttl.Milliseconds()
@@ -677,6 +842,30 @@ func (s *Store) AcquirePoolLease(lease PoolLease, ttl time.Duration) (PoolLease,
 		return PoolLease{}, err
 	}
 	return lease, nil
+}
+
+func poolLeaseCommitted(lease PoolLease) bool {
+	return lease.FirstVisibleOutputAt != 0 || lease.SideEffectsObserved || lease.State == PoolLeaseRecoveryRequired
+}
+
+// releasePreCommitLeaseLocked removes an attempt that provably never crossed
+// the client-visible/tool-side-effect commit boundary. It is used for expired
+// attempts and process-start recovery, where no goroutine can still own the
+// persisted lease. The logical turn itself is intentionally not marked
+// completed, so the native app may safely replay the exact request ID.
+func (s *Store) releasePreCommitLeaseLocked(lease PoolLease, now int64) {
+	delete(s.pool.ActiveLeases, lease.LeaseID)
+	if lease.ThreadID == "" {
+		return
+	}
+	task := s.tasks[lease.ThreadID]
+	if task.ActiveLeaseID != lease.LeaseID {
+		return
+	}
+	task.ActiveLeaseID = ""
+	task.RecoveryState = ""
+	task.UpdatedAt = now
+	s.tasks[lease.ThreadID] = task
 }
 
 func (s *Store) HeartbeatPoolLease(leaseID string, ttl time.Duration) (PoolLease, error) {
@@ -951,6 +1140,112 @@ func (s *Store) MarkPoolSourceUnavailable(leaseID, sourceID, reason string) (Poo
 	return lease, nil
 }
 
+// MarkPoolTransientFailure rotates a pre-commit request away from a source
+// whose connection/stream failed without misclassifying the source as logged
+// out or quota-depleted. Repeated failures open a bounded transport cooldown;
+// quota evidence remains untouched because network health and capacity are
+// independent dimensions.
+func (s *Store) MarkPoolTransientFailure(leaseID, sourceID, reason string) (PoolLease, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	lease, ok := s.pool.ActiveLeases[leaseID]
+	if !ok {
+		return PoolLease{}, fmt.Errorf("pool lease %q not found", leaseID)
+	}
+	if lease.SourceID != sourceID {
+		if slices.Contains(lease.ExcludedSources, sourceID) {
+			return lease, nil
+		}
+		return PoolLease{}, fmt.Errorf("pool lease source mismatch: have %q want %q", lease.SourceID, sourceID)
+	}
+	previousPool := clonePoolState(s.pool)
+	previousTasks := cloneMap(s.tasks)
+	now := time.Now().UnixMilli()
+	if poolLeaseCommitted(lease) {
+		lease.State = PoolLeaseRecoveryRequired
+		s.pool.ActiveLeases[leaseID] = lease
+		s.markTaskRecoveryLocked(lease, now)
+		if err := s.saveLocked(); err != nil {
+			s.pool = previousPool
+			s.tasks = previousTasks
+			return PoolLease{}, err
+		}
+		return lease, errors.New("transient source failure occurred after output or side effect; replay is unsafe")
+	}
+	source, exists := s.pool.Sources[sourceID]
+	if !exists {
+		return PoolLease{}, fmt.Errorf("quota source %q not found", sourceID)
+	}
+	if source.TransientWindowAt == 0 || now-source.TransientWindowAt > transientFailureWindow.Milliseconds() {
+		source.TransientWindowAt = now
+		source.TransientFailures = 0
+	}
+	source.TransientFailures++
+	source.LastTransientAt = now
+	source.CircuitState = "suspect"
+	source.QuotaEvidence.CircuitState = "suspect"
+	if source.TransientFailures >= transientCircuitThreshold {
+		exponent := source.TransientFailures - transientCircuitThreshold
+		if exponent > 3 {
+			exponent = 3
+		}
+		cooldown := transientCooldownBase * time.Duration(uint64(1)<<exponent)
+		if cooldown > transientCooldownMax {
+			cooldown = transientCooldownMax
+		}
+		source.CircuitState = "cooldown"
+		source.QuotaEvidence.CircuitState = "cooldown"
+		source.CooldownUntil = now + cooldown.Milliseconds()
+	}
+	source.Revision++
+	s.pool.Sources[sourceID] = source
+
+	excluded := make(map[string]struct{}, len(lease.ExcludedSources)+1)
+	for _, id := range lease.ExcludedSources {
+		excluded[id] = struct{}{}
+	}
+	excluded[sourceID] = struct{}{}
+	next := nextBalancedSource(&s.pool, excluded)
+	s.pool.Revision++
+	s.pool.FailoverCount++
+	s.pool.ActiveSourceID = next
+	s.pool.LastTransition = PoolTransition{
+		FromSourceID: sourceID, ToSourceID: next, Reason: sanitizePoolErrorMessage(reason),
+		Revision: s.pool.Revision, OccurredAt: now,
+	}
+	if next == "" {
+		s.pool.Health = "transient-error"
+	} else {
+		nextSource := s.pool.Sources[next]
+		nextSource.MembershipState = SourceActive
+		nextSource.Revision++
+		s.pool.Sources[next] = nextSource
+		s.pool.Health = "healthy"
+	}
+	lease.SourceID = next
+	lease.PoolRevision = s.pool.Revision
+	lease.ExcludedSources = appendUniqueString(lease.ExcludedSources, sourceID)
+	lease.State = PoolLeaseBound
+	lease.HeartbeatAt = now
+	if next != "" {
+		lease.FailoverCount++
+		lease.RetryCount++
+		lease.AttemptNumber++
+		lease.SourceRevision = s.pool.Sources[next].Revision
+	}
+	s.pool.ActiveLeases[leaseID] = lease
+	recomputePoolMetrics(&s.pool)
+	if err := s.saveLocked(); err != nil {
+		s.pool = previousPool
+		s.tasks = previousTasks
+		return PoolLease{}, err
+	}
+	if next == "" {
+		return lease, errors.New("Relay Pool exhausted every source in the transient retry budget")
+	}
+	return lease, nil
+}
+
 func (s *Store) CompletePoolLease(leaseID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -971,6 +1266,12 @@ func (s *Store) CompletePoolLease(leaseID string) error {
 		source.QuotaEvidence.ObservedAt = now
 		source.LastObservedAt = now
 		source.RecoveredAt = now
+		source.TransientFailures = 0
+		source.TransientWindowAt = 0
+		source.LastTransientAt = 0
+		source.CooldownUntil = 0
+		source.CircuitState = "healthy"
+		source.QuotaEvidence.CircuitState = "healthy"
 		source.Revision++
 		s.pool.Sources[lease.SourceID] = source
 		s.pool.ActiveSourceID = lease.SourceID
@@ -1041,6 +1342,49 @@ func (s *Store) AbortPoolLease(leaseID, recoveryState string) error {
 	return nil
 }
 
+// AcknowledgeTaskRecovery clears one unified-pool recovery marker after the
+// renderer has explicitly chosen to continue the task. A recovery-required
+// lease belongs to a request that can no longer be resumed after the Relay
+// process restarted; retaining it would cause the same client request ID to
+// be rebound to stale visible-output state forever.
+func (s *Store) AcknowledgeTaskRecovery(threadID string) error {
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		return errors.New("thread ID is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	task, ok := s.tasks[threadID]
+	if !ok {
+		return fmt.Errorf("thread %q has no Relay task", threadID)
+	}
+	previousPool := clonePoolState(s.pool)
+	previousTasks := cloneMap(s.tasks)
+	if leaseID := strings.TrimSpace(task.ActiveLeaseID); leaseID != "" {
+		if lease, exists := s.pool.ActiveLeases[leaseID]; exists {
+			if lease.State != PoolLeaseRecoveryRequired {
+				return errors.New("the task still has an active Relay request")
+			}
+			delete(s.pool.ActiveLeases, leaseID)
+			s.pool.Revision++
+		}
+	}
+	task.ActiveLeaseID = ""
+	task.RecoveryState = ""
+	task.UpdatedAt = time.Now().UnixMilli()
+	s.tasks[threadID] = task
+	if s.pool.LastError != nil && (s.pool.LastError.Code == "stream_recovery_required" || s.pool.LastError.Code == "logical_turn_recovery_required") {
+		s.pool.LastError = nil
+	}
+	recomputePoolMetrics(&s.pool)
+	if err := s.saveLocked(); err != nil {
+		s.pool = previousPool
+		s.tasks = previousTasks
+		return err
+	}
+	return nil
+}
+
 func appendUniqueString(values []string, value string) []string {
 	if slices.Contains(values, value) {
 		return values
@@ -1058,7 +1402,20 @@ func (s *Store) RecoverPoolLeases(now time.Time) error {
 			changed = true
 			continue
 		}
-		if lease.ExpiresAt > 0 && lease.ExpiresAt <= now.UnixMilli() {
+		// This method runs before the new Gateway accepts work. No goroutine from
+		// the previous process can still own a persisted lease. A turn that never
+		// crossed the output/tool-side-effect commit boundary is therefore safe to
+		// release and replay with the same native request ID. Keeping that lease
+		// used to make every post-reboot replay fail forever with HTTP 409.
+		if !poolLeaseCommitted(lease) {
+			s.releasePreCommitLeaseLocked(lease, now.UnixMilli())
+			changed = true
+			continue
+		}
+		// Once output or a side effect was observable, a restart cannot prove
+		// whether the upstream operation completed. Keep fail-closed recovery and
+		// require explicit continuation instead of replaying the request.
+		if lease.State != PoolLeaseRecoveryRequired {
 			lease.State = PoolLeaseRecoveryRequired
 			s.pool.ActiveLeases[leaseID] = lease
 			s.markTaskRecoveryLocked(lease, now.UnixMilli())
@@ -1068,7 +1425,12 @@ func (s *Store) RecoverPoolLeases(now time.Time) error {
 	if !changed {
 		return nil
 	}
+	if len(s.pool.ActiveLeases) == 0 && s.pool.LastError != nil &&
+		(s.pool.LastError.Code == "logical_turn_already_active" || s.pool.LastError.Code == "logical_turn_recovery_required") {
+		s.pool.LastError = nil
+	}
 	s.pool.Revision++
+	recomputePoolMetrics(&s.pool)
 	return s.saveLocked()
 }
 

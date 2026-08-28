@@ -1045,6 +1045,15 @@ func routingReasonCode(reason string, policy state.RoutingPolicy, fromAccountID,
 }
 
 func (m *Multiplexer) AcknowledgeThreadRecovery(threadID string) error {
+	threadID = strings.TrimSpace(threadID)
+	if m.unifiedPoolEnabled() {
+		if err := m.store.AcknowledgeTaskRecovery(threadID); err != nil {
+			return err
+		}
+		m.recordRoutingDecision(threadID, m.taskAuthorityID(), m.taskAuthorityID(), "recovery review acknowledged")
+		m.publish(Event{Type: "recovery-cleared", ThreadID: threadID, AccountID: m.taskAuthorityID()})
+		return nil
+	}
 	route, ok := m.store.ThreadRoute(threadID)
 	if !ok {
 		return fmt.Errorf("thread %q has no Relay route", threadID)

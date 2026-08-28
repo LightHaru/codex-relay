@@ -42,6 +42,8 @@ from patch_windows import (
     STORE_26_818_5229_RENDERER_PROFILE,
     STORE_26_818_5345_RENDERER_PROFILE,
     STORE_26_818_8289_RENDERER_PROFILE,
+    STORE_26_820_7780_RENDERER_PROFILE,
+    STORE_26_820_9563_RENDERER_PROFILE,
     STOP_ROUTER_PROCESSES_SCRIPT,
     USAGE_STATUS_ANCHOR,
     USAGE_STATUS_REPLACEMENT,
@@ -209,7 +211,7 @@ class WindowsRendererPatchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             assets = self.make_renderer(root, CURRENT_RENDERER_PROFILE)
-            self.assertEqual(len(WINDOWS_RENDERER_PROFILES), 7)
+            self.assertEqual(len(WINDOWS_RENDERER_PROFILES), 9)
             patch_windows_feature_bundles(root, CURRENT_RENDERER_PROFILE)
             self.assert_replacements(assets, CURRENT_RENDERER_PROFILE)
 
@@ -272,6 +274,38 @@ class WindowsRendererPatchTests(unittest.TestCase):
                     STORE_26_818_8289_RENDERER_PROFILE,
                 ),
                 "windows-reviewed-e2f04d6aa921d07981b42368df0a28a8bebe8cd21375d4a1f9286757b51c1313",
+            )
+
+    def test_patches_the_store_26_820_7780_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            assets = self.make_renderer(root, STORE_26_820_7780_RENDERER_PROFILE)
+            patch_windows_feature_bundles(root, STORE_26_820_7780_RENDERER_PROFILE)
+            self.assert_replacements(assets, STORE_26_820_7780_RENDERER_PROFILE)
+            initial = next(assets.glob("app-initial-*.js")).read_text(encoding="utf-8")
+            self.assertIn("d1.useSyncExternalStore", initial)
+            self.assertIn("CodexMuxWindows.consumeRateLimitReset", initial)
+            self.assertEqual(
+                app_server_compatibility_profile(
+                    "5df8bf5a9d30742919390ab11fa419e83aab0891152569a42c6ea4abf15386c2",
+                    STORE_26_820_7780_RENDERER_PROFILE,
+                ),
+                "windows-reviewed-5df8bf5a9d30742919390ab11fa419e83aab0891152569a42c6ea4abf15386c2",
+            )
+
+    def test_patches_the_store_26_820_9563_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            assets = self.make_renderer(root, STORE_26_820_9563_RENDERER_PROFILE)
+            patch_windows_feature_bundles(root, STORE_26_820_9563_RENDERER_PROFILE)
+            self.assert_replacements(assets, STORE_26_820_9563_RENDERER_PROFILE)
+            initial = next(assets.glob("app-initial-*.js")).read_text(encoding="utf-8")
+            self.assertIn("d1.useSyncExternalStore", initial)
+            self.assertIn("CodexMuxWindows.consumeRateLimitReset", initial)
+            current_hash = "e353c580ef4939d36f4ae32a35c896d089205c1d06b9f711cf78ffa4a3578a8a"
+            self.assertEqual(
+                app_server_compatibility_profile(current_hash, STORE_26_820_9563_RENDERER_PROFILE),
+                f"windows-reviewed-{current_hash}",
             )
 
     def test_discovers_a_profile_when_minifier_aliases_roll_forward(self) -> None:

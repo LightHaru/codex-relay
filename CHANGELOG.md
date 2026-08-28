@@ -3,6 +3,112 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/) and
 this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.5.4] - 2026-08-28
+
+### Fixed
+
+- Startup now reclaims only stale pre-commit leases before the loopback
+  Gateway accepts work, so a reboot cannot leave the same logical turn blocked
+  by a false `409` active-request conflict. Committed leases remain
+  `recovery-required` and are never replayed.
+- The Responses SSE classifier no longer mistakes a nested
+  `item.status="completed"` on `response.output_item.done` for the terminal
+  `response.completed` event. A short terminal grace window and invisible SSE
+  keepalive cover providers that pause after the final output item.
+- If the upstream stream closes or the native app-server cancels after output
+  began without a terminal event, Relay emits a standards-shaped recovery
+  event, preserves the lease safety state, and the unified mux replaces the
+  native generic stream-disconnect prefix with an actionable Relay message.
+
+### Validation
+
+- Added regression coverage for top-level terminal classification, stale
+  restart leases, post-output idle/partial streams, and recovery notification
+  sanitization.
+- Real installed `codex.real.exe` app-server E2E now covers the idle
+  post-output recovery path without the old `stream closed before
+  response.completed` diagnostic.
+
+Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.4
+
+## [0.5.3] - 2026-08-28
+
+### Fixed
+
+- Relay now releases persisted pre-commit leases before the loopback Gateway
+  starts accepting work. Replaying the same native request after a machine or
+  app restart no longer fails with `409 logical_turn_already_active`.
+- Duplicate concurrent requests for the same logical turn join one in-process
+  flight and receive the same bounded, short-lived response replay. Only one
+  upstream attempt may commit, so startup races cannot duplicate model/tool
+  work.
+- A clean or unexpected EOF without an explicit Responses terminal event is no
+  longer treated as successful. Before output it rotates to another eligible
+  source; after output/tool side effects it remains recovery-required and is
+  never replayed.
+- Temporary connection errors and upstream HTTP 408/425/500/502/503/504 now
+  fail over inside the same logical request. Transport health is tracked
+  separately from quota/auth state and repeated failures open a bounded source
+  cooldown instead of falsely depleting or disconnecting the account.
+- Exhausted transient retries now return one sanitized diagnostic containing
+  the safe error class, attempt count and local correlation reference.
+
+### Validation
+
+- Added regression coverage for process-restart request replay, expired lease
+  reclamation, committed restart recovery, concurrent duplicate single-flight,
+  terminal-aware SSE parsing, partial terminal frames, pre/post-commit stream
+  truncation, temporary HTTP 502 failover, transport circuit cooldown and
+  all-source retry exhaustion.
+
+## [0.5.2] - 2026-08-27
+
+### Fixed
+
+- The unified gateway now accepts chunked Responses SSE streams when the
+  provider omits `Content-Type`, while preserving the stream body and the
+  single Relay lease. This matches the current ChatGPT endpoint and prevents
+  a healthy fallback account from being reported as an unsupported response.
+- The live-account E2E fixture now sends the provider-required `store:false`
+  flag and includes the bounded diagnostic body when a real smoke turn fails.
+- Unified Gateway dispatch now uses a persistent quota-aware fair-share cursor
+  across confirmed sources. A healthy account can no longer monopolise the
+  aggregate pool simply because it was the first or last `ActiveSourceID`;
+  depleted sources are skipped and pre-output retries remain inside the same
+  logical request.
+
+### Validation
+
+- Added a regression test for quota failover into an SSE stream without a
+  `Content-Type` header.
+- Authorized live-account E2E: Aira quota rejection → next source, three
+  completed turns, one failover, same pool authority. Deterministic fair-share
+  and installed app-server E2E cover source rotation without changing the
+  public worker.
+
+Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.2
+
+## [0.5.1] - 2026-08-27
+
+### Fixed
+
+- The unified gateway now recognizes the provider's “You're out of Codex
+  messages”/“run out of messages” quota response, including `response.failed`
+  SSE events, failed JSON envelopes and raw JSON returned with an SSE content
+  type. The same logical request can therefore continue through the next
+  eligible source in the shared pool instead of surfacing a native `-32600`
+  error after only the controller account is tried.
+- Quota evidence matching is shared by HTTP and streaming paths, while normal
+  successful JSON responses and model context errors remain fail-closed.
+
+### Validation
+
+- Added regression coverage for Codex message-limit SSE and JSON error shapes,
+  plus the real installed app-server unified-pool E2E using the exact message
+  shown by the native UI.
+
+Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.1
+
 ## [0.5.0] - 2026-08-26
 
 ### Added
@@ -592,6 +698,10 @@ Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.7
 - Source-only CI, draft release automation, security documentation, and smoke tests.
 
 [Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.4.5...HEAD
+[0.5.4]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.4
+[0.5.2]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.2
+[0.5.3]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.3
+[0.5.1]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.1
 [0.5.0]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.0
 [0.4.5]: https://github.com/LightHaru/codex-relay/releases/tag/v0.4.5
 [0.4.4]: https://github.com/LightHaru/codex-relay/releases/tag/v0.4.4

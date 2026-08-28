@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +20,24 @@ import (
 )
 
 func pointer(value bool) *bool { return &value }
+
+type cancelAfterEventBody struct {
+	reader *bytes.Reader
+	cancel context.CancelFunc
+	sent   bool
+}
+
+func (body *cancelAfterEventBody) Read(target []byte) (int, error) {
+	if body.sent {
+		return 0, context.Canceled
+	}
+	read, _ := body.reader.Read(target)
+	body.sent = true
+	body.cancel()
+	return read, nil
+}
+
+func (*cancelAfterEventBody) Close() error { return nil }
 
 func gatewayTestStore(t *testing.T, count int) (*state.Store, []string) {
 	t.Helper()
@@ -62,6 +81,20 @@ func gatewayTestStore(t *testing.T, count int) (*state.Store, []string) {
 func successfulSSE() string {
 	return "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n" +
 		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n"
+}
+
+func TestSSETerminalClassifierIgnoresNestedCompletedItemStatus(t *testing.T) {
+	event := []byte("event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"status\":\"completed\"}}\n\n")
+	if got := classifySSETerminal(event); got != "" {
+		t.Fatalf("output-item boundary was misclassified as %q terminal", got)
+	}
+	if !isSSETerminalCandidate(event) {
+		t.Fatal("output-item boundary was not retained as a terminal candidate")
+	}
+	completed := []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")
+	if got := classifySSETerminal(completed); got != "completed" {
+		t.Fatalf("response.completed was not recognized: %q", got)
+	}
 }
 
 func sendGatewayRequest(t *testing.T, server *httptest.Server, id string) (int, string) {
@@ -147,6 +180,37 @@ func TestTransportKeepsStickySourceAcrossTwentyTurns(t *testing.T) {
 		if source != "upstream-1" {
 			t.Fatalf("turn %d rotated to %q while A was healthy", index, source)
 		}
+	}
+}
+
+func TestTransportUsesOnePublicAPIWithBalancedPoolCredentials(t *testing.T) {
+	store, _ := gatewayTestStore(t, 4)
+	var mu sync.Mutex
+	used := make([]string, 0, 8)
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		mu.Lock()
+		used = append(used, request.Header.Get("ChatGPT-Account-ID"))
+		mu.Unlock()
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(writer, successfulSSE())
+	}))
+	defer upstream.Close()
+	// BalancedPool changes only the hidden credential selection. Every request
+	// still enters this single HTTP server/API and retains the same logical
+	// request shape.
+	gateway := httptest.NewServer(&Transport{
+		Store: store, UpstreamURL: upstream.URL, Client: upstream.Client(), BalancedPool: true,
+	})
+	defer gateway.Close()
+	for index := 0; index < 8; index++ {
+		status, body := sendGatewayRequest(t, gateway, fmt.Sprintf("balanced-turn-%d", index))
+		if status != http.StatusOK || body == "" {
+			t.Fatalf("turn %d status=%d body=%q", index, status, body)
+		}
+	}
+	want := "[upstream-1 upstream-2 upstream-3 upstream-4 upstream-1 upstream-2 upstream-3 upstream-4]"
+	if got := fmt.Sprint(used); got != want {
+		t.Fatalf("balanced pool credential sequence=%s, want %s", got, want)
 	}
 }
 
@@ -287,6 +351,338 @@ func TestTransportRetriesEarlyStreamQuotaButNotLateQuota(t *testing.T) {
 	}
 }
 
+func TestTransportRetriesCleanEOFWithoutTerminalOnNextSource(t *testing.T) {
+	store, ids := gatewayTestStore(t, 2)
+	var used []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		account := request.Header.Get("ChatGPT-Account-ID")
+		used = append(used, account)
+		writer.Header().Set("Content-Type", "text/event-stream")
+		if account == "upstream-1" {
+			_, _ = io.WriteString(writer, "event: response.created\ndata: {\"type\":\"response.created\"}\n\n")
+			return
+		}
+		_, _ = io.WriteString(writer, successfulSSE())
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{Store: store, UpstreamURL: upstream.URL, Client: upstream.Client(), BalancedPool: true})
+	defer gateway.Close()
+	status, body := sendGatewayRequest(t, gateway, "clean-eof-before-terminal")
+	if status != http.StatusOK || !strings.Contains(body, "response.completed") || fmt.Sprint(used) != "[upstream-1 upstream-2]" {
+		t.Fatalf("truncated pre-commit SSE was not recovered: status=%d used=%v body=%q", status, used, body)
+	}
+	pool := store.PoolState()
+	failed := pool.Sources[ids[0]]
+	if !failed.Connected || failed.MembershipState == state.SourceDepleted || failed.TransientFailures != 1 || failed.CircuitState != "suspect" {
+		t.Fatalf("truncated stream corrupted source state: %#v", failed)
+	}
+	if len(pool.ActiveLeases) != 0 || pool.LastError != nil {
+		t.Fatalf("successful stream fallback retained stale state: leases=%#v error=%#v", pool.ActiveLeases, pool.LastError)
+	}
+}
+
+func TestTransportDoesNotAcceptPartialCompletedEventAsTerminal(t *testing.T) {
+	store, _ := gatewayTestStore(t, 2)
+	var used []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		account := request.Header.Get("ChatGPT-Account-ID")
+		used = append(used, account)
+		writer.Header().Set("Content-Type", "text/event-stream")
+		if account == "upstream-1" {
+			_, _ = io.WriteString(writer, "event: response.completed\ndata: {\"type\":\"response.completed\"")
+			return
+		}
+		_, _ = io.WriteString(writer, successfulSSE())
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{Store: store, UpstreamURL: upstream.URL, Client: upstream.Client(), BalancedPool: true})
+	defer gateway.Close()
+	status, body := sendGatewayRequest(t, gateway, "partial-terminal")
+	if status != http.StatusOK || !strings.Contains(body, "response.completed") || fmt.Sprint(used) != "[upstream-1 upstream-2]" {
+		t.Fatalf("partial terminal event was accepted instead of retried: status=%d used=%v body=%q", status, used, body)
+	}
+}
+
+func TestTransportDoesNotReplayTruncatedStreamAfterVisibleOutput(t *testing.T) {
+	store, _ := gatewayTestStore(t, 2)
+	var used []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		used = append(used, request.Header.Get("ChatGPT-Account-ID"))
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(writer, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"visible\"}\n\n")
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{Store: store, UpstreamURL: upstream.URL, Client: upstream.Client(), BalancedPool: true})
+	defer gateway.Close()
+	status, body := sendGatewayRequest(t, gateway, "truncated-after-output")
+	if status != http.StatusOK || len(used) != 1 || !strings.Contains(body, "visible") || !strings.Contains(body, "response.failed") || !strings.Contains(body, "relay_pool_recovery_required") {
+		t.Fatalf("post-commit truncation replayed or lost output: status=%d used=%v body=%q", status, used, body)
+	}
+	lease := store.PoolState().ActiveLeases["truncated-after-output"]
+	if lease.State != state.PoolLeaseRecoveryRequired {
+		t.Fatalf("post-commit truncation was not recovery-required: %#v", lease)
+	}
+}
+
+func TestTransportDropsPartialFrameBeforeRecoveryTerminal(t *testing.T) {
+	store, _ := gatewayTestStore(t, 2)
+	var used []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		used = append(used, request.Header.Get("ChatGPT-Account-ID"))
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(writer, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"visible\"}\n\n")
+		// Simulate the provider resetting in the middle of the next JSON
+		// event. Forwarding this fragment would corrupt the native parser even
+		// if Relay appends a recovery terminal event afterwards.
+		_, _ = io.WriteString(writer, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial")
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{Store: store, UpstreamURL: upstream.URL, Client: upstream.Client(), BalancedPool: true})
+	defer gateway.Close()
+	status, body := sendGatewayRequest(t, gateway, "partial-after-output")
+	if status != http.StatusOK || len(used) != 1 || !strings.Contains(body, "visible") || !strings.Contains(body, "response.failed") || !strings.Contains(body, "relay_pool_recovery_required") {
+		t.Fatalf("partial post-commit frame was not converted to recovery terminal: status=%d used=%v body=%q", status, used, body)
+	}
+	if strings.Contains(body, "partial") {
+		t.Fatalf("unterminated SSE fragment leaked to native client: %q", body)
+	}
+}
+
+func TestTransportConvertsIdlePostCommitStreamToRecoveryTerminal(t *testing.T) {
+	store, _ := gatewayTestStore(t, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(writer, "event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp-idle\"}}\n\n")
+		_, _ = io.WriteString(writer, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"delta\":\"visible\"}\n\n")
+		if flusher, ok := writer.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(sseIdleRecoveryTimeout + 500*time.Millisecond)
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{Store: store, UpstreamURL: upstream.URL, Client: upstream.Client(), BalancedPool: true})
+	defer gateway.Close()
+	status, body := sendGatewayRequest(t, gateway, "idle-after-output")
+	if status != http.StatusOK || !strings.Contains(body, "response.failed") || !strings.Contains(body, "resp-idle") || !strings.Contains(body, "relay_pool_recovery_required") {
+		t.Fatalf("idle post-commit stream did not receive terminal recovery event: status=%d body=%q", status, body)
+	}
+}
+
+func TestTerminalIncompleteIsForwardedButNotRecordedCompleted(t *testing.T) {
+	store, _ := gatewayTestStore(t, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(writer, "event: response.incomplete\ndata: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\"}}\n\n")
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{Store: store, UpstreamURL: upstream.URL, Client: upstream.Client(), BalancedPool: true})
+	defer gateway.Close()
+	status, body := sendGatewayRequest(t, gateway, "terminal-incomplete")
+	if status != http.StatusOK || !strings.Contains(body, "response.incomplete") {
+		t.Fatalf("terminal incomplete event was not forwarded: status=%d body=%q", status, body)
+	}
+	if len(store.PoolState().ActiveLeases) != 0 {
+		t.Fatalf("terminal incomplete retained a lease: %#v", store.PoolState().ActiveLeases)
+	}
+	if task := store.TaskRecords()["thread-one"]; task.LastCompletedTurnID == "terminal-incomplete" {
+		t.Fatalf("terminal incomplete was recorded as completed: %#v", task)
+	}
+}
+
+func TestTransportRetriesTemporaryHTTPBadGatewayAcrossSources(t *testing.T) {
+	store, _ := gatewayTestStore(t, 2)
+	var used []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		account := request.Header.Get("ChatGPT-Account-ID")
+		used = append(used, account)
+		if account == "upstream-1" {
+			http.Error(writer, "temporary edge failure", http.StatusBadGateway)
+			return
+		}
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(writer, successfulSSE())
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{Store: store, UpstreamURL: upstream.URL, Client: upstream.Client(), BalancedPool: true})
+	defer gateway.Close()
+	status, body := sendGatewayRequest(t, gateway, "http-502-failover")
+	if status != http.StatusOK || !strings.Contains(body, "response.completed") || fmt.Sprint(used) != "[upstream-1 upstream-2]" {
+		t.Fatalf("temporary HTTP 502 was not recovered: status=%d used=%v body=%q", status, used, body)
+	}
+}
+
+func TestTransportStopsProviderWideHTTPFailureBeforeRetryStorm(t *testing.T) {
+	store, ids := gatewayTestStore(t, 5)
+	var used []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		used = append(used, request.Header.Get("ChatGPT-Account-ID"))
+		http.Error(writer, "temporary shared edge failure", http.StatusBadGateway)
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{Store: store, UpstreamURL: upstream.URL, Client: upstream.Client(), BalancedPool: true})
+	defer gateway.Close()
+	status, body := sendGatewayRequest(t, gateway, "provider-wide-outage")
+	if status != http.StatusServiceUnavailable || !strings.Contains(body, "provider_wide_outage") || !strings.Contains(body, "reference RP-") {
+		t.Fatalf("provider-wide outage was not surfaced safely: status=%d body=%q", status, body)
+	}
+	if len(used) != 3 {
+		t.Fatalf("provider-wide outage retried every source instead of stopping at threshold: used=%v", used)
+	}
+	pool := store.PoolState()
+	if len(pool.ActiveLeases) != 0 || pool.LastError == nil || pool.LastError.Code != "provider_wide_outage" {
+		t.Fatalf("provider-wide outage left inconsistent pool state: leases=%#v error=%#v", pool.ActiveLeases, pool.LastError)
+	}
+	for _, id := range ids[:3] {
+		source := pool.Sources[id]
+		if source.MembershipState == state.SourceDepleted || source.QuotaEvidence.ExplicitlyDepleted() {
+			t.Fatalf("provider-wide transport failure changed quota state for %q: %#v", id, source)
+		}
+	}
+}
+
+func TestAllSourcesTransientFailureReturnsOneDiagnosticAndClearsLease(t *testing.T) {
+	store, ids := gatewayTestStore(t, 3)
+	var used []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		used = append(used, request.Header.Get("ChatGPT-Account-ID"))
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(writer, "event: response.created\ndata: {\"type\":\"response.created\"}\n\n")
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{Store: store, UpstreamURL: upstream.URL, Client: upstream.Client(), BalancedPool: true})
+	defer gateway.Close()
+	status, body := sendGatewayRequest(t, gateway, "all-transient")
+	if status != http.StatusBadGateway || !strings.Contains(body, "retry_budget_exhausted") || !strings.Contains(body, "3 safe attempt(s)") || !strings.Contains(body, "reference RP-") {
+		t.Fatalf("all-source transient failure was not actionable: status=%d body=%q", status, body)
+	}
+	if len(used) != 3 {
+		t.Fatalf("transient retry attempts=%v, want one per eligible source", used)
+	}
+	pool := store.PoolState()
+	if len(pool.ActiveLeases) != 0 {
+		t.Fatalf("retry exhaustion retained a lease: %#v", pool.ActiveLeases)
+	}
+	for _, id := range ids {
+		source := pool.Sources[id]
+		if !source.Connected || source.MembershipState == state.SourceDepleted || source.QuotaEvidence.ExplicitlyDepleted() {
+			t.Fatalf("transient retry exhausted quota/auth state for %q: %#v", id, source)
+		}
+	}
+}
+
+func TestGatewayReplayAfterRestartDoesNotReturnLogicalTurnConflict(t *testing.T) {
+	store, _ := gatewayTestStore(t, 2)
+	stale, err := store.AcquireBalancedPoolLease(state.PoolLease{
+		LeaseID: "restart-replay", LogicalTurnID: "restart-replay", ThreadID: "thread-one",
+	}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecoverPoolLeases(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := store.PoolState().ActiveLeases[stale.LeaseID]; exists {
+		t.Fatal("startup recovery retained stale pre-commit lease")
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(writer, successfulSSE())
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{Store: store, UpstreamURL: upstream.URL, Client: upstream.Client(), BalancedPool: true})
+	defer gateway.Close()
+	status, body := sendGatewayRequest(t, gateway, stale.LeaseID)
+	if status != http.StatusOK || !strings.Contains(body, "response.completed") {
+		t.Fatalf("native replay after restart failed: status=%d body=%q", status, body)
+	}
+}
+
+func TestConcurrentDuplicateLogicalTurnJoinsOneUpstreamFlight(t *testing.T) {
+	store, _ := gatewayTestStore(t, 2)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	var mu sync.Mutex
+	upstreamCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		mu.Lock()
+		upstreamCalls++
+		mu.Unlock()
+		once.Do(func() { close(started) })
+		<-release
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(writer, successfulSSE())
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{Store: store, UpstreamURL: upstream.URL, Client: upstream.Client(), BalancedPool: true})
+	defer gateway.Close()
+	type result struct {
+		status int
+		body   string
+	}
+	results := make(chan result, 2)
+	go func() {
+		status, body := sendGatewayRequest(t, gateway, "duplicate-turn")
+		results <- result{status: status, body: body}
+	}()
+	<-started
+	go func() {
+		status, body := sendGatewayRequest(t, gateway, "duplicate-turn")
+		results <- result{status: status, body: body}
+	}()
+	time.Sleep(25 * time.Millisecond)
+	close(release)
+	first, second := <-results, <-results
+	for index, got := range []result{first, second} {
+		if got.status != http.StatusOK || !strings.Contains(got.body, "response.completed") {
+			t.Fatalf("duplicate response %d was not replayed from the shared flight: %#v", index, got)
+		}
+	}
+	mu.Lock()
+	calls := upstreamCalls
+	mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("duplicate logical turn dispatched %d upstream requests, want exactly one", calls)
+	}
+	if len(store.PoolState().ActiveLeases) != 0 {
+		t.Fatalf("duplicate flight retained a lease: %#v", store.PoolState().ActiveLeases)
+	}
+}
+
+func TestForwardSSECanceledClientDoesNotMarkRecovery(t *testing.T) {
+	store, _ := gatewayTestStore(t, 2)
+	lease, err := store.AcquirePoolLease(state.PoolLease{
+		LeaseID: "client-cancel", LogicalTurnID: "client-cancel-turn", ThreadID: "client-cancel-thread",
+	}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://relay.invalid/v1/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"visible\"}\n\n")
+	response := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       &cancelAfterEventBody{reader: bytes.NewReader(event), cancel: cancel},
+		Request:    request,
+	}
+	transport := &Transport{Store: store}
+	_, streamErr := transport.forwardSSE(httptest.NewRecorder(), response, lease)
+	if !errors.Is(streamErr, errClientStreamCanceled) {
+		t.Fatalf("stream error=%v, want client cancellation", streamErr)
+	}
+	current := store.PoolState().ActiveLeases[lease.LeaseID]
+	if current.State == state.PoolLeaseRecoveryRequired {
+		t.Fatalf("client cancellation fabricated recovery state: %#v", current)
+	}
+	if task := store.TaskRecords()[lease.ThreadID]; task.RecoveryState != "" {
+		t.Fatalf("client cancellation fabricated task recovery: %#v", task)
+	}
+}
+
 func TestTransportRetriesMessageOnlyStreamingUsageLimit(t *testing.T) {
 	store, ids := gatewayTestStore(t, 2)
 	var used []string
@@ -319,6 +715,92 @@ func TestTransportRetriesMessageOnlyStreamingUsageLimit(t *testing.T) {
 	}
 }
 
+func TestTransportRetriesCodexMessagesLimitMessage(t *testing.T) {
+	store, ids := gatewayTestStore(t, 2)
+	var used []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		account := request.Header.Get("ChatGPT-Account-ID")
+		used = append(used, account)
+		writer.Header().Set("Content-Type", "text/event-stream")
+		if account == "upstream-1" {
+			// The native Codex UI presents this provider shape as “You're out of
+			// Codex messages”. It carries no usage_limit/rate_limit token, so it
+			// must still be recognized as a pool-quota rejection.
+			_, _ = io.WriteString(writer, "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"You're out of Codex messages. Your rate limit resets at 6:17 PM.\"}}}\n\n")
+			return
+		}
+		_, _ = io.WriteString(writer, successfulSSE())
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{Store: store, UpstreamURL: upstream.URL, Client: upstream.Client()})
+	defer gateway.Close()
+	status, body := sendGatewayRequest(t, gateway, "codex-message-limit")
+	if status != http.StatusOK || !strings.Contains(body, "response.completed") || fmt.Sprint(used) != "[upstream-1 upstream-2]" {
+		t.Fatalf("Codex message-limit stream was not retried: status=%d used=%v body=%q", status, used, body)
+	}
+	p := store.PoolState()
+	if p.Sources[ids[0]].MembershipState != state.SourceDepleted || p.ActiveSourceID != ids[1] || p.LastError != nil {
+		t.Fatalf("Codex message-limit failover state is wrong: %#v", p)
+	}
+}
+
+func TestTransportAcceptsChunkedSSEWithoutContentType(t *testing.T) {
+	store, ids := gatewayTestStore(t, 2)
+	var used []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		account := request.Header.Get("ChatGPT-Account-ID")
+		used = append(used, account)
+		if account == "upstream-1" {
+			http.Error(writer, `{"error":{"code":"usage_limit"}}`, http.StatusTooManyRequests)
+			return
+		}
+		// Current ChatGPT Responses can send chunked SSE while omitting the
+		// Content-Type header. The gateway must sniff the prefix and still
+		// stream the response through the same logical lease.
+		_, _ = io.WriteString(writer, successfulSSE())
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{Store: store, UpstreamURL: upstream.URL, Client: upstream.Client()})
+	defer gateway.Close()
+	status, body := sendGatewayRequest(t, gateway, "missing-sse-content-type")
+	if status != http.StatusOK || !strings.Contains(body, "response.completed") || fmt.Sprint(used) != "[upstream-1 upstream-2]" {
+		t.Fatalf("chunked SSE without content type was not streamed after failover: status=%d used=%v body=%q", status, used, body)
+	}
+	pool := store.PoolState()
+	if pool.Sources[ids[0]].MembershipState != state.SourceDepleted || pool.ActiveSourceID != ids[1] || pool.LastError != nil {
+		t.Fatalf("missing-content-type SSE failover state is wrong: %#v", pool)
+	}
+}
+
+func TestTransportRetriesJSONQuotaErrorWithSuccessfulHTTPStatus(t *testing.T) {
+	store, ids := gatewayTestStore(t, 2)
+	var used []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		account := request.Header.Get("ChatGPT-Account-ID")
+		used = append(used, account)
+		if account == "upstream-1" {
+			// This is a raw JSON response.failed envelope with no SSE header;
+			// newer provider revisions have emitted this shape on HTTP 200.
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(writer, `{"type":"response.failed","response":{"error":{"type":"usage_limit_exceeded","message":"You're out of Codex messages"}}}`)
+			return
+		}
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(writer, successfulSSE())
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{Store: store, UpstreamURL: upstream.URL, Client: upstream.Client()})
+	defer gateway.Close()
+	status, body := sendGatewayRequest(t, gateway, "json-message-limit")
+	if status != http.StatusOK || !strings.Contains(body, "response.completed") || fmt.Sprint(used) != "[upstream-1 upstream-2]" {
+		t.Fatalf("successful-HTTP JSON quota error was not retried: status=%d used=%v body=%q", status, used, body)
+	}
+	p := store.PoolState()
+	if p.Sources[ids[0]].MembershipState != state.SourceDepleted || p.ActiveSourceID != ids[1] {
+		t.Fatalf("successful-HTTP JSON quota failover state is wrong: %#v", p)
+	}
+}
+
 func TestTransportSanitizesNonQuotaUpstreamErrors(t *testing.T) {
 	store, _ := gatewayTestStore(t, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -331,7 +813,7 @@ func TestTransportSanitizesNonQuotaUpstreamErrors(t *testing.T) {
 	if status != http.StatusBadGateway {
 		t.Fatalf("status=%d body=%q", status, body)
 	}
-	if !strings.Contains(body, "HTTP 500") {
+	if !strings.Contains(body, "upstream_http_500") || !strings.Contains(body, "reference RP-") {
 		t.Fatalf("safe HTTP status was not exposed: %s", body)
 	}
 	for _, forbidden := range []string{"secret upstream diagnostic", "upstream-1"} {
@@ -340,7 +822,7 @@ func TestTransportSanitizesNonQuotaUpstreamErrors(t *testing.T) {
 		}
 	}
 	lastError := store.PoolState().LastError
-	if lastError == nil || lastError.Code != "upstream_http_error" || lastError.HTTPStatus != http.StatusBadGateway || !strings.Contains(lastError.Message, "HTTP 500") {
+	if lastError == nil || lastError.Code != "retry_budget_exhausted" || lastError.HTTPStatus != http.StatusBadGateway || !strings.Contains(lastError.Message, "upstream_http_500") {
 		t.Fatalf("terminal upstream error was not recorded for diagnostics: %#v", lastError)
 	}
 }

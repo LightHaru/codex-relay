@@ -30,13 +30,28 @@ use reset credits or send prompts that can mutate user files.
   isolated home and no shared credential file.
 - In Usage & billing, confirm there is one **Codex Relay Pool** card in the
   content column. The sidebar and every other Settings child remain usable.
-- Send a short task and verify repeated turns stay on the first source while it
-  is usable; no round-robin or pre-emptive balancing occurs.
+- Send several short tasks and verify they enter the same Relay API/task
+  authority while the hidden credentials rotate fairly across confirmed
+  sources. A source with explicit 5-hour or weekly exhaustion is skipped.
 - With a deterministic fixture or authorized live rejection, verify A→B→C→D
   uses the same session/thread/logical turn and request body before output.
 - Verify no public “Move chat”, worker name, source ID or account owner appears.
 - Mark all sources depleted in a fixture and confirm one sanitized pool error,
   no fake completed turn and no active lease left behind.
+- Persist a pre-output lease, restart the Relay process, and replay the same
+  request ID. It must complete without HTTP 409 and leave no active lease.
+- Send two concurrent copies of one request ID. Both clients must receive the
+  same terminal response while the fixture observes exactly one upstream call.
+- Close a stream before any terminal event. Before output it must rotate to the
+  next source without changing quota/auth state; after visible output it must
+  stop as recovery-required without replay.
+- Hold a fixture after `response.output_item.done` without sending
+  `response.completed`. Relay must emit its recovery terminal within the
+  bounded grace window, and the native task message must explain Relay
+  recovery without the generic `stream closed before response.completed`
+  prefix.
+- Return temporary HTTP 502/503/504 responses and verify bounded source
+  rotation, sanitized final correlation data and transport-only cooldown.
 - Induce/observe a late quota event only in a safe fixture: output is not
   replayed, source is excluded for later turns and the task is recovery-required.
 

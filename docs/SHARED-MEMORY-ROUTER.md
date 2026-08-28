@@ -22,28 +22,38 @@ private evidence only.
 ## State v3
 
 `PoolState` contains a stable pool ID, monotonic revision, membership/quota
-epochs, current source, source order and private `CredentialSourceState` values.
-It also contains active `PoolLease` values, normalized confirmed/unknown/max
-headroom, reset metadata, health, failover count and the last transition.
+epochs, the last selected source, a persistent dispatch cursor, source order and
+private `CredentialSourceState` values. It also contains active `PoolLease`
+values, normalized confirmed/unknown/max headroom, reset metadata, health,
+failover count and the last transition.
 
 `TaskRecord` is account-neutral: thread/session/task identity, canonical
 generation/checkpoint, Goal ID when supplied, active lease and recovery state.
 It never stores OAuth material, prompt text, model output or arbitrary error
 payloads.
 
-## Sticky source algorithm
+## Quota-aware pooled dispatch
 
-1. On the first request, use the first eligible source in deterministic pool
-   order (or the persisted active source).
-2. Reuse it for every later request while it remains eligible.
-3. Accept only explicit quota/rate-limit evidence as depletion: structured
+1. On each request, inspect the private evidence for both Codex windows: the
+   short 5-hour limit and the long weekly limit. A source is eligible only when
+   it is enabled, authenticated, connected and not explicitly depleted.
+2. When at least one eligible source has known quota evidence, probationary
+   sources with unknown quota stay out of the dispatch set until the known set
+   is exhausted. This prevents an unprobed credential from hiding a confirmed
+   usable source.
+3. A persistent dispatch cursor chooses the next eligible confirmed source in
+   round-robin order. This is fair-share across the additive pool; it does not
+   change the public task authority, thread, session or API identity.
+4. Accept only explicit quota/rate-limit evidence as depletion: structured
    rejection, `quota_exhausted`, `usage_limit`, `limit_reached=true`,
    `allowed=false`, a 100%-used reported window or an explicit credential
    rejection.
-4. Atomically mark the source depleted, increment the pool revision and choose
-   the next eligible source.
-5. Retry the exact body on that source only if no output or side effect exists.
-6. Repeat until a source succeeds or the pool is empty.
+5. Atomically mark a rejected source depleted, increment the pool revision and
+   retry the exact body on the next eligible source only if no output or side
+   effect exists. The retry stays inside the same logical request and lease.
+6. Repeat until a source succeeds or the pool is empty. If all sources are
+   depleted, return one sanitized pool-level error rather than exposing a
+   source or creating a second worker.
 
 Unknown quota is `PROBATION`, not confirmed capacity. A timeout, generic network
 error or model-capacity error never advances the quota source.
@@ -94,8 +104,9 @@ threads to the stable authority and marks uncertain tasks for review.
 
 ## Required proof
 
-Deterministic tests must prove sticky selection, exact-body retry, atomic/CAS
-transitions, crash recovery, no replay, migration/rollback and sanitization.
+Deterministic tests must prove fair-share selection, depleted/unknown-source
+filtering, exact-body retry, atomic/CAS transitions, crash recovery, no replay,
+migration/rollback and sanitization.
 The installed-app E2E must prove one task authority and A→B→C→D mechanics with
 a fake upstream. Only an authorized live-account run can mark actual quota
 transitions `LIVE PASS`; partial-stream seamless continuation remains

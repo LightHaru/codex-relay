@@ -42,6 +42,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="required acknowledgement that this sends one real model turn",
     )
+    parser.add_argument(
+        "--dump-errors",
+        action="store_true",
+        help="include bounded app-server error/terminal details in the sanitized probe output",
+    )
+    parser.add_argument(
+        "--dump-stderr",
+        action="store_true",
+        help="include bounded child stderr diagnostics in the probe output",
+    )
     return parser.parse_args()
 
 
@@ -163,7 +173,47 @@ def sanitized_error(message: dict[str, Any]) -> str:
         return "quota_exhausted"
     if "capacity" in lowered:
         return "model_capacity"
+    if "stream disconnected" in lowered or "stream closed" in lowered:
+        return "stream_disconnected"
+    if "409" in lowered or "already active" in lowered or "logical_turn" in lowered:
+        return "logical_turn_conflict"
     return "none" if not text else "other"
+
+
+def sanitized_error_code(message: dict[str, Any]) -> str:
+    """Return a bounded category/code without exposing provider payloads."""
+    value: Any = message.get("error")
+    if value is None:
+        params = message.get("params") or {}
+        value = params.get("error") or ((params.get("turn") or {}).get("error"))
+    candidates: list[str] = []
+
+    def collect(item: Any) -> None:
+        if isinstance(item, dict):
+            for key in ("code", "type", "name"):
+                candidate = item.get(key)
+                if isinstance(candidate, (str, int, float)):
+                    candidates.append(str(candidate))
+            for key in ("error", "cause", "codexErrorInfo"):
+                if key in item:
+                    collect(item[key])
+        elif isinstance(item, (str, int, float)):
+            candidates.append(str(item))
+
+    collect(value)
+    for candidate in candidates:
+        lowered = candidate.lower().strip()
+        if not lowered:
+            continue
+        if "usage" in lowered or "quota" in lowered or "rate_limit" in lowered:
+            return "quota_exhausted"
+        if "stream" in lowered and ("disconnect" in lowered or "closed" in lowered):
+            return "stream_disconnected"
+        if "logical_turn" in lowered or "already_active" in lowered or "409" in lowered:
+            return "logical_turn_conflict"
+        if all(ch.isalnum() or ch in "._-" for ch in candidate) and len(candidate) <= 96:
+            return candidate
+    return sanitized_error(message)
 
 
 def main() -> int:
@@ -268,6 +318,13 @@ def main() -> int:
         terminal = turn_response if turn_response.get("error") is not None else wait_for_terminal(
             output, thread_id, args.timeout, observed
         )
+        terminal_status = ""
+        if isinstance(terminal.get("params"), dict):
+            terminal_params = terminal["params"]
+            terminal_turn = terminal_params.get("turn") or {}
+            terminal_status = str(
+                terminal_turn.get("status") or terminal_params.get("status") or ""
+            ).lower()
         expected_goal_objective = args.goal_objective or args.verify_goal_objective
         goal_present_after: bool | None = None
         goal_status_after: str | None = None
@@ -295,7 +352,10 @@ def main() -> int:
             "threadId": thread_id,
             "turnAccepted": turn_response.get("error") is None,
             "terminalMethod": terminal.get("method") or "response-error",
+            "terminalStatus": terminal_status or ("error" if terminal.get("error") else "unknown"),
+            "turnCompleted": terminal_status == "completed",
             "terminalErrorCategory": sanitized_error(terminal if terminal.get("method") else turn_response),
+            "terminalErrorCode": sanitized_error_code(terminal if terminal.get("method") else turn_response),
             "goalSet": goal_set_ok,
             "goalPresentAfter": goal_present_after,
             "goalStatusAfter": goal_status_after,
@@ -304,6 +364,26 @@ def main() -> int:
             "observedItemTypes": item_types,
             "stderrLineCount": errors.qsize(),
         }
+        if args.dump_errors:
+            result["errorMessages"] = [
+                {
+                    "method": message.get("method"),
+                    "id": message.get("id"),
+                    "error": message.get("error"),
+                    "params": {
+                        key: value
+                        for key, value in (message.get("params") or {}).items()
+                        if key in {"status", "error", "turn"}
+                    },
+                }
+                for message in observed
+                if message.get("method") in {"error", "turn/completed"}
+            ]
+        if args.dump_stderr:
+            # Allow the stderr reader to receive a final transport diagnostic
+            # emitted at the same time as turn/completed.
+            time.sleep(2.0)
+            result["stderr"] = list(errors.queue)
         print(json.dumps(result, indent=2))
         return 0
     finally:

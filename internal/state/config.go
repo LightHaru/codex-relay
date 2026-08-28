@@ -13,6 +13,17 @@ import (
 const isolatedCredentialConfig = `cli_auth_credentials_store = "file"
 mcp_oauth_credentials_store = "file"`
 
+const relayPoolProviderConfig = `
+[model_providers.relay_pool]
+name = "Codex Relay Pool"
+base_url = %s
+wire_api = "responses"
+env_key = "CODEX_RELAY_GATEWAY_TOKEN"
+requires_openai_auth = false
+request_max_retries = 0
+stream_max_retries = 0
+`
+
 // syncIsolatedConfig shares desktop-managed settings and MCP servers with an
 // isolated subscription while keeping its credentials and project trust local.
 func syncIsolatedConfig(primaryCodexHome, isolatedCodexHome string) error {
@@ -56,10 +67,28 @@ func syncIsolatedConfig(primaryCodexHome, isolatedCodexHome string) error {
 		managed = forceWindowsSandboxUnelevated(managed)
 	}
 	projects := filterConfig(isolatedConfig, isProjectSection)
+	// The unified authority owns a Relay-managed provider table that is
+	// injected at process start. Preserve that target-local table while copying
+	// the primary's shared settings, otherwise a periodic plugin/usage refresh
+	// would leave model_provider = "relay_pool" without its definition.
+	relayProvider := filterConfig(isolatedConfig, isRelayPoolProviderSection)
 
 	parts := []string{isolatedCredentialConfig}
 	if managed = strings.TrimSpace(managed); managed != "" {
+		if strings.TrimSpace(relayProvider) != "" {
+			// A Relay authority must never regain the native top-level
+			// model_provider assignment from the primary while its local
+			// provider block is being preserved. Keep the canonical default
+			// immediately before the shared managed settings instead.
+			managed = removeTopLevelSetting(managed, "model_provider")
+		}
 		parts = append(parts, managed)
+	}
+	if strings.TrimSpace(relayProvider) != "" {
+		parts = append(parts, `model_provider = "relay_pool"`)
+	}
+	if relayProvider = strings.TrimSpace(relayProvider); relayProvider != "" {
+		parts = append(parts, relayProvider)
 	}
 	if projects = strings.TrimSpace(projects); projects != "" {
 		parts = append(parts, projects)
@@ -80,6 +109,104 @@ func syncIsolatedConfig(primaryCodexHome, isolatedCodexHome string) error {
 		return fmt.Errorf("commit config: %w", err)
 	}
 	return nil
+}
+
+// EnsureRelayPoolProvider installs the provider definition used by the one
+// unified Relay authority. Newer app-server builds can reload config.toml
+// after startup (for example during plugin/usage refresh), so command-line
+// -c overrides alone are not durable: a later reload may retain
+// model_provider = "relay_pool" while losing the table that defines it. The
+// authority home is Relay-owned; install a canonical, token-free provider
+// block there and keep every user-managed model/plugin setting intact.
+func EnsureRelayPoolProvider(codexHome, baseURL string) error {
+	codexHome = strings.TrimSpace(codexHome)
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if codexHome == "" || baseURL == "" {
+		return errors.New("Relay Pool Codex home and gateway URL are required")
+	}
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		return fmt.Errorf("create Relay authority home: %w", err)
+	}
+	if err := os.Chmod(codexHome, 0o700); err != nil {
+		return fmt.Errorf("secure Relay authority home: %w", err)
+	}
+	configPath := filepath.Join(codexHome, "config.toml")
+	contents, err := readConfig(configPath)
+	if err != nil {
+		return fmt.Errorf("read Relay authority config: %w", err)
+	}
+	updated := ensureRelayPoolProviderText(string(contents), baseURL)
+	if updated == string(contents) {
+		return nil
+	}
+	temporaryPath := configPath + ".tmp"
+	if err := os.WriteFile(temporaryPath, []byte(updated), 0o600); err != nil {
+		return fmt.Errorf("write Relay authority config: %w", err)
+	}
+	if err := os.Chmod(temporaryPath, 0o600); err != nil {
+		return fmt.Errorf("secure Relay authority config: %w", err)
+	}
+	if err := renameStateFile(temporaryPath, configPath); err != nil {
+		return fmt.Errorf("commit Relay authority config: %w", err)
+	}
+	return nil
+}
+
+// ensureRelayPoolProviderText is deliberately line-oriented like the other
+// config helpers in this file. It avoids re-encoding unknown TOML/plugin
+// tables, replaces a previous Relay-managed provider block atomically, and
+// forces the top-level default provider to the same canonical name.
+func ensureRelayPoolProviderText(contents, baseURL string) string {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	lines := strings.Split(contents, "\n")
+	result := make([]string, 0, len(lines)+12)
+	section := ""
+	foundDefault := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			section = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "["), "]"))
+			if section == "model_providers.relay_pool" {
+				// The canonical block is appended below. Drop the complete old
+				// table, including comments/fields, to prevent duplicate keys.
+				continue
+			}
+		}
+		if section == "model_providers.relay_pool" {
+			continue
+		}
+		if section == "" && strings.HasPrefix(trimmed, "model_provider") {
+			equal := strings.IndexByte(trimmed, '=')
+			if equal >= 0 && strings.TrimSpace(trimmed[:equal]) == "model_provider" {
+				indentLength := len(line) - len(strings.TrimLeft(line, " \t"))
+				result = append(result, line[:indentLength]+`model_provider = "relay_pool"`)
+				foundDefault = true
+				continue
+			}
+		}
+		result = append(result, line)
+	}
+	if !foundDefault {
+		// Keep a possible leading comment readable while ensuring the default
+		// assignment remains in the root TOML table before any section header.
+		insertAt := 0
+		for insertAt < len(result) {
+			trimmed := strings.TrimSpace(result[insertAt])
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				insertAt++
+				continue
+			}
+			break
+		}
+		result = append(result, "")
+		copy(result[insertAt+1:], result[insertAt:])
+		result[insertAt] = `model_provider = "relay_pool"`
+	}
+	for len(result) > 0 && strings.TrimSpace(result[len(result)-1]) == "" {
+		result = result[:len(result)-1]
+	}
+	result = append(result, fmt.Sprintf(relayPoolProviderConfig, strconv.Quote(baseURL)))
+	return strings.TrimSpace(strings.Join(result, "\n")) + "\n"
 }
 
 // rewriteIsolatedCodexHomeEnvironment rewrites explicit MCP environment
@@ -201,6 +328,14 @@ func filterConfig(contents []byte, keep func(section string) bool) string {
 }
 
 func removeTopLevelCredentialSettings(contents string) string {
+	return removeTopLevelSetting(contents, "cli_auth_credentials_store", "mcp_oauth_credentials_store")
+}
+
+func removeTopLevelSetting(contents string, keys ...string) string {
+	keySet := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		keySet[key] = struct{}{}
+	}
 	var builder strings.Builder
 	section := ""
 	for _, line := range strings.Split(contents, "\n") {
@@ -208,9 +343,14 @@ func removeTopLevelCredentialSettings(contents string) string {
 		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
 			section = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "["), "]"))
 		}
-		if section == "" && (strings.HasPrefix(trimmed, "cli_auth_credentials_store =") ||
-			strings.HasPrefix(trimmed, "mcp_oauth_credentials_store =")) {
-			continue
+		if section == "" {
+			equal := strings.IndexByte(trimmed, '=')
+			if equal >= 0 {
+				key := strings.TrimSpace(trimmed[:equal])
+				if _, remove := keySet[key]; remove {
+					continue
+				}
+			}
 		}
 		builder.WriteString(line)
 		builder.WriteByte('\n')
@@ -220,6 +360,10 @@ func removeTopLevelCredentialSettings(contents string) string {
 
 func isProjectSection(section string) bool {
 	return section == "projects" || strings.HasPrefix(section, "projects.")
+}
+
+func isRelayPoolProviderSection(section string) bool {
+	return section == "model_providers.relay_pool" || strings.HasPrefix(section, "model_providers.relay_pool.")
 }
 
 func samePath(left, right string) bool {

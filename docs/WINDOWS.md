@@ -56,11 +56,14 @@ Goal, tool and approval messages go only to the one selected authority.
 Changing the authority is allowed only while no turn is active and restarts
 Relay-owned children; it never creates a second public worker or moves a chat.
 
-The Gateway keeps one sticky source until explicit upstream quota evidence. A
-pre-output A→B retry reuses the exact request body, model, session, thread and
-logical turn. It does not create a task or move a chat. If a stream already
-produced output or a side effect, Relay marks recovery-required and never
-replays it. If all sources are depleted, the error is one pool-level message.
+The Gateway keeps one public API and task authority while its hidden credential
+scheduler fair-shares requests across every confirmed eligible source. It reads
+the short (5-hour) and long (weekly) windows, skips depleted sources and uses a
+persistent cursor so one account cannot monopolise the pool. A pre-output A→B
+retry reuses the exact request body, model, session, thread and logical turn. It
+does not create a task or move a chat. If a stream already produced output or a
+side effect, Relay marks recovery-required and never replays it. If all sources
+are depleted, the error is one pool-level message.
 
 ## Usage & billing placement
 
@@ -125,6 +128,25 @@ percentage.
 **“Relay request failed”**: read the error toast or the affected account card in
 Usage & billing. Relay includes a safe reason and HTTP/upstream code when one is
 available; it never displays raw provider bodies, tokens or local paths.
+
+**“Relay Pool already has an active request for this logical turn”**: v0.5.4+
+recovers pre-commit leases before opening the local Gateway and coalesces
+concurrent duplicate request IDs. After an upgrade, fully restart only the
+managed Codex Relay copy. Do not delete `state.json`: a committed lease is kept
+as recovery-required to prevent duplicated commands or file changes.
+
+**“stream disconnected before completion” after output**: v0.5.4+ recognizes
+the `response.output_item.done` boundary without treating its nested item
+status as a terminal response. It waits only a short, bounded grace period for
+`response.completed`; if the provider remains silent, Relay sends a recovery
+terminal and the mux shows an actionable Relay message instead of the generic
+`stream closed before response.completed` text. Continue with a new turn after
+reviewing the affected result; no side effect is replayed.
+
+**“retry_budget_exhausted”**: every eligible source failed before a complete
+terminal event. The message includes a safe error class, attempt count and
+`RP-...` correlation reference. Transport cooldown does not mean quota was
+consumed or the account was disconnected.
 
 **“recovery-required”**: a quota/network failure happened after output or a side
 effect, so automatic replay is unsafe. Review the task result and acknowledge

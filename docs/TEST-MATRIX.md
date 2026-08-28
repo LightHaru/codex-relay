@@ -14,12 +14,23 @@ history contents or full account identity.
 | v2 rollback projection is hashed and recovery-safe | `TestV3ContinuouslyWritesRecoverySafeV2RollbackProjection` | PASS |
 | Pool revision uses CAS | `TestPoolCASHeartbeatAndCrashRecovery` | PASS |
 | Concurrent quota rejection commits one transition | `TestConcurrentQuotaRejectionsCommitOnePoolTransition` | PASS |
-| Source remains sticky while usable | `TestPoolStickyUntilExplicitQuotaRejection`; 20-turn transport test | PASS |
+| Unified Gateway fair-shares confirmed sources | `TestBalancedPoolLeaseUsesOnePoolCursorAcrossConfirmedSources`; balanced transport test | PASS |
+| Legacy sticky lease compatibility remains available | `TestPoolStickyUntilExplicitQuotaRejection`; 20-turn transport test | PASS |
 | Explicit A→B failover keeps exact request bytes | `TestTransportFailsOverSameRequestBeforeOutput` | PASS |
 | Early SSE quota retries; late SSE never replays | `TestTransportRetriesEarlyStreamQuotaButNotLateQuota` | PASS |
 | Late quota marks future source depleted and task recovery | pool/transport late-stream assertions | PASS |
 | All-depleted does not fabricate completion or leak a lease | `TestPoolDepletedRequestDoesNotLeaveLeaseOrFakeCompletedTurn` | PASS |
 | Heartbeat and expired lease recovery | `TestPoolCASHeartbeatAndCrashRecovery` | PASS |
+| Restart releases pre-commit lease for same request ID | `TestPoolRestartReleasesUncommittedLeaseForSameRequestReplay`, `TestGatewayReplayAfterRestartDoesNotReturnLogicalTurnConflict` | PASS |
+| Restart preserves post-commit no-replay recovery | `TestPoolRestartKeepsCommittedLeaseRecoveryRequired` | PASS |
+| Concurrent duplicate request single-flight | `TestConcurrentDuplicateLogicalTurnJoinsOneUpstreamFlight` | PASS |
+| Terminal-aware SSE and truncated EOF failover | `TestTransportRetriesCleanEOFWithoutTerminalOnNextSource`, `TestTransportDoesNotAcceptPartialCompletedEventAsTerminal` | PASS |
+| Nested output-item completion is not a Responses terminal | `TestUnifiedGatewayPostCommitIdleEmitsRecoverableTerminal`; terminal classifier regression | PASS |
+| Post-output truncated SSE never replays | `TestTransportDoesNotReplayTruncatedStreamAfterVisibleOutput` | PASS |
+| Post-output idle/canceled stream emits a recovery terminal and clean mux message | `TestTransportConvertsIdlePostCommitStreamToRecoveryTerminal`, `TestSanitizeRelayRecoveryNotificationRemovesNativeStreamPrefix` | PASS |
+| Temporary upstream 502 rotates without quota depletion | `TestTransportRetriesTemporaryHTTPBadGatewayAcrossSources` | PASS |
+| Transport cooldown remains separate from quota/auth | `TestRepeatedTransientFailuresOpenCooldownWithoutChangingQuota` | PASS |
+| All-source transient exhaustion clears lease and reports reference | `TestAllSourcesTransientFailureReturnsOneDiagnosticAndClearsLease` | PASS |
 | Tokens and arbitrary upstream errors are absent from responses | gateway and explainability sanitization tests | PASS |
 | Local bearer is required | `TestTransportRequiresItsLocalBearerToken` | PASS |
 | Unknown quota enters probation, not confirmed capacity | `TestPrimeCredentialSourcesUsesProbationWithoutGuessingQuota` | PASS |
@@ -34,6 +45,7 @@ history contents or full account identity.
 | Tool/approval/Goal traffic remains on authority | mux unified routing tests | PASS |
 | New and existing thread use the same authority | mux routing and resume tests | PASS |
 | Restart/crash keeps TaskRecord and canonical generation | state migration/recovery tests | PASS |
+| Post-output idle recovery with the installed real app-server | `TestUnifiedGatewayPostCommitIdleEmitsRecoverableTerminal` (real `codex.real.exe`) | PASS |
 | Windows path, locked rollout, hash/size and symlink safety | canonical history tests | PASS |
 | Native Usage & billing stays in content column | `ui/test-windows-router-menu.cjs`; renderer fixtures | PASS |
 | Other Settings pages/sidebar remain reachable | UI bridge/fixture tests | PASS |

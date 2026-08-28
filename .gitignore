@@ -1,7 +1,9 @@
 /build/
 /dist/
+/.artifacts/
 /node_modules/
 /.local/
+.local-lockgen/
 __pycache__/
 *.pyc
 /.DS_Store

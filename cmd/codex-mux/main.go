@@ -74,6 +74,13 @@ func run() error {
 	if err := gateway.PrimeCredentialSources(store); err != nil {
 		return fmt.Errorf("prime Relay Pool sources: %w", err)
 	}
+	// Recover persisted leases before the loopback Gateway starts listening.
+	// The previous process cannot still own those leases after a machine/app
+	// restart; accepting a replay in the gap before Multiplexer.Start recovered
+	// state could otherwise produce a false logical-turn HTTP 409.
+	if err := store.RecoverPoolLeases(time.Now()); err != nil {
+		return fmt.Errorf("recover Relay Pool leases before transport start: %w", err)
+	}
 	compatibilityProfile := resolveCompatibilityProfile(realExecutable)
 
 	poolListener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -88,6 +95,10 @@ func run() error {
 	poolServer := &http.Server{
 		Handler: &gateway.Transport{
 			Store: store, LocalBearerToken: poolToken,
+			// Unified mode exposes one Relay API and one task-authority child;
+			// credentials are selected fairly inside the Gateway pool so a
+			// healthy account cannot monopolise the aggregate quota.
+			BalancedPool:    true,
 			DisableFailover: strings.EqualFold(compatibilityProfile, "unknown"),
 		},
 		ReadHeaderTimeout: 10 * time.Second,
