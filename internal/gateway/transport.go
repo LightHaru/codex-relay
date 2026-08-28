@@ -37,11 +37,6 @@ const (
 	// model request. After output is visible, fail closed if the provider stays
 	// silent for this bounded interval; the recovery terminal is then delivered
 	// before the client turns the idle connection into a stream-disconnect error.
-	// A three-second cutoff misclassified ordinary gaps between reasoning/tool
-	// events as a dead stream.  Keepalive comments already protect the native
-	// app-server watchdog, so allow a realistic upstream pause before declaring
-	// the committed stream uncertain.
-	sseIdleRecoveryTimeout = 90 * time.Second
 	// A completed output item is normally followed immediately by
 	// response.completed. Hold that one frame briefly so the native app-server
 	// cannot cancel the request before Relay can emit a standards-shaped
@@ -81,8 +76,10 @@ type Transport struct {
 	// profile. Relay still exposes one API, but it fails closed instead of
 	// attempting a credential continuation that has not been protocol-tested.
 	DisableFailover bool
-	// SSEIdleTimeout overrides the production post-commit idle window in
-	// deterministic tests. Zero uses sseIdleRecoveryTimeout.
+	// SSEIdleTimeout enables a post-commit idle cutoff only in deterministic
+	// tests. Production leaves it zero: Relay is an API intermediary and waits
+	// for an upstream terminal/close or a real client cancellation while sending
+	// downstream keepalives.
 	SSEIdleTimeout time.Duration
 	flightMu       sync.Mutex
 	flights        map[string]*requestFlight
@@ -1062,6 +1059,7 @@ func (t *Transport) forwardSSE(writer http.ResponseWriter, response *http.Respon
 				terminal = classifySSETerminal(event)
 			}
 			if visible || sideEffect {
+				terminalCandidateObserved := completeSSEEvent(event) && isSSETerminalCandidate(event) && terminal == ""
 				lease, _ = t.Store.MarkPoolLeaseProgress(lease.LeaseID, state.PoolLeaseStreaming, visible, sideEffect)
 				copyResponseHeaders(writer.Header(), response.Header)
 				writer.WriteHeader(response.StatusCode)
@@ -1083,8 +1081,10 @@ func (t *Transport) forwardSSE(writer http.ResponseWriter, response *http.Respon
 					}
 					remaining, remainingErr := readSSEEventWithKeepaliveTimeout(reader, writer, responseContext(response), readTimeout)
 					debugSSEFrame("continuation", remaining, remainingErr)
+					remainingWasPartial := false
 					if len(remaining) > 0 {
 						remainingComplete := completeSSEEvent(remaining)
+						remainingWasPartial = !remainingComplete
 						if remainingComplete {
 							if sequence, ok := sseSequenceNumber(remaining); ok {
 								lastSequenceNumber = sequence
@@ -1111,12 +1111,14 @@ func (t *Transport) forwardSSE(writer http.ResponseWriter, response *http.Respon
 						// flushed immediately before Relay's recovery terminal.
 						if remainingComplete && isSSETerminalCandidate(remaining) && classifySSETerminal(remaining) == "" {
 							debugStreamDecision("hold_terminal_candidate", nil)
+							terminalCandidateObserved = true
 							pendingTerminalEvents = append(pendingTerminalEvents, append([]byte(nil), remaining...))
 							continue
 						}
 						// Only complete frames are safe to forward. A partial frame is
 						// intentionally discarded before the recovery terminal below.
 						if remainingComplete {
+							terminalCandidateObserved = false
 							for _, pending := range pendingTerminalEvents {
 								_, _ = writer.Write(pending)
 								if flusher, ok := writer.(http.Flusher); ok {
@@ -1144,6 +1146,7 @@ func (t *Transport) forwardSSE(writer http.ResponseWriter, response *http.Respon
 						}
 					}
 					if remainingErr != nil {
+						hadTerminalCandidate := terminalCandidateObserved || len(pendingTerminalEvents) > 0
 						for _, pending := range pendingTerminalEvents {
 							_, _ = writer.Write(pending)
 							if flusher, ok := writer.(http.Flusher); ok {
@@ -1151,6 +1154,21 @@ func (t *Transport) forwardSSE(writer http.ResponseWriter, response *http.Respon
 							}
 						}
 						pendingTerminalEvents = nil
+						// response.output_item.done is a complete model output boundary.
+						// Some compatible upstream paths close immediately afterwards and
+						// omit only response.completed. Completing that already-delivered
+						// boundary does not replay the request or any tool side effect; it
+						// lets the native app-server continue its normal tool loop. Never do
+						// this when another unterminated frame had begun.
+						if hadTerminalCandidate && !remainingWasPartial {
+							debugStreamDecision("complete_after_output_item_boundary", remainingErr)
+							completionSequence := nextSSESequence(lastSequenceNumber, haveSequenceNumber)
+							_, _ = writer.Write(sanitizedCompletedSSE(completionSequence, responseID))
+							if flusher, ok := writer.(http.Flusher); ok {
+								flusher.Flush()
+							}
+							return lease, nil
+						}
 						// Closing/restarting the Relay renderer cancels the local
 						// app-server request and therefore the upstream HTTP context.
 						// That is an expected client lifecycle event, not an upstream
@@ -1234,7 +1252,7 @@ func (t *Transport) sseIdleTimeout() time.Duration {
 	if t != nil && t.SSEIdleTimeout > 0 {
 		return t.SSEIdleTimeout
 	}
-	return sseIdleRecoveryTimeout
+	return 0
 }
 
 func classifySSETerminal(event []byte) string {
@@ -1473,6 +1491,32 @@ func sanitizedRecoverySSE(sequenceNumber int64, responseID string) []byte {
 	return append([]byte("event: response.failed\ndata: "), append(encoded, []byte("\n\n")...)...)
 }
 
+func sanitizedCompletedSSE(sequenceNumber int64, responseID string) []byte {
+	responseID = strings.TrimSpace(responseID)
+	if responseID == "" {
+		responseID = "resp_relay_pool_completed"
+	}
+	payload := map[string]any{
+		"type":            "response.completed",
+		"sequence_number": sequenceNumber,
+		"response": map[string]any{
+			"id":         responseID,
+			"object":     "response",
+			"created_at": time.Now().Unix(),
+			"status":     "completed",
+			"error":      nil,
+			"output":     []any{},
+			"model":      "relay_pool",
+			"usage":      nil,
+		},
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return []byte("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")
+	}
+	return append([]byte("event: response.completed\ndata: "), append(encoded, []byte("\n\n")...)...)
+}
+
 func readSSEEvent(reader *bufio.Reader) ([]byte, error) {
 	var event bytes.Buffer
 	for {
@@ -1502,13 +1546,10 @@ var errSSEIdleRecoveryTimeout = errors.New("upstream SSE idle after visible outp
 // flushed only after the downstream response is committed; they never become
 // assistant output or a replayable side effect.
 func readSSEEventWithKeepalive(reader *bufio.Reader, writer http.ResponseWriter, ctx context.Context) ([]byte, error) {
-	return readSSEEventWithKeepaliveTimeout(reader, writer, ctx, sseIdleRecoveryTimeout)
+	return readSSEEventWithKeepaliveTimeout(reader, writer, ctx, 0)
 }
 
 func readSSEEventWithKeepaliveTimeout(reader *bufio.Reader, writer http.ResponseWriter, ctx context.Context, idleTimeout time.Duration) ([]byte, error) {
-	if idleTimeout <= 0 {
-		idleTimeout = sseIdleRecoveryTimeout
-	}
 	result := make(chan sseReadResult, 1)
 	go func() {
 		event, err := readSSEEvent(reader)
@@ -1516,8 +1557,13 @@ func readSSEEventWithKeepaliveTimeout(reader *bufio.Reader, writer http.Response
 	}()
 	ticker := time.NewTicker(sseKeepaliveInterval)
 	defer ticker.Stop()
-	idleTimer := time.NewTimer(idleTimeout)
-	defer idleTimer.Stop()
+	var idleTimer *time.Timer
+	var idle <-chan time.Time
+	if idleTimeout > 0 {
+		idleTimer = time.NewTimer(idleTimeout)
+		idle = idleTimer.C
+		defer idleTimer.Stop()
+	}
 	for {
 		select {
 		case read := <-result:
@@ -1532,7 +1578,7 @@ func readSSEEventWithKeepaliveTimeout(reader *bufio.Reader, writer http.Response
 			if flusher, ok := writer.(http.Flusher); ok {
 				flusher.Flush()
 			}
-		case <-idleTimer.C:
+		case <-idle:
 			return nil, errSSEIdleRecoveryTimeout
 		case <-ctx.Done():
 			return nil, ctx.Err()

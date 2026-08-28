@@ -98,6 +98,54 @@ func TestSSETerminalClassifierIgnoresNestedCompletedItemStatus(t *testing.T) {
 	}
 }
 
+func TestProductionTransportHasNoPostOutputIdleCutoff(t *testing.T) {
+	if got := (&Transport{}).sseIdleTimeout(); got != 0 {
+		t.Fatalf("production post-output idle cutoff = %s, want disabled", got)
+	}
+}
+
+func TestProductionTransportWaitsBeyondLegacyThreeSecondCutoff(t *testing.T) {
+	store, _ := gatewayTestStore(t, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(writer, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"visible\"}\n\n")
+		if flusher, ok := writer.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(3500 * time.Millisecond)
+		_, _ = io.WriteString(writer, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{Store: store, UpstreamURL: upstream.URL, Client: upstream.Client(), BalancedPool: true})
+	defer gateway.Close()
+	status, body := sendGatewayRequest(t, gateway, "wait-beyond-three-seconds")
+	if status != http.StatusOK || classifySSETerminal([]byte(body)) != "completed" || strings.Contains(body, "relay_pool_recovery_required") {
+		t.Fatalf("production stream retained the legacy idle cutoff: status=%d body=%q", status, body)
+	}
+	if len(store.PoolState().ActiveLeases) != 0 {
+		t.Fatalf("long healthy stream retained a lease: %#v", store.PoolState().ActiveLeases)
+	}
+}
+
+func TestTransportCompletesCleanCloseAfterOutputItemBoundary(t *testing.T) {
+	store, _ := gatewayTestStore(t, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(writer, "event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp-boundary\"}}\n\n")
+		_, _ = io.WriteString(writer, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"sequence_number\":1,\"item\":{\"type\":\"function_call\",\"status\":\"completed\"}}\n\n")
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{Store: store, UpstreamURL: upstream.URL, Client: upstream.Client(), BalancedPool: true})
+	defer gateway.Close()
+	status, body := sendGatewayRequest(t, gateway, "complete-boundary")
+	if status != http.StatusOK || !strings.Contains(body, "response.completed") || strings.Contains(body, "relay_pool_recovery_required") {
+		t.Fatalf("clean output-item close was not completed natively: status=%d body=%q", status, body)
+	}
+	if len(store.PoolState().ActiveLeases) != 0 {
+		t.Fatalf("completed boundary retained a lease: %#v", store.PoolState().ActiveLeases)
+	}
+}
+
 func sendGatewayRequest(t *testing.T, server *httptest.Server, id string) (int, string) {
 	return sendGatewayRequestBody(t, server, id, `{"stream":true,"input":[]}`)
 }

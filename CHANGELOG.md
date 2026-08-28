@@ -3,6 +3,29 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/) and
 this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.5.8] - 2026-08-28
+
+### Fixed
+
+- Production Gateway streams no longer have a post-output idle deadline.
+  Relay now behaves as a transparent API intermediary: it sends downstream
+  keepalives and waits for an upstream terminal/close or an actual client
+  cancellation.
+- If a compatible upstream cleanly closes immediately after a complete
+  `response.output_item.done` boundary but omits only `response.completed`,
+  Relay now emits the missing completion terminal without replaying the
+  request or any tool side effect.
+- Unterminated frames and disconnects before a complete output-item boundary
+  remain fail-closed, so truncated content is never reported as completed.
+
+### Validation
+
+- Added regressions proving production has no idle cutoff, explicit test-only
+  cutoffs still work, and a clean close after an output-item boundary completes
+  with no recovery lease.
+
+Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.8
+
 ## [0.5.7] - 2026-08-28
 
 ### Fixed
@@ -775,7 +798,8 @@ Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.7
 - Loopback-only, token-authenticated diagnostic UI states.
 - Source-only CI, draft release automation, security documentation, and smoke tests.
 
-[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.5.7...HEAD
+[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.5.8...HEAD
+[0.5.8]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.8
 [0.5.7]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.7
 [0.5.6]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.6
 [0.5.5]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.5

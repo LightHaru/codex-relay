@@ -1,5 +1,18 @@
 # Compatibility
 
+## Release 0.5.8 — Transparent post-output streaming
+
+Production Relay no longer owns an idle deadline after a Responses stream has
+started. It forwards protocol-neutral SSE keepalive comments while waiting for
+the upstream terminal event, transport close, or real downstream cancellation.
+The configurable idle cutoff remains available only to deterministic tests.
+
+When a compatible upstream cleanly closes after sending a complete
+`response.output_item.done` frame, Relay can safely emit the omitted
+`response.completed`: the output boundary is already delivered and no request
+or tool is replayed. A partial subsequent frame never takes this path and
+continues to fail closed.
+
 ## Release 0.5.7 — Long post-output pauses and native activity details
 
 The public Responses and app-server protocols remain unchanged. Relay sends
