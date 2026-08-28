@@ -739,6 +739,29 @@ func (s *Store) acquirePoolLease(lease PoolLease, ttl time.Duration, balanced bo
 	previousPool := clonePoolState(s.pool)
 	previousTasks := cloneMap(s.tasks)
 	now := time.Now().UnixMilli()
+	// Starting a distinct logical turn on the same thread is the renderer's
+	// explicit continuation after a fail-closed post-commit stop. Retain the
+	// no-replay guarantee for the old logical turn, but remove all of its
+	// terminal recovery leases so they cannot accumulate forever or leave Usage
+	// reporting with phantom active requests.
+	if lease.ThreadID != "" {
+		removedRecovery := false
+		for activeID, active := range s.pool.ActiveLeases {
+			if active.ThreadID == lease.ThreadID && active.LogicalTurnID != lease.LogicalTurnID && active.State == PoolLeaseRecoveryRequired {
+				delete(s.pool.ActiveLeases, activeID)
+				removedRecovery = true
+			}
+		}
+		if task := s.tasks[lease.ThreadID]; removedRecovery && task.ThreadID != "" && task.RecoveryState == "recovery-required" {
+			task.ActiveLeaseID = ""
+			task.RecoveryState = ""
+			task.UpdatedAt = now
+			s.tasks[lease.ThreadID] = task
+		}
+		if removedRecovery && s.pool.LastError != nil && (s.pool.LastError.Code == "stream_recovery_required" || s.pool.LastError.Code == "logical_turn_recovery_required") {
+			s.pool.LastError = nil
+		}
+	}
 	if existing, ok := s.pool.ActiveLeases[lease.LeaseID]; ok {
 		if existing.ExpiresAt > 0 && existing.ExpiresAt <= now && !poolLeaseCommitted(existing) {
 			s.releasePreCommitLeaseLocked(existing, now)

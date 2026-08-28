@@ -3,6 +3,28 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/) and
 this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.5.7] - 2026-08-28
+
+### Fixed
+
+- Post-output SSE gaps are no longer declared dead after only three seconds.
+  Relay now keeps the native connection alive and allows a realistic upstream
+  reasoning/tool pause before entering fail-closed recovery.
+- Starting a distinct new turn on a recovered thread removes every orphaned
+  `RECOVERY_REQUIRED` lease from older builds. The previous logical turn is
+  never replayed, while pool status no longer accumulates phantom requests.
+- Added a read-only native activity probe that verifies historical
+  `commandExecution` details or titled Codex `js` tool activities without
+  printing commands, outputs, prompts, or credentials.
+
+### Validation
+
+- Added deterministic Gateway coverage for the configurable idle boundary and
+  state coverage for continuing a thread with multiple stale recovery leases.
+- Full Go, JavaScript, Python, Windows patcher, and shell validation passed.
+
+Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.7
+
 ## [0.5.6] - 2026-08-28
 
 ### Fixed
@@ -753,7 +775,8 @@ Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.7
 - Loopback-only, token-authenticated diagnostic UI states.
 - Source-only CI, draft release automation, security documentation, and smoke tests.
 
-[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.5.6...HEAD
+[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.5.7...HEAD
+[0.5.7]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.7
 [0.5.6]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.6
 [0.5.5]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.5
 [0.5.4]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.4

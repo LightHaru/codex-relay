@@ -1,7 +1,7 @@
 {
   "name": "codex-relay-patcher",
   "private": true,
-  "version": "0.5.6",
+  "version": "0.5.7",
   "description": "Build tooling for independent Codex Relay desktop app patches",
   "license": "MIT",
   "repository": {
@@ -19,7 +19,7 @@
     "check": "npm run check:go && npm run check:js && npm run check:python && npm run check:windows && npm run check:shell",
     "check:go": "go test ./... && go vet ./...",
     "check:js": "node --check ui/account-menu.js && node --check ui/thread-subscription.js && node --check ui/ui-test-bridge.cjs && node --check ui/windows-router-menu.js && node --check ui/windows-router-login-preload.js && node --check ui/windows-router-login-main.js && node --check ui/windows-router-update-preload.js && node --check ui/windows-router-update-main.js && node --test ui/test-windows-router-menu.cjs ui/test-windows-router-login-main.cjs ui/test-windows-router-update-main.cjs",
-    "check:python": "python3 -m py_compile scripts/patch_app.py scripts/patch_windows.py scripts/check_release.py scripts/test_patch_windows.py scripts/live_app_server_e2e.py scripts/probe_unified_provider.py scripts/probe_legacy_resume_provider.py scripts/probe_live_rate_limits.py || python -m py_compile scripts/patch_app.py scripts/patch_windows.py scripts/check_release.py scripts/test_patch_windows.py scripts/live_app_server_e2e.py scripts/probe_unified_provider.py scripts/probe_legacy_resume_provider.py scripts/probe_live_rate_limits.py",
+    "check:python": "python3 -m py_compile scripts/patch_app.py scripts/patch_windows.py scripts/check_release.py scripts/test_patch_windows.py scripts/live_app_server_e2e.py scripts/probe_unified_provider.py scripts/probe_legacy_resume_provider.py scripts/probe_live_rate_limits.py scripts/probe_thread_activity.py || python -m py_compile scripts/patch_app.py scripts/patch_windows.py scripts/check_release.py scripts/test_patch_windows.py scripts/live_app_server_e2e.py scripts/probe_unified_provider.py scripts/probe_legacy_resume_provider.py scripts/probe_live_rate_limits.py scripts/probe_thread_activity.py",
     "check:windows": "python3 scripts/test_patch_windows.py || python scripts/test_patch_windows.py",
     "check:shell": "bash -n install.sh",
     "release:check": "python3 scripts/check_release.py || python scripts/check_release.py"

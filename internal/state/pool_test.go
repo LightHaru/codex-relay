@@ -499,6 +499,42 @@ func TestPoolRestartKeepsCommittedLeaseRecoveryRequired(t *testing.T) {
 	}
 }
 
+func TestNewLogicalTurnClearsAllRecoveryLeasesForSameThread(t *testing.T) {
+	store, _ := newPoolTestStore(t)
+	lease, err := store.AcquirePoolLease(PoolLease{
+		LeaseID: "old-turn-a", LogicalTurnID: "old-turn-a", ThreadID: "continued-thread",
+	}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.MarkPoolLeaseProgress(lease.LeaseID, PoolLeaseRecoveryRequired, true, false); err != nil {
+		t.Fatal(err)
+	}
+	// Reproduce state left by older builds, which could retain more than one
+	// recovery-required lease while TaskRecord pointed only at the newest one.
+	store.mu.Lock()
+	orphan := store.pool.ActiveLeases[lease.LeaseID]
+	orphan.LeaseID = "old-turn-b"
+	orphan.LogicalTurnID = "old-turn-b"
+	store.pool.ActiveLeases[orphan.LeaseID] = orphan
+	store.mu.Unlock()
+
+	continued, err := store.AcquirePoolLease(PoolLease{
+		LeaseID: "new-turn", LogicalTurnID: "new-turn", ThreadID: "continued-thread",
+	}, time.Hour)
+	if err != nil {
+		t.Fatalf("new logical turn could not continue recovered thread: %v", err)
+	}
+	pool := store.PoolState()
+	if len(pool.ActiveLeases) != 1 || pool.ActiveLeases[continued.LeaseID].LogicalTurnID != "new-turn" {
+		t.Fatalf("continued thread retained orphan recovery leases: %#v", pool.ActiveLeases)
+	}
+	task := store.TaskRecords()["continued-thread"]
+	if task.RecoveryState != "" || task.ActiveLeaseID != continued.LeaseID {
+		t.Fatalf("continued thread retained stale recovery task state: %#v", task)
+	}
+}
+
 func TestAcquireReclaimsExpiredUncommittedLeaseButNotExpiredCommittedLease(t *testing.T) {
 	store, _ := newPoolTestStore(t)
 	first, err := store.AcquirePoolLease(PoolLease{

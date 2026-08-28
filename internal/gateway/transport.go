@@ -37,7 +37,11 @@ const (
 	// model request. After output is visible, fail closed if the provider stays
 	// silent for this bounded interval; the recovery terminal is then delivered
 	// before the client turns the idle connection into a stream-disconnect error.
-	sseIdleRecoveryTimeout = 3 * time.Second
+	// A three-second cutoff misclassified ordinary gaps between reasoning/tool
+	// events as a dead stream.  Keepalive comments already protect the native
+	// app-server watchdog, so allow a realistic upstream pause before declaring
+	// the committed stream uncertain.
+	sseIdleRecoveryTimeout = 90 * time.Second
 	// A completed output item is normally followed immediately by
 	// response.completed. Hold that one frame briefly so the native app-server
 	// cannot cancel the request before Relay can emit a standards-shaped
@@ -77,13 +81,16 @@ type Transport struct {
 	// profile. Relay still exposes one API, but it fails closed instead of
 	// attempting a credential continuation that has not been protocol-tested.
 	DisableFailover bool
-	flightMu        sync.Mutex
-	flights         map[string]*requestFlight
-	outageMu        sync.Mutex
-	outageSamples   map[string]*outageSample
-	modelsMu        sync.Mutex
-	modelsBody      []byte
-	modelsCachedAt  time.Time
+	// SSEIdleTimeout overrides the production post-commit idle window in
+	// deterministic tests. Zero uses sseIdleRecoveryTimeout.
+	SSEIdleTimeout time.Duration
+	flightMu       sync.Mutex
+	flights        map[string]*requestFlight
+	outageMu       sync.Mutex
+	outageSamples  map[string]*outageSample
+	modelsMu       sync.Mutex
+	modelsBody     []byte
+	modelsCachedAt time.Time
 }
 
 type outageSample struct {
@@ -1070,7 +1077,7 @@ func (t *Transport) forwardSSE(writer http.ResponseWriter, response *http.Respon
 				}
 				var pendingTerminalEvents [][]byte
 				for {
-					readTimeout := sseIdleRecoveryTimeout
+					readTimeout := t.sseIdleTimeout()
 					if len(pendingTerminalEvents) > 0 {
 						readTimeout = sseTerminalGraceTimeout
 					}
@@ -1221,6 +1228,13 @@ func (t *Transport) forwardSSE(writer http.ResponseWriter, response *http.Respon
 			return lease, &retryableStreamError{class: classifyTransportError(err), cause: err}
 		}
 	}
+}
+
+func (t *Transport) sseIdleTimeout() time.Duration {
+	if t != nil && t.SSEIdleTimeout > 0 {
+		return t.SSEIdleTimeout
+	}
+	return sseIdleRecoveryTimeout
 }
 
 func classifySSETerminal(event []byte) string {

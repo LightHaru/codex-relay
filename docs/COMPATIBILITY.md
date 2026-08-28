@@ -1,5 +1,25 @@
 # Compatibility
 
+## Release 0.5.7 — Long post-output pauses and native activity details
+
+The public Responses and app-server protocols remain unchanged. Relay sends
+SSE keepalive comments while allowing up to 90 seconds for the next upstream
+event after output begins, instead of classifying an ordinary three-second
+reasoning or tool pause as a failed stream. A distinct new logical turn is the
+explicit continuation boundary that clears older recovery leases for that
+thread; the previous turn is still never replayed.
+
+Historical activity compatibility can be checked without exposing content:
+
+```powershell
+python scripts/probe_thread_activity.py --executable <codex.real.exe> `
+  --codex-home <managed-codex-home> --thread-id <thread-id>
+```
+
+The probe accepts the native `commandExecution.command` shape and the current
+Codex `mcpToolCall` `js` shape when every activity carries a non-generic title.
+It reports only counts, field names and a boolean health verdict.
+
 ## Release 0.5.6 — Native request-ID reuse compatibility
 
 Current Codex app-server builds can reuse one `X-Client-Request-Id` across

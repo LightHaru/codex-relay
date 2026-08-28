@@ -583,6 +583,7 @@ func TestTransportDropsPartialFrameBeforeRecoveryTerminal(t *testing.T) {
 
 func TestTransportConvertsIdlePostCommitStreamToRecoveryTerminal(t *testing.T) {
 	store, _ := gatewayTestStore(t, 1)
+	idleTimeout := 50 * time.Millisecond
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(writer, "event: response.created\ndata: {\"type\":\"response.created\",\"sequence_number\":0,\"response\":{\"id\":\"resp-idle\"}}\n\n")
@@ -590,10 +591,10 @@ func TestTransportConvertsIdlePostCommitStreamToRecoveryTerminal(t *testing.T) {
 		if flusher, ok := writer.(http.Flusher); ok {
 			flusher.Flush()
 		}
-		time.Sleep(sseIdleRecoveryTimeout + 500*time.Millisecond)
+		time.Sleep(idleTimeout + 100*time.Millisecond)
 	}))
 	defer upstream.Close()
-	gateway := httptest.NewServer(&Transport{Store: store, UpstreamURL: upstream.URL, Client: upstream.Client(), BalancedPool: true})
+	gateway := httptest.NewServer(&Transport{Store: store, UpstreamURL: upstream.URL, Client: upstream.Client(), BalancedPool: true, SSEIdleTimeout: idleTimeout})
 	defer gateway.Close()
 	status, body := sendGatewayRequest(t, gateway, "idle-after-output")
 	if status != http.StatusOK || !strings.Contains(body, "response.failed") || !strings.Contains(body, "resp-idle") || !strings.Contains(body, "relay_pool_recovery_required") {
