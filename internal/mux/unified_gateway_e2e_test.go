@@ -78,7 +78,12 @@ func writeFakeAuth(t *testing.T, account state.Account, token, upstreamAccount s
 }
 
 func realResponseSSE(text string) string {
-	responseID, itemID := "resp_relay_e2e", "msg_relay_e2e"
+	// Every Responses API call owns a distinct response/item identity. Reusing
+	// fixture IDs makes current app-server builds correctly deduplicate later
+	// turns, which can hide missing Gateway dispatches in the long-session E2E.
+	identity := time.Now().UnixNano()
+	responseID := fmt.Sprintf("resp_relay_e2e_%d", identity)
+	itemID := fmt.Sprintf("msg_relay_e2e_%d", identity)
 	base := map[string]any{
 		"id": responseID, "object": "response", "created_at": time.Now().Unix(), "status": "in_progress",
 		"error": nil, "incomplete_details": nil, "instructions": nil, "max_output_tokens": nil,
@@ -321,8 +326,11 @@ func TestUnifiedGatewayUsesOneTaskAuthorityAndFailsOverInsideRequest(t *testing.
 		}
 		_ = json.Unmarshal(turnAccepted.Result, &acceptedPayload)
 		turnID := strings.TrimSpace(acceptedPayload.Turn.ID)
+		if turnID == "" {
+			t.Fatalf("turn %d was accepted without a turn id: %s", index, turnAccepted.Result)
+		}
 		completed := sink.wait(t, 45*time.Second, func(message protocol.Message) bool {
-			return message.Method == "turn/completed" && (turnID == "" || completedTurnID(message.Params) == turnID)
+			return message.Method == "turn/completed" && completedTurnID(message.Params) == turnID
 		})
 		if !bytes.Contains(completed.Params, []byte(`"status":"completed"`)) {
 			upstreamMu.Lock()

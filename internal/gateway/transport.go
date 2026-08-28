@@ -229,11 +229,20 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 		t.fail(writer, http.StatusRequestEntityTooLarge, "request_too_large", "Relay Pool request is too large")
 		return
 	}
-	leaseID := firstHeader(request, "X-Client-Request-Id", "X-Request-Id")
-	if leaseID == "" {
-		leaseID = "relay-" + fmt.Sprint(time.Now().UnixNano())
+	clientRequestID := firstHeader(request, "X-Client-Request-Id", "X-Request-Id")
+	if clientRequestID == "" {
+		clientRequestID = "relay-" + fmt.Sprint(time.Now().UnixNano())
 	}
-	logicalTurnID := leaseID
+	// Current native app-server builds can reuse one X-Client-Request-Id for
+	// several distinct turns in the same thread. Keying replay protection only
+	// by that header made turn 2 receive turn 1's cached SSE body for 30 seconds,
+	// so no new quota source was dispatched. Bind idempotency to both the client
+	// request identity and an opaque request-body fingerprint: an actual retry
+	// still joins/replays the same flight, while a later logical turn cannot be
+	// mistaken for it. The body itself is never persisted or logged.
+	bodyFingerprint := sha256.Sum256(body)
+	logicalTurnID := fmt.Sprintf("%s-%x", clientRequestID, bodyFingerprint[:12])
+	leaseID := logicalTurnID
 	for {
 		flight, leader := t.beginRequestFlight(logicalTurnID)
 		if leader {

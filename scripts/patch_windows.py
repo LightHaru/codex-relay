@@ -591,6 +591,14 @@ STORE_26_820_9563_RENDERER_PROFILE = json.loads(
     (ROOT / "scripts" / "windows_profiles" / "store-26.820.9563.json").read_text(encoding="utf-8")
 )
 
+# Reviewed against Store 26.825.3734.0 on 2026-08-28. This renderer lowercases
+# the app-brand value inline and renamed all surrounding minifier symbols. The
+# exact profile below was accepted by conservative structural discovery and the
+# complete exact-once Windows patch suite before installation.
+STORE_26_825_3734_RENDERER_PROFILE = json.loads(
+    (ROOT / "scripts" / "windows_profiles" / "store-26.825.3734.json").read_text(encoding="utf-8")
+)
+
 LEGACY_RENDERER_PROFILE = {
     "profile_query_anchor": PROFILE_QUERY_ANCHOR,
     "profile_query_replacement": PROFILE_QUERY_REPLACEMENT,
@@ -622,6 +630,7 @@ WINDOWS_RENDERER_PROFILES = {
     "e2f04d6aa921d07981b42368df0a28a8bebe8cd21375d4a1f9286757b51c1313": STORE_26_818_8289_RENDERER_PROFILE,
     "5df8bf5a9d30742919390ab11fa419e83aab0891152569a42c6ea4abf15386c2": STORE_26_820_7780_RENDERER_PROFILE,
     "e353c580ef4939d36f4ae32a35c896d089205c1d06b9f711cf78ffa4a3578a8a": STORE_26_820_9563_RENDERER_PROFILE,
+    "c32dcc8424e50be2b5a22c80c196db5c8c71562fc13dc7b7e3b749ebb4806284": STORE_26_825_3734_RENDERER_PROFILE,
 }
 TESTED_ASAR_HASHES = set(WINDOWS_RENDERER_PROFILES)
 
@@ -1182,6 +1191,7 @@ def discover_renderer_profile(extracted: Path) -> dict[str, str]:
         LEGACY_RENDERER_PROFILE,
         STORE_26_818_3698_RENDERER_PROFILE,
         STORE_26_818_4152_RENDERER_PROFILE,
+        STORE_26_825_3734_RENDERER_PROFILE,
     )
     failures: list[str] = []
     for template in candidates:

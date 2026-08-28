@@ -3,6 +3,37 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/) and
 this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.5.6] - 2026-08-28
+
+### Fixed
+
+- Gateway idempotency now combines the native client request ID with an opaque
+  request-body fingerprint. Current Codex builds may reuse one
+  `X-Client-Request-Id` across distinct turns; Relay no longer replays the
+  previous turn's cached SSE response or skips the next pool dispatch.
+- Exact duplicate requests with the same ID and body still join one in-flight
+  request and receive one bounded replay, preserving restart/renderer retry
+  safety without collapsing later Goal turns.
+- The real app-server Goal probe now supports a finite token budget, reports
+  bounded sanitized failures, and fails with useful child-process diagnostics
+  instead of dumping complete turn histories.
+- Added an exact reviewed renderer profile for Microsoft Store
+  `26.825.3734.0`; installation remains fail-closed for every unknown ASAR.
+
+### Validation
+
+- Added a regression proving that the same native request ID with different
+  request bodies dispatches two distinct logical turns while an exact duplicate
+  remains single-flight.
+- The real `codex.real.exe` full-stack fixture completed 20 turns on one thread,
+  injected three structured quota rejections, performed 23 upstream dispatches,
+  preserved the one task authority, and left no active lease.
+- Five operator-authorized real credential sources each completed a minimal
+  Responses request. A finite real Goal completed, became `budgetLimited`, then
+  resumed after an app-server restart with the same objective and thread.
+
+Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.6
+
 ## [0.5.5] - 2026-08-28
 
 ### Fixed
@@ -722,7 +753,8 @@ Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.7
 - Loopback-only, token-authenticated diagnostic UI states.
 - Source-only CI, draft release automation, security documentation, and smoke tests.
 
-[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.5.5...HEAD
+[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.5.6...HEAD
+[0.5.6]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.6
 [0.5.5]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.5
 [0.5.4]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.4
 [0.5.2]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.2

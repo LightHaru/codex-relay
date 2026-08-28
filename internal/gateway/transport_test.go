@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -98,8 +99,12 @@ func TestSSETerminalClassifierIgnoresNestedCompletedItemStatus(t *testing.T) {
 }
 
 func sendGatewayRequest(t *testing.T, server *httptest.Server, id string) (int, string) {
+	return sendGatewayRequestBody(t, server, id, `{"stream":true,"input":[]}`)
+}
+
+func sendGatewayRequestBody(t *testing.T, server *httptest.Server, id, requestBody string) (int, string) {
 	t.Helper()
-	request, err := http.NewRequestWithContext(context.Background(), http.MethodPost, server.URL+"/v1/responses", bytes.NewBufferString(`{"stream":true,"input":[]}`))
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodPost, server.URL+"/v1/responses", bytes.NewBufferString(requestBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,6 +123,18 @@ func sendGatewayRequest(t *testing.T, server *httptest.Server, id string) (int, 
 		t.Fatal(err)
 	}
 	return response.StatusCode, string(body)
+}
+
+func activeGatewayLease(t *testing.T, store *state.Store, clientRequestID string) state.PoolLease {
+	t.Helper()
+	prefix := clientRequestID + "-"
+	for leaseID, lease := range store.PoolState().ActiveLeases {
+		if strings.HasPrefix(leaseID, prefix) {
+			return lease
+		}
+	}
+	t.Fatalf("no active Gateway lease for client request %q", clientRequestID)
+	return state.PoolLease{}
 }
 
 func sendModelsRequest(t *testing.T, server *httptest.Server, bearer string) (int, string) {
@@ -455,7 +472,7 @@ func TestTransportRetriesEarlyStreamQuotaButNotLateQuota(t *testing.T) {
 	if status != 200 || counts["upstream-1"] != 1 || counts["upstream-2"] != 0 || body == "" {
 		t.Fatalf("late quota replayed or lost output: counts=%v status=%d body=%q", counts, status, body)
 	}
-	lease := store2.PoolState().ActiveLeases["late"]
+	lease := activeGatewayLease(t, store2, "late")
 	if lease.State != state.PoolLeaseRecoveryRequired || store2.PoolState().ActiveSourceID != ids2[1] {
 		t.Fatalf("late quota was not recovery-safe: %#v", lease)
 	}
@@ -534,7 +551,7 @@ func TestTransportDoesNotReplayTruncatedStreamAfterVisibleOutput(t *testing.T) {
 	if status != http.StatusOK || len(used) != 1 || !strings.Contains(body, "visible") || !strings.Contains(body, "response.failed") || !strings.Contains(body, "relay_pool_recovery_required") {
 		t.Fatalf("post-commit truncation replayed or lost output: status=%d used=%v body=%q", status, used, body)
 	}
-	lease := store.PoolState().ActiveLeases["truncated-after-output"]
+	lease := activeGatewayLease(t, store, "truncated-after-output")
 	if lease.State != state.PoolLeaseRecoveryRequired {
 		t.Fatalf("post-commit truncation was not recovery-required: %#v", lease)
 	}
@@ -762,6 +779,43 @@ func TestConcurrentDuplicateLogicalTurnJoinsOneUpstreamFlight(t *testing.T) {
 	}
 	if len(store.PoolState().ActiveLeases) != 0 {
 		t.Fatalf("duplicate flight retained a lease: %#v", store.PoolState().ActiveLeases)
+	}
+}
+
+func TestReusedClientRequestIDDifferentBodiesDispatchDistinctTurns(t *testing.T) {
+	store, _ := gatewayTestStore(t, 2)
+	var mu sync.Mutex
+	var requestBodies []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		mu.Lock()
+		requestBodies = append(requestBodies, string(body))
+		mu.Unlock()
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(writer, successfulSSE())
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{Store: store, UpstreamURL: upstream.URL, Client: upstream.Client(), BalancedPool: true})
+	defer gateway.Close()
+
+	const reusedID = "native-reused-request-id"
+	bodies := []string{
+		`{"stream":true,"input":[{"role":"user","content":"turn one"}]}`,
+		`{"stream":true,"input":[{"role":"user","content":"turn two"}]}`,
+	}
+	for index, body := range bodies {
+		status, responseBody := sendGatewayRequestBody(t, gateway, reusedID, body)
+		if status != http.StatusOK || !strings.Contains(responseBody, "response.completed") {
+			t.Fatalf("turn %d did not complete: status=%d body=%q", index+1, status, responseBody)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !reflect.DeepEqual(requestBodies, bodies) {
+		t.Fatalf("reused client request id collapsed distinct turns: got=%v want=%v", requestBodies, bodies)
+	}
+	if len(store.PoolState().ActiveLeases) != 0 {
+		t.Fatalf("distinct turns retained active leases: %#v", store.PoolState().ActiveLeases)
 	}
 }
 

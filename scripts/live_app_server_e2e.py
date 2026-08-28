@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -31,6 +32,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--goal-objective",
         help="optional short objective to set before the turn and verify afterwards",
+    )
+    parser.add_argument(
+        "--goal-token-budget",
+        type=int,
+        help="optional finite token budget for a newly set Goal",
     )
     parser.add_argument(
         "--verify-goal-objective",
@@ -70,7 +76,7 @@ def stderr_reader(stream: Any, output: queue.Queue[str]) -> None:
     for line in iter(stream.readline, ""):
         line = line.strip()
         if line:
-            output.put(line[:300])
+            output.put(line[:1000])
 
 
 def send(process: subprocess.Popen[str], message: dict[str, Any]) -> None:
@@ -84,12 +90,22 @@ def wait_for(
     predicate: Any,
     timeout: float,
     observed: list[dict[str, Any]],
+    process: subprocess.Popen[str] | None = None,
+    diagnostics: queue.Queue[str] | None = None,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
             message = output.get(timeout=min(0.5, max(0.01, deadline - time.monotonic())))
         except queue.Empty:
+            if process is not None and process.poll() is not None:
+                lines = list(diagnostics.queue)[-4:] if diagnostics is not None else []
+                detail = " | ".join(lines)
+                detail = re.sub(r"(?i)bearer\s+[^\s\"']+", "Bearer [redacted]", detail)
+                raise RuntimeError(
+                    f"app-server exited before response: code={process.returncode} "
+                    f"diagnostic={detail[:600]}"
+                )
             continue
         observed.append(message)
         if predicate(message):
@@ -216,12 +232,30 @@ def sanitized_error_code(message: dict[str, Any]) -> str:
     return sanitized_error(message)
 
 
+def require_successful_response(label: str, message: dict[str, Any]) -> None:
+    if message.get("error") is None:
+        return
+    value: Any = message.get("error")
+    if isinstance(value, dict):
+        value = value.get("message") or value.get("code") or ""
+    detail = re.sub(r"(?i)bearer\s+[^\s\"']+", "Bearer [redacted]", str(value or ""))
+    detail = " ".join(detail.split())[:300]
+    raise RuntimeError(
+        f"{label}: category={sanitized_error(message)} "
+        f"code={sanitized_error_code(message)} message={detail}"
+    )
+
+
 def main() -> int:
     args = parse_args()
     if not args.confirm_real_quota:
         raise SystemExit("refusing real turn without --confirm-real-quota")
     if args.goal_objective and args.verify_goal_objective:
         raise SystemExit("choose either --goal-objective or --verify-goal-objective")
+    if args.goal_token_budget is not None and not args.goal_objective:
+        raise SystemExit("--goal-token-budget requires --goal-objective")
+    if args.goal_token_budget is not None and args.goal_token_budget <= 0:
+        raise SystemExit("--goal-token-budget must be positive")
     executable = args.executable.resolve(strict=True)
     cwd = args.cwd.resolve(strict=True)
     environment = os.environ.copy()
@@ -253,13 +287,12 @@ def main() -> int:
             "id": 1,
             "method": "initialize",
             "params": {
-                "clientInfo": {"name": "codex-relay-e2e", "title": "Codex Relay E2E", "version": "0.4.1"},
+                "clientInfo": {"name": "codex-relay-e2e", "title": "Codex Relay E2E", "version": "0.5.6"},
                 "capabilities": {"experimentalApi": True},
             },
         })
-        initialized = wait_for(output, response_id_is(1), args.timeout, observed)
-        if initialized.get("error") is not None:
-            raise RuntimeError("initialize failed")
+        initialized = wait_for(output, response_id_is(1), args.timeout, observed, process, errors)
+        require_successful_response("initialize failed", initialized)
         send(process, {"method": "initialized"})
 
         if thread_id:
@@ -268,18 +301,16 @@ def main() -> int:
                 "method": "thread/resume",
                 "params": {"threadId": thread_id, "cwd": str(cwd), "approvalPolicy": "never", "sandbox": "read-only"},
             })
-            resumed = wait_for(output, response_id_is(2), args.timeout, observed)
-            if resumed.get("error") is not None:
-                raise RuntimeError("thread resume failed")
+            resumed = wait_for(output, response_id_is(2), args.timeout, observed, process, errors)
+            require_successful_response("thread resume failed", resumed)
         else:
             send(process, {
                 "id": 2,
                 "method": "thread/start",
                 "params": {"cwd": str(cwd), "approvalPolicy": "never", "sandbox": "read-only", "ephemeral": False},
             })
-            started = wait_for(output, response_id_is(2), args.timeout, observed)
-            if started.get("error") is not None:
-                raise RuntimeError("thread start failed")
+            started = wait_for(output, response_id_is(2), args.timeout, observed, process, errors)
+            require_successful_response("thread start failed", started)
             thread_id = thread_id_from_response(started)
             if not thread_id:
                 raise RuntimeError("thread/start returned no thread ID")
@@ -294,13 +325,13 @@ def main() -> int:
                     "threadId": thread_id,
                     "objective": args.goal_objective,
                     "status": "active",
-                    "tokenBudget": None,
+                    "tokenBudget": args.goal_token_budget,
                 },
             })
-            goal_set = wait_for(output, response_id_is(next_id), args.timeout, observed)
+            goal_set = wait_for(output, response_id_is(next_id), args.timeout, observed, process, errors)
             goal_set_ok = goal_set.get("error") is None
             if not goal_set_ok:
-                raise RuntimeError("thread goal set failed")
+                require_successful_response("thread goal set failed", goal_set)
             next_id += 1
 
         turn_request_id = next_id
@@ -314,7 +345,7 @@ def main() -> int:
                 "approvalPolicy": "never",
             },
         })
-        turn_response = wait_for(output, response_id_is(turn_request_id), args.timeout, observed)
+        turn_response = wait_for(output, response_id_is(turn_request_id), args.timeout, observed, process, errors)
         terminal = turn_response if turn_response.get("error") is not None else wait_for_terminal(
             output, thread_id, args.timeout, observed
         )
@@ -336,7 +367,7 @@ def main() -> int:
                 "method": "thread/goal/get",
                 "params": {"threadId": thread_id},
             })
-            goal_get = wait_for(output, response_id_is(next_id), args.timeout, observed)
+            goal_get = wait_for(output, response_id_is(next_id), args.timeout, observed, process, errors)
             goal = (goal_get.get("result") or {}).get("goal")
             goal_present_after = isinstance(goal, dict)
             if goal_present_after:
@@ -391,12 +422,18 @@ def main() -> int:
                 {
                     "method": message.get("method"),
                     "id": message.get("id"),
-                    "error": message.get("error"),
-                    "params": {
-                        key: value
-                        for key, value in (message.get("params") or {}).items()
-                        if key in {"status", "error", "turn"}
-                    },
+                    "category": sanitized_error(message),
+                    "code": sanitized_error_code(message),
+                    "status": str(
+                        ((message.get("params") or {}).get("turn") or {}).get("status")
+                        or (message.get("params") or {}).get("status")
+                        or ""
+                    ),
+                    "turnId": str(
+                        ((message.get("params") or {}).get("turn") or {}).get("id")
+                        or (message.get("params") or {}).get("turnId")
+                        or ""
+                    ),
                 }
                 for message in observed
                 if message.get("method") in {"error", "turn/completed"}

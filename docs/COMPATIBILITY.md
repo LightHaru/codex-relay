@@ -1,5 +1,14 @@
 # Compatibility
 
+## Release 0.5.6 — Native request-ID reuse compatibility
+
+Current Codex app-server builds can reuse one `X-Client-Request-Id` across
+several distinct turns in a thread. Relay now derives its private idempotency
+key from that client ID plus an opaque request-body fingerprint. Exact retries
+still join one flight, while later chat and Goal turns always receive a fresh
+pool dispatch. The public Responses request and SSE formats are unchanged, and
+the request body is neither persisted nor logged by this keying step.
+
 ## Release 0.5.5 — Dynamic model-catalog Gateway compatibility
 
 Codex app-server 0.150.0 refreshes its catalog from `GET /v1/models` on the
@@ -76,6 +85,11 @@ reviewed Store profiles from earlier releases are retained in
 hash must stop before a partial patch. Structural discovery may be used only in
 the explicitly documented test mode and still requires every semantic anchor
 exactly once.
+
+The current reviewed Windows source is Microsoft Store `26.825.3734.0`, with
+`app.asar` SHA-256 `c32dcc8424e50be2b5a22c80c196db5c8c71562fc13dc7b7e3b749ebb4806284`.
+Its exact renderer profile is pinned under `scripts/windows_profiles/`; the
+installer does not need the untested-source override for this build.
 
 The Unified Pool change is inserted through version-neutral Relay bridges, but
 the native Settings shell is still a compatibility surface. Every profile must

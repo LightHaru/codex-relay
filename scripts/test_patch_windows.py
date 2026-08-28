@@ -211,7 +211,7 @@ class WindowsRendererPatchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             assets = self.make_renderer(root, CURRENT_RENDERER_PROFILE)
-            self.assertEqual(len(WINDOWS_RENDERER_PROFILES), 9)
+            self.assertEqual(len(WINDOWS_RENDERER_PROFILES), 10)
             patch_windows_feature_bundles(root, CURRENT_RENDERER_PROFILE)
             self.assert_replacements(assets, CURRENT_RENDERER_PROFILE)
 
