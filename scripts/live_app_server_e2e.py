@@ -348,6 +348,26 @@ def main() -> int:
             for message in observed
             if str(message.get("method") or "").startswith("item/")
         })
+        # Give the asynchronous stderr reader a bounded opportunity to receive
+        # startup/model-refresh diagnostics emitted beside turn completion.
+        time.sleep(2.0 if args.dump_stderr else 0.25)
+        stderr_lines = list(errors.queue)
+        model_catalog_errors = [
+            line
+            for line in stderr_lines
+            if "failed to refresh available models" in line.lower()
+        ]
+        goal_ok = True
+        if expected_goal_objective:
+            goal_ok = bool(goal_present_after and goal_objective_matches)
+            if args.goal_objective:
+                goal_ok = bool(goal_ok and goal_set_ok)
+        passed = bool(
+            turn_response.get("error") is None
+            and terminal_status == "completed"
+            and not model_catalog_errors
+            and goal_ok
+        )
         result = {
             "threadId": thread_id,
             "turnAccepted": turn_response.get("error") is None,
@@ -362,7 +382,9 @@ def main() -> int:
             "goalObjectiveMatches": goal_objective_matches,
             "observedMethods": sorted(set(methods)),
             "observedItemTypes": item_types,
-            "stderrLineCount": errors.qsize(),
+            "modelCatalogRefreshErrors": len(model_catalog_errors),
+            "stderrLineCount": len(stderr_lines),
+            "passed": passed,
         }
         if args.dump_errors:
             result["errorMessages"] = [
@@ -380,12 +402,9 @@ def main() -> int:
                 if message.get("method") in {"error", "turn/completed"}
             ]
         if args.dump_stderr:
-            # Allow the stderr reader to receive a final transport diagnostic
-            # emitted at the same time as turn/completed.
-            time.sleep(2.0)
-            result["stderr"] = list(errors.queue)
+            result["stderr"] = stderr_lines
         print(json.dumps(result, indent=2))
-        return 0
+        return 0 if passed else 1
     finally:
         if process.stdin is not None:
             process.stdin.close()

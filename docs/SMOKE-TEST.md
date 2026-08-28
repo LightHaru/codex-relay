@@ -12,6 +12,10 @@ use reset credits or send prompts that can mutate user files.
   Responses request, SSE enabled and no source credential read by the authority.
 - The patcher verifies the exact `app.asar` hash and all anchors exactly once.
 - The official Store app/profile/home hash is unchanged after staging Relay.
+- Start the installed app-server with the Relay provider and verify its stderr
+  has no local `/v1/models` 404 or `failed to refresh available models` entry.
+  Repeated startup catalog calls must be served from one validated Gateway
+  fetch and must leave the active quota-lease count unchanged.
 
 ## Process and identity
 

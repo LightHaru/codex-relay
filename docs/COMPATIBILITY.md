@@ -1,5 +1,15 @@
 # Compatibility
 
+## Release 0.5.5 — Dynamic model-catalog Gateway compatibility
+
+Codex app-server 0.150.0 refreshes its catalog from `GET /v1/models` on the
+configured provider base URL. Relay now proxies that control-plane request to
+the native ChatGPT models endpoint with isolated source credentials, validates
+the required top-level `models` array and caches the accepted response. Model
+discovery never creates a quota lease, never advances the pool scheduler and
+never exposes source credentials. Older app-server builds continue to use the
+same `/v1/responses` contract.
+
 ## Release 0.5.4 — Restart-safe leases and native terminal recovery
 
 This patch keeps the public Responses provider contract unchanged while
@@ -82,6 +92,7 @@ prove that:
 | Capability | Required behavior | Fail-closed result |
 | --- | --- | --- |
 | Responses custom provider | `wire_api=responses`, local base URL, chunked SSE (with or without `Content-Type`) | Keep one Relay API in safe mode; disable credential failover |
+| Dynamic model catalog | Authenticated `GET /v1/models` returns a native top-level `models` array without a quota lease | Sanitized `models_refresh_failed`; retain a previously validated in-process catalog |
 | Stable thread/session headers | IDs are forwarded to one gateway lease | Reject request without retry |
 | Structured or message-only quota rejection | HTTP/SSE quota code or a `response.failed` message such as `usage limit`/`rate limit`/`out of Codex messages` | Mark source depleted and retry pre-output |
 | Generic timeout/network/HTTP 5xx before commit | Not quota evidence; bounded retry through another eligible credential | Return one sanitized retry-budget error after eligible sources fail |

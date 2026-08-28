@@ -3,6 +3,31 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/) and
 this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.5.5] - 2026-08-28
+
+### Fixed
+
+- The unified Gateway now serves authenticated `GET /v1/models` requests and
+  forwards the current Codex `client_version` query to the native ChatGPT model
+  catalog. New Codex builds no longer report a misleading desktop network error
+  while ordinary `/v1/responses` turns continue to work.
+- Model discovery uses the Relay authority credential first, may fall back to
+  another enabled credential only when discovery fails, and never acquires a
+  quota lease or changes quota health.
+- A validated in-memory catalog cache collapses parallel startup refreshes and
+  preserves the last accepted catalog during a temporary provider-edge error.
+  Invalid or oversized upstream payloads return a sanitized local diagnostic.
+
+### Validation
+
+- Added regressions for query/header forwarding, local bearer isolation,
+  controller credential fallback, caching, no quota lease, and invalid catalog
+  sanitization.
+- The installed real app-server probe must complete a live turn with no
+  `failed to refresh available models` or local `/v1/models` 404 diagnostic.
+
+Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.5
+
 ## [0.5.4] - 2026-08-28
 
 ### Fixed
@@ -697,7 +722,8 @@ Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.7
 - Loopback-only, token-authenticated diagnostic UI states.
 - Source-only CI, draft release automation, security documentation, and smoke tests.
 
-[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.4.5...HEAD
+[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.5.5...HEAD
+[0.5.5]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.5
 [0.5.4]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.4
 [0.5.2]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.2
 [0.5.3]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.3

@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -23,13 +24,15 @@ import (
 )
 
 const (
-	defaultUpstreamURL   = "https://chatgpt.com/backend-api/codex/responses"
-	maxRequestBytes      = 64 << 20
-	maxBufferedSSEBytes  = 2 << 20
-	maxSSESniffBytes     = 8 << 10
-	maxReplayBytes       = 32 << 20
-	requestReplayTTL     = 30 * time.Second
-	sseKeepaliveInterval = time.Second
+	defaultUpstreamURL     = "https://chatgpt.com/backend-api/codex/responses"
+	defaultModelsURL       = "https://chatgpt.com/backend-api/codex/models"
+	maxRequestBytes        = 64 << 20
+	maxModelsResponseBytes = 8 << 20
+	maxBufferedSSEBytes    = 2 << 20
+	maxSSESniffBytes       = 8 << 10
+	maxReplayBytes         = 32 << 20
+	requestReplayTTL       = 30 * time.Second
+	sseKeepaliveInterval   = time.Second
 	// The native app-server has a shorter protocol watchdog than a long-lived
 	// model request. After output is visible, fail closed if the provider stays
 	// silent for this bounded interval; the recovery terminal is then delivered
@@ -50,12 +53,14 @@ const (
 	// five-source pool does not create a retry storm.
 	globalOutageWindow    = 10 * time.Second
 	globalOutageThreshold = 3
+	modelsCacheTTL        = 5 * time.Minute
 )
 
 type Transport struct {
 	Store            *state.Store
 	Client           *http.Client
 	UpstreamURL      string
+	ModelsURL        string
 	LeaseTTL         time.Duration
 	LocalBearerToken string
 	// BalancedPool keeps the public Relay API/task authority singular while
@@ -76,6 +81,9 @@ type Transport struct {
 	flights         map[string]*requestFlight
 	outageMu        sync.Mutex
 	outageSamples   map[string]*outageSample
+	modelsMu        sync.Mutex
+	modelsBody      []byte
+	modelsCachedAt  time.Time
 }
 
 type outageSample struct {
@@ -194,12 +202,26 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 		t.fail(writer, http.StatusServiceUnavailable, "pool_state_unavailable", "Relay Pool state is unavailable")
 		return
 	}
-	if request.Method != http.MethodPost || request.URL.Path != "/v1/responses" {
+	if request.URL.Path != "/v1/responses" && request.URL.Path != "/v1/models" {
 		http.NotFound(writer, request)
 		return
 	}
 	if !t.authorized(request) {
 		t.fail(writer, http.StatusUnauthorized, "transport_authentication_failed", "Relay Pool transport authentication failed")
+		return
+	}
+	if request.URL.Path == "/v1/models" {
+		if request.Method != http.MethodGet {
+			writer.Header().Set("Allow", http.MethodGet)
+			t.fail(writer, http.StatusMethodNotAllowed, "method_not_allowed", "Relay Pool models endpoint requires GET")
+			return
+		}
+		t.serveModels(writer, request)
+		return
+	}
+	if request.Method != http.MethodPost {
+		writer.Header().Set("Allow", http.MethodPost)
+		t.fail(writer, http.StatusMethodNotAllowed, "method_not_allowed", "Relay Pool responses endpoint requires POST")
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(request.Body, maxRequestBytes+1))
@@ -728,30 +750,166 @@ func sanitizeDiagnosticClass(value string) string {
 	return value
 }
 
-func (t *Transport) dispatch(ctx context.Context, original *http.Request, body []byte, sourceID string) (*http.Response, error) {
-	account, ok := t.Store.Account(sourceID)
-	if !ok {
-		return nil, fmt.Errorf("quota source is unavailable")
+// serveModels keeps the custom Relay provider compatible with Codex builds
+// that refresh their dynamic model catalog from the provider base URL. Model
+// discovery is control-plane traffic: it does not acquire a quota lease and it
+// never changes quota health. A short in-memory cache also prevents the native
+// app-server's parallel startup refreshes from creating a request burst.
+func (t *Transport) serveModels(writer http.ResponseWriter, original *http.Request) {
+	t.modelsMu.Lock()
+	defer t.modelsMu.Unlock()
+	if len(t.modelsBody) != 0 && time.Since(t.modelsCachedAt) < modelsCacheTTL {
+		writeModelsResponse(writer, t.modelsBody)
+		return
 	}
+	body, err := t.fetchModels(original)
+	if err != nil {
+		// A catalog already accepted during this process is safer than turning a
+		// temporary provider-edge failure into a misleading desktop "network"
+		// error. The bundled catalog still controls actual model compatibility.
+		if len(t.modelsBody) != 0 {
+			writeModelsResponse(writer, t.modelsBody)
+			return
+		}
+		t.fail(writer, http.StatusBadGateway, "models_refresh_failed", "Relay Pool could not refresh the model catalog")
+		return
+	}
+	t.modelsBody = append(t.modelsBody[:0], body...)
+	t.modelsCachedAt = time.Now()
+	writeModelsResponse(writer, t.modelsBody)
+}
+
+func writeModelsResponse(writer http.ResponseWriter, body []byte) {
+	writer.Header().Set("Content-Type", "application/json")
+	writer.Header().Set("Cache-Control", "private, max-age=60")
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(body)
+}
+
+func (t *Transport) fetchModels(original *http.Request) ([]byte, error) {
+	endpoint := strings.TrimSpace(t.ModelsURL)
+	if endpoint == "" {
+		endpoint = defaultModelsURL
+	}
+	parsedEndpoint, err := url.Parse(endpoint)
+	if err != nil {
+		return nil, errors.New("invalid Relay Pool models endpoint")
+	}
+	query := parsedEndpoint.Query()
+	for key, values := range original.URL.Query() {
+		query.Del(key)
+		for _, value := range values {
+			query.Add(key, value)
+		}
+	}
+	parsedEndpoint.RawQuery = query.Encode()
+
+	candidates := make([]state.Account, 0, len(t.Store.Accounts()))
+	seen := make(map[string]struct{})
+	if controller, ok := t.Store.Controller(); ok && controller.Enabled {
+		candidates = append(candidates, controller)
+		seen[controller.ID] = struct{}{}
+	}
+	for _, account := range t.Store.Accounts() {
+		if !account.Enabled {
+			continue
+		}
+		if _, ok := seen[account.ID]; ok {
+			continue
+		}
+		seen[account.ID] = struct{}{}
+		candidates = append(candidates, account)
+	}
+	if len(candidates) == 0 {
+		return nil, errors.New("no Relay Pool credential source is enabled")
+	}
+
+	client := t.Client
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
+	var lastErr error
+	for _, account := range candidates {
+		accessToken, accountID, credentialErr := t.credentialsForAccount(account)
+		if credentialErr != nil {
+			lastErr = credentialErr
+			continue
+		}
+		request, requestErr := http.NewRequestWithContext(original.Context(), http.MethodGet, parsedEndpoint.String(), nil)
+		if requestErr != nil {
+			return nil, errors.New("create Relay Pool models request")
+		}
+		copyRequestHeaders(request.Header, original.Header)
+		request.Header.Set("Authorization", "Bearer "+accessToken)
+		request.Header.Set("ChatGPT-Account-ID", accountID)
+		request.Header.Set("Accept", "application/json")
+		response, requestErr := client.Do(request)
+		if requestErr != nil {
+			lastErr = errors.New("model catalog transport failure")
+			continue
+		}
+		contents, readErr := io.ReadAll(io.LimitReader(response.Body, maxModelsResponseBytes+1))
+		_ = response.Body.Close()
+		if readErr != nil || len(contents) > maxModelsResponseBytes {
+			lastErr = errors.New("model catalog response is unreadable")
+			continue
+		}
+		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+			lastErr = fmt.Errorf("model catalog returned HTTP %d", response.StatusCode)
+			continue
+		}
+		var envelope map[string]json.RawMessage
+		if json.Unmarshal(contents, &envelope) != nil {
+			return nil, errors.New("model catalog response is not JSON")
+		}
+		models, ok := envelope["models"]
+		if !ok {
+			return nil, errors.New("model catalog response has no models field")
+		}
+		var entries []json.RawMessage
+		if json.Unmarshal(models, &entries) != nil {
+			return nil, errors.New("model catalog models field is invalid")
+		}
+		return contents, nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no Relay Pool credential source could refresh models")
+	}
+	return nil, lastErr
+}
+
+func (t *Transport) credentialsForAccount(account state.Account) (string, string, error) {
 	var accessToken, accountID string
 	var err error
 	if t.LoadCredentials != nil {
 		accessToken, accountID, err = t.LoadCredentials(account)
 		if err != nil {
-			return nil, &sourceCredentialError{cause: err}
+			return "", "", &sourceCredentialError{cause: err}
 		}
 		accessToken = strings.TrimSpace(accessToken)
 		accountID = strings.TrimSpace(accountID)
 		if accessToken == "" || accountID == "" {
-			return nil, &sourceCredentialError{cause: errors.New("source credentials are incomplete")}
+			return "", "", &sourceCredentialError{cause: errors.New("source credentials are incomplete")}
 		}
 	} else {
 		credentials, readErr := readAuthFile(filepath.Join(account.CodexHome, "auth.json"))
 		if readErr != nil {
-			return nil, &sourceCredentialError{cause: readErr}
+			return "", "", &sourceCredentialError{cause: readErr}
 		}
 		accessToken = credentials.Tokens.AccessToken
 		accountID = credentials.Tokens.AccountID
+	}
+	return accessToken, accountID, nil
+}
+
+func (t *Transport) dispatch(ctx context.Context, original *http.Request, body []byte, sourceID string) (*http.Response, error) {
+	account, ok := t.Store.Account(sourceID)
+	if !ok {
+		return nil, fmt.Errorf("quota source is unavailable")
+	}
+	accessToken, accountID, err := t.credentialsForAccount(account)
+	if err != nil {
+		return nil, err
 	}
 	endpoint := strings.TrimSpace(t.UpstreamURL)
 	if endpoint == "" {

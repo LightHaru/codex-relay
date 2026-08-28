@@ -120,6 +120,118 @@ func sendGatewayRequest(t *testing.T, server *httptest.Server, id string) (int, 
 	return response.StatusCode, string(body)
 }
 
+func sendModelsRequest(t *testing.T, server *httptest.Server, bearer string) (int, string) {
+	t.Helper()
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, server.URL+"/v1/models?client_version=0.150.0", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+bearer)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response.StatusCode, string(body)
+}
+
+func TestTransportProxiesAndCachesModelsWithoutQuotaLease(t *testing.T) {
+	store, _ := gatewayTestStore(t, 2)
+	var mu sync.Mutex
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		if request.Method != http.MethodGet || request.URL.Path != "/models" {
+			t.Fatalf("unexpected models request: %s %s", request.Method, request.URL.Path)
+		}
+		if request.URL.Query().Get("client_version") != "0.150.0" {
+			t.Fatalf("client_version was not forwarded: %q", request.URL.RawQuery)
+		}
+		if got := request.Header.Get("Authorization"); got != "Bearer token-1" {
+			t.Fatalf("local bearer leaked or source bearer missing: %q", got)
+		}
+		if got := request.Header.Get("ChatGPT-Account-ID"); got != "upstream-1" {
+			t.Fatalf("controller account header=%q", got)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"models":[{"slug":"gpt-test","visibility":"list"}]}`)
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{
+		Store: store, ModelsURL: upstream.URL + "/models", Client: upstream.Client(), LocalBearerToken: "relay-local",
+	})
+	defer gateway.Close()
+	for index := 0; index < 2; index++ {
+		status, body := sendModelsRequest(t, gateway, "relay-local")
+		if status != http.StatusOK || !strings.Contains(body, "gpt-test") {
+			t.Fatalf("models request %d status=%d body=%q", index, status, body)
+		}
+	}
+	mu.Lock()
+	gotCalls := calls
+	mu.Unlock()
+	if gotCalls != 1 {
+		t.Fatalf("models cache made %d upstream calls, want 1", gotCalls)
+	}
+	if leases := len(store.PoolState().ActiveLeases); leases != 0 {
+		t.Fatalf("model discovery acquired %d quota leases", leases)
+	}
+}
+
+func TestTransportModelsFallsBackFromInvalidControllerCredentials(t *testing.T) {
+	store, _ := gatewayTestStore(t, 2)
+	var mu sync.Mutex
+	used := make([]string, 0, 2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		account := request.Header.Get("ChatGPT-Account-ID")
+		mu.Lock()
+		used = append(used, account)
+		mu.Unlock()
+		if account == "upstream-1" {
+			http.Error(writer, `{"detail":"private upstream auth detail"}`, http.StatusUnauthorized)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"models":[{"slug":"gpt-fallback","visibility":"list"}]}`)
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{Store: store, ModelsURL: upstream.URL, Client: upstream.Client()})
+	defer gateway.Close()
+	status, body := sendModelsRequest(t, gateway, "unused")
+	if status != http.StatusOK || !strings.Contains(body, "gpt-fallback") {
+		t.Fatalf("status=%d body=%q", status, body)
+	}
+	mu.Lock()
+	got := fmt.Sprint(used)
+	mu.Unlock()
+	if got != "[upstream-1 upstream-2]" {
+		t.Fatalf("model catalog credentials=%s", got)
+	}
+}
+
+func TestTransportModelsRejectsInvalidCatalogWithoutLeakingBody(t *testing.T) {
+	store, _ := gatewayTestStore(t, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.WriteString(writer, `{"secret":"private catalog diagnostic"}`)
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{Store: store, ModelsURL: upstream.URL, Client: upstream.Client()})
+	defer gateway.Close()
+	status, body := sendModelsRequest(t, gateway, "unused")
+	if status != http.StatusBadGateway || !strings.Contains(body, "models_refresh_failed") {
+		t.Fatalf("status=%d body=%q", status, body)
+	}
+	if strings.Contains(body, "private catalog diagnostic") {
+		t.Fatalf("upstream models body leaked: %q", body)
+	}
+}
+
 func TestTransportRequiresItsLocalBearerToken(t *testing.T) {
 	store, _ := gatewayTestStore(t, 1)
 	gateway := httptest.NewServer(&Transport{Store: store, LocalBearerToken: "private-local-token"})
@@ -127,6 +239,10 @@ func TestTransportRequiresItsLocalBearerToken(t *testing.T) {
 	status, body := sendGatewayRequest(t, gateway, "unauthorized")
 	if status != http.StatusUnauthorized || strings.Contains(body, "private-local-token") {
 		t.Fatalf("status=%d body=%q", status, body)
+	}
+	modelsStatus, modelsBody := sendModelsRequest(t, gateway, "wrong-token")
+	if modelsStatus != http.StatusUnauthorized || strings.Contains(modelsBody, "private-local-token") {
+		t.Fatalf("models status=%d body=%q", modelsStatus, modelsBody)
 	}
 }
 
