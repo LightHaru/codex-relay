@@ -499,6 +499,32 @@ func TestPoolRestartKeepsCommittedLeaseRecoveryRequired(t *testing.T) {
 	}
 }
 
+func TestDiscardLegacyRecoveryLeasesClearsUpgradeBlockers(t *testing.T) {
+	store, _ := newPoolTestStore(t)
+	lease, err := store.AcquirePoolLease(PoolLease{
+		LeaseID: "legacy-recovery", LogicalTurnID: "legacy-turn", ThreadID: "legacy-thread",
+	}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.MarkPoolLeaseProgress(lease.LeaseID, PoolLeaseRecoveryRequired, true, true); err != nil {
+		t.Fatal(err)
+	}
+	store.RecordPoolError("stream_recovery_required", 200, "legacy")
+	if err := store.DiscardLegacyRecoveryLeases(); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := store.PoolState().ActiveLeases[lease.LeaseID]; exists {
+		t.Fatal("legacy recovery lease survived transactional migration")
+	}
+	if task := store.TaskRecords()[lease.ThreadID]; task.ActiveLeaseID != "" || task.RecoveryState != "" {
+		t.Fatalf("legacy task marker survived transactional migration: %#v", task)
+	}
+	if lastError := store.PoolState().LastError; lastError != nil {
+		t.Fatalf("legacy recovery error survived transactional migration: %#v", lastError)
+	}
+}
+
 func TestNewLogicalTurnClearsAllRecoveryLeasesForSameThread(t *testing.T) {
 	store, _ := newPoolTestStore(t)
 	lease, err := store.AcquirePoolLease(PoolLease{

@@ -66,7 +66,7 @@ func TestLiveAccountPoolSmoke(t *testing.T) {
 	token := "live-local-smoke-token"
 	transport := &Transport{
 		Store: store, LocalBearerToken: token,
-		Client: &http.Client{Timeout: 3 * time.Minute}, BalancedPool: true,
+		Client: &http.Client{Timeout: 3 * time.Minute}, BalancedPool: true, TransactionalResponses: true,
 	}
 	server := httptest.NewServer(transport)
 	defer server.Close()
@@ -145,7 +145,7 @@ func TestLiveAccountPoolFailover(t *testing.T) {
 	}
 
 	token := "live-local-test-token"
-	transport := &Transport{Store: store, LocalBearerToken: token, Client: &http.Client{Timeout: 3 * time.Minute}, BalancedPool: true}
+	transport := &Transport{Store: store, LocalBearerToken: token, Client: &http.Client{Timeout: 3 * time.Minute}, BalancedPool: true, TransactionalResponses: true}
 	server := httptest.NewServer(transport)
 	defer server.Close()
 	model := strings.TrimSpace(os.Getenv("CODEX_RELAY_LIVE_MODEL"))

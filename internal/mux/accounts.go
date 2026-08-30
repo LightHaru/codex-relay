@@ -580,7 +580,11 @@ func (m *Multiplexer) accountSnapshotWithProfile(ctx context.Context, accountID 
 					snapshot.RateLimitError = "quota data could not be read"
 				}
 			} else {
-				snapshot.RateLimitError = "quota data is temporarily unavailable"
+				if strings.Contains(strings.ToLower(rateErr.Error()), "401") || strings.Contains(strings.ToLower(rateErr.Error()), "unauthorized") {
+					snapshot.RateLimitError = "authentication expired or revoked; sign in again"
+				} else {
+					snapshot.RateLimitError = "quota data is temporarily unavailable"
+				}
 			}
 			// Cross-check the app-server snapshot with the same authenticated
 			// Usage resource used by the native billing page. This gives routing
@@ -922,18 +926,12 @@ func routableRemainingPercent(snapshot AccountSnapshot, now time.Time) (float64,
 	if snapshot.RateLimitsObservedAt > 0 && now.Sub(time.UnixMilli(snapshot.RateLimitsObservedAt)) > 2*time.Minute {
 		return 1, false
 	}
-	remaining := 100.0
-	seen := false
-	for _, window := range []*RateLimitWindow{snapshot.RateLimits.Primary, snapshot.RateLimits.Secondary} {
-		if window == nil {
-			continue
-		}
-		seen = true
-		value := math.Max(0, 100-window.UsedPercent)
-		if value < remaining {
-			remaining = value
-		}
+	_, window := longestAndShortestWindow(snapshot.RateLimits)
+	if window == nil {
+		return 1, false
 	}
+	remaining := math.Max(0, 100-window.UsedPercent)
+	seen := true
 	return remaining, seen
 }
 
@@ -942,6 +940,7 @@ func (m *Multiplexer) chooseAccountFromSnapshots(ctx context.Context, snapshots 
 		account      state.Account
 		reason       RouteReason
 		weekly       *RateLimitWindow
+		short        *RateLimitWindow
 		weeklyUsed   float64
 		shortUsed    float64
 		resetCredits resetCreditMetadata
@@ -970,7 +969,7 @@ func (m *Multiplexer) chooseAccountFromSnapshots(ctx context.Context, snapshots 
 			shortUsed = short.UsedPercent
 		}
 		candidates = append(candidates, candidate{
-			account: account, reason: reason, weekly: weekly,
+			account: account, reason: reason, weekly: weekly, short: short,
 			weeklyUsed: weeklyUsed, shortUsed: shortUsed,
 		})
 	}
@@ -1004,7 +1003,9 @@ collectResetCredits:
 	now := m.now()
 	for index := range candidates {
 		entry := &candidates[index]
-		entry.urgency = routeUrgencyScore(now, entry.weekly, entry.resetCredits)
+		// Pool routing is governed by the actionable 5H window. Weekly data is
+		// retained in RouteReason for diagnostics but cannot steer selection.
+		entry.urgency = routeUrgencyScore(now, entry.short, entry.resetCredits)
 		urgency := entry.urgency
 		entry.reason.UrgencyScore = &urgency
 		if entry.resetCredits.Known {
@@ -1054,17 +1055,17 @@ func routeReasonForSnapshot(snapshot AccountSnapshot) RouteReason {
 	return reason
 }
 
-func routeUrgencyScore(now time.Time, weekly *RateLimitWindow, credits resetCreditMetadata) float64 {
-	if weekly == nil {
+func routeUrgencyScore(now time.Time, window *RateLimitWindow, credits resetCreditMetadata) float64 {
+	if window == nil {
 		return -1
 	}
-	remaining := math.Max(0, math.Min(100, 100-weekly.UsedPercent))
+	remaining := math.Max(0, math.Min(100, 100-window.UsedPercent))
 	horizon := routingFallbackWindow
-	if weekly.WindowDurationMins != nil && *weekly.WindowDurationMins > 0 {
-		horizon = time.Duration(*weekly.WindowDurationMins) * time.Minute
+	if window.WindowDurationMins != nil && *window.WindowDurationMins > 0 {
+		horizon = time.Duration(*window.WindowDurationMins) * time.Minute
 	}
-	if weekly.ResetsAt != nil {
-		untilReset := time.Unix(*weekly.ResetsAt, 0).Sub(now)
+	if window.ResetsAt != nil {
+		untilReset := time.Unix(*window.ResetsAt, 0).Sub(now)
 		if untilReset > 0 {
 			horizon = untilReset
 		}

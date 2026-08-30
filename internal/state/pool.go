@@ -118,8 +118,14 @@ func (e QuotaEvidence) ExplicitlyDepleted() bool {
 	if e.LimitReached || (e.Allowed != nil && !*e.Allowed) {
 		return true
 	}
-	return (e.ShortUsed != nil && *e.ShortUsed >= 100) ||
-		(e.LongUsed != nil && *e.LongUsed >= 100)
+	// The Relay Pool contract is short-window (5H) first. Long/weekly
+	// evidence is retained for diagnostics only and must not deplete a source
+	// or override the pool's actionable capacity. Older snapshots may contain
+	// only long evidence, so keep a compatibility fallback until refreshed.
+	if e.ShortUsed != nil {
+		return *e.ShortUsed >= 100
+	}
+	return e.LongUsed != nil && *e.LongUsed >= 100
 }
 
 func (e QuotaEvidence) ConfirmedAvailable(now time.Time, staleAfter time.Duration) bool {
@@ -361,10 +367,9 @@ func recomputePoolMetrics(pool *PoolState) {
 		if evidenceKnown {
 			known++
 			used := 0.0
-			if evidence.ShortUsed != nil && *evidence.ShortUsed > used {
+			if evidence.ShortUsed != nil {
 				used = *evidence.ShortUsed
-			}
-			if evidence.LongUsed != nil && *evidence.LongUsed > used {
+			} else if evidence.LongUsed != nil {
 				used = *evidence.LongUsed
 			}
 			if evidence.ExplicitlyDepleted() {
@@ -640,10 +645,9 @@ func sourceQuotaHeadroom(source CredentialSourceState) (float64, bool) {
 		return 100, false
 	}
 	used := 0.0
-	if evidence.ShortUsed != nil && *evidence.ShortUsed > used {
+	if evidence.ShortUsed != nil {
 		used = *evidence.ShortUsed
-	}
-	if evidence.LongUsed != nil && *evidence.LongUsed > used {
+	} else if evidence.LongUsed != nil {
 		used = *evidence.LongUsed
 	}
 	if evidence.ExplicitlyDepleted() {
@@ -1455,6 +1459,62 @@ func (s *Store) RecoverPoolLeases(now time.Time) error {
 	s.pool.Revision++
 	recomputePoolMetrics(&s.pool)
 	return s.saveLocked()
+}
+
+// DiscardLegacyRecoveryLeases removes fail-closed markers created by Relay
+// versions that streamed semantic output before the upstream terminal event.
+// The transactional production Gateway never creates these markers: an
+// interrupted attempt is either retried privately or was already completed.
+// This startup migration prevents an old marker from blocking the same task
+// forever after upgrading.
+func (s *Store) DiscardLegacyRecoveryLeases() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	previousPool := clonePoolState(s.pool)
+	previousTasks := cloneMap(s.tasks)
+	changed := false
+	now := time.Now().UnixMilli()
+	for leaseID, lease := range s.pool.ActiveLeases {
+		if lease.State != PoolLeaseRecoveryRequired {
+			continue
+		}
+		delete(s.pool.ActiveLeases, leaseID)
+		if lease.ThreadID != "" {
+			task := s.tasks[lease.ThreadID]
+			if task.ActiveLeaseID == leaseID || task.RecoveryState == "recovery-required" {
+				task.ActiveLeaseID = ""
+				task.RecoveryState = ""
+				task.UpdatedAt = now
+				s.tasks[lease.ThreadID] = task
+			}
+		}
+		changed = true
+	}
+	for threadID, task := range s.tasks {
+		if task.RecoveryState != "recovery-required" {
+			continue
+		}
+		task.ActiveLeaseID = ""
+		task.RecoveryState = ""
+		task.UpdatedAt = now
+		s.tasks[threadID] = task
+		changed = true
+	}
+	if s.pool.LastError != nil && (s.pool.LastError.Code == "stream_recovery_required" || s.pool.LastError.Code == "logical_turn_recovery_required") {
+		s.pool.LastError = nil
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	s.pool.Revision++
+	recomputePoolMetrics(&s.pool)
+	if err := s.saveLocked(); err != nil {
+		s.pool = previousPool
+		s.tasks = previousTasks
+		return err
+	}
+	return nil
 }
 
 func (s *Store) markTaskRecoveryLocked(lease PoolLease, now int64) {

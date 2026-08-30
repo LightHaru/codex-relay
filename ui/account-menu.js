@@ -299,13 +299,13 @@ function CodexMuxAccountMenu() {
   const connected = accounts.filter(
     (account) => account.connected && account.enabled,
   );
-  const weeklyWindows = connected.map((account) =>
-    codexMuxWeeklyWindow(account.rateLimits),
+  const shortWindows = connected.map((account) =>
+    codexMuxShortWindow(account.rateLimits),
   );
-  const knownWindows = weeklyWindows.filter((weekly) => weekly != null);
+  const knownWindows = shortWindows.filter((short) => short != null);
   const totalRemaining = knownWindows.reduce(
-    (total, weekly) =>
-      total + Math.max(0, 100 - weekly.usedPercent),
+    (total, short) =>
+      total + Math.max(0, 100 - short.usedPercent),
     0,
   );
   const missingUsage = Math.max(0, connected.length - knownWindows.length);
@@ -401,8 +401,8 @@ function CodexMuxAccountMenu() {
   }
 
   for (const account of connected) {
-    const weekly = codexMuxWeeklyWindow(account.rateLimits);
-    const remaining = weekly == null ? null : Math.max(0, 100 - weekly.usedPercent);
+    const short = codexMuxShortWindow(account.rateLimits);
+    const remaining = short == null ? null : Math.max(0, 100 - short.usedPercent);
     rows.push(
       (0, e7.jsx)(
         _H,
@@ -489,13 +489,13 @@ function CodexMuxAccountMenu() {
   return (0, e7.jsx)(e7.Fragment, { children: rows });
 }
 
-function codexMuxWeeklyWindow(rateLimits) {
+function codexMuxShortWindow(rateLimits) {
   const windows = [rateLimits?.primary, rateLimits?.secondary].filter(Boolean);
   windows.sort(
     (left, right) =>
       (left.windowDurationMins || 0) - (right.windowDurationMins || 0),
   );
-  return windows.at(-1) || null;
+  return windows[0] || null;
 }
 
 function codexMuxUsageWindows(rateLimits) {

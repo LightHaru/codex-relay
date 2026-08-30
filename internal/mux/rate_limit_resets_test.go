@@ -161,6 +161,48 @@ func TestRoutingResetCreditsCachesSuccessfulResponse(t *testing.T) {
 	}
 }
 
+func TestRateLimitResetCredits401IsAuthStatePayload(t *testing.T) {
+	root := t.TempDir()
+	primaryHome := filepath.Join(root, "primary")
+	if err := os.MkdirAll(primaryHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeResetTestAuth(t, primaryHome)
+	store, err := state.Open(filepath.Join(root, "mux"), primaryHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, ok := store.Account("primary")
+	if !ok {
+		t.Fatal("primary account was not created")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.WriteHeader(http.StatusUnauthorized)
+		_, _ = response.Write([]byte(`token_revoked`))
+	}))
+	defer server.Close()
+	multiplexer, err := New(Options{RealExecutable: "codex", Store: store, Output: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	multiplexer.profileClient = server.Client()
+	multiplexer.resetCreditsEndpoint = server.URL
+	result, err := multiplexer.RateLimitResetCredits(context.Background(), account.ID)
+	if err != nil {
+		t.Fatalf("401 must not fail the optional reset surface: %v", err)
+	}
+	var payload struct {
+		ErrorCode string `json:"error_code"`
+		Message   string `json:"message"`
+	}
+	if err := json.Unmarshal(result, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.ErrorCode != "auth_invalidated" || payload.Message == "" {
+		t.Fatalf("unexpected auth payload: %s", result)
+	}
+}
+
 func writeResetTestAuth(t *testing.T, home string) {
 	t.Helper()
 	payload := []byte(`{"tokens":{"access_token":"secret-token","account_id":"chatgpt-account"}}`)

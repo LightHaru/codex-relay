@@ -60,6 +60,18 @@ func (m *Multiplexer) RateLimitResetCredits(ctx context.Context, accountID strin
 		m.resetCreditsEndpoint,
 		account,
 	)
+	// The native Codex app treats a revoked/expired OAuth token as an auth
+	// problem and falls back to its usage projection.  Do the same here: reset
+	// credits are an optional billing surface and must never make a healthy
+	// quota source look depleted or make the whole pool request fail.
+	if err != nil && strings.Contains(err.Error(), "status 401") {
+		payload, _ := json.Marshal(map[string]any{
+			"error_code":      "auth_invalidated",
+			"message":         "Authentication expired or was revoked. Sign in again to refresh reset credits.",
+			"available_count": nil,
+		})
+		return json.RawMessage(payload), nil
+	}
 	if err == nil {
 		m.cacheResetCreditResponse(accountID, result, resetCreditsCacheTTL)
 	}

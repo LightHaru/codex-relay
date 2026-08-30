@@ -58,6 +58,22 @@ func run() error {
 	if root == "" {
 		root = filepath.Join(home, ".codex-mux")
 	}
+	// Bind the control port before opening or mutating the shared pool state.
+	// A second Relay process must fail closed here instead of racing the first
+	// mux on state.json and producing intermittent SSE reconnects or rename
+	// errors. The OS releases this listener on a crash, so no stale lock file
+	// needs to be cleaned up.
+	controlPort := resolveControlPort()
+	controlListener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", controlPort))
+	if err != nil {
+		return fmt.Errorf("Relay is already running or control port %d is unavailable: %w", controlPort, err)
+	}
+	controlListenerOwned := true
+	defer func() {
+		if controlListenerOwned {
+			_ = controlListener.Close()
+		}
+	}()
 	primaryCodexHome, legacyPrimaryHome, isolatedPrimary := resolvePrimaryCodexHome(home, realExecutable)
 	var store *state.Store
 	if isolatedPrimary {
@@ -81,6 +97,12 @@ func run() error {
 	if err := store.RecoverPoolLeases(time.Now()); err != nil {
 		return fmt.Errorf("recover Relay Pool leases before transport start: %w", err)
 	}
+	// Transactional responses make every lease from the old post-output
+	// recovery model obsolete. Recover first so any committed lease left by an
+	// interrupted older process is normalized, then remove every such marker.
+	if err := store.DiscardLegacyRecoveryLeases(); err != nil {
+		return fmt.Errorf("discard legacy Relay recovery markers: %w", err)
+	}
 	compatibilityProfile := resolveCompatibilityProfile(realExecutable)
 
 	poolListener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -98,8 +120,9 @@ func run() error {
 			// Unified mode exposes one Relay API and one task-authority child;
 			// credentials are selected fairly inside the Gateway pool so a
 			// healthy account cannot monopolise the aggregate quota.
-			BalancedPool:    true,
-			DisableFailover: strings.EqualFold(compatibilityProfile, "unknown"),
+			BalancedPool:           true,
+			TransactionalResponses: true,
+			DisableFailover:        strings.EqualFold(compatibilityProfile, "unknown"),
 		},
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       90 * time.Second,
@@ -140,16 +163,8 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	port := defaultControlPort
-	if value := os.Getenv("CODEX_MUX_CONTROL_PORT"); value != "" {
-		if parsed, parseErr := strconv.Atoi(value); parseErr == nil && parsed > 0 && parsed <= 65535 {
-			port = parsed
-		}
-	}
-	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "codex-mux: account UI unavailable: %v\n", err)
-	} else {
+	{
+		listener := controlListener
 		controlServer := control.New(
 			listener.Addr().String(),
 			token,
@@ -166,6 +181,7 @@ func run() error {
 			defer shutdownCancel()
 			_ = controlServer.Shutdown(shutdownCtx)
 		}()
+		controlListenerOwned = false
 	}
 
 	scanner := bufio.NewScanner(os.Stdin)
@@ -180,6 +196,15 @@ func run() error {
 	}
 	cancel()
 	return scanner.Err()
+}
+
+func resolveControlPort() int {
+	if value := os.Getenv("CODEX_MUX_CONTROL_PORT"); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 && parsed <= 65535 {
+			return parsed
+		}
+	}
+	return defaultControlPort
 }
 
 func resolveCompatibilityProfile(realExecutable string) string {

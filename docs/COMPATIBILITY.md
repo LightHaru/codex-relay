@@ -1,10 +1,31 @@
 # Compatibility
 
+## Release 0.5.9 — Transactional pool responses
+
+The production Relay Gateway treats one complete model response as the commit
+boundary. It buffers semantic SSE frames until `response.completed`, while a
+standards-shaped, deliberately unknown `relay.keepalive` SSE event keeps the
+native connection open. Before
+that boundary, quota and transport failures can be retried through another
+eligible credential without exposing partial assistant text or function calls.
+
+This deliberately trades token-by-token rendering for atomic continuation and
+exactly-once publication. Codex still receives the native Responses protocol;
+the Relay API, task authority, history and tool loop remain singular. Legacy
+`RECOVERY_REQUIRED` markers are removed during the first v0.5.9 startup.
+
+The same Gateway now accepts the native `/v1/responses/compact` route and
+forwards the opaque compact request and response without interpreting or
+rewriting either payload. It retains the native thread/session headers, can
+rotate a depleted credential before publishing the compact result, and never
+creates a task-restart marker. Native shell-call response items are also
+forwarded with their complete command string intact.
+
 ## Release 0.5.8 — Transparent post-output streaming
 
 Production Relay no longer owns an idle deadline after a Responses stream has
-started. It forwards protocol-neutral SSE keepalive comments while waiting for
-the upstream terminal event, transport close, or real downstream cancellation.
+started. It forwards `relay.keepalive` SSE events while waiting for the
+upstream terminal event, transport close, or real downstream cancellation.
 The configurable idle cutoff remains available only to deterministic tests.
 
 When a compatible upstream cleanly closes after sending a complete
@@ -16,7 +37,7 @@ continues to fail closed.
 ## Release 0.5.7 — Long post-output pauses and native activity details
 
 The public Responses and app-server protocols remain unchanged. Relay sends
-SSE keepalive comments while allowing up to 90 seconds for the next upstream
+`relay.keepalive` SSE events while allowing up to 90 seconds for the next upstream
 event after output begins, instead of classifying an ordinary three-second
 reasoning or tool pause as a failed stream. A distinct new logical turn is the
 explicit continuation boundary that clears older recovery leases for that

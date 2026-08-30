@@ -105,6 +105,7 @@ type Multiplexer struct {
 	asyncClosed       bool
 	asyncWG           sync.WaitGroup
 	runtimeMu         sync.Mutex
+	runtimeCtx        context.Context
 	runtimeCancel     context.CancelFunc
 	runtimeWG         sync.WaitGroup
 	inbound           chan backend.Inbound
@@ -192,6 +193,7 @@ func New(options Options) (*Multiplexer, error) {
 func (m *Multiplexer) Start(ctx context.Context) error {
 	runtimeCtx, runtimeCancel := context.WithCancel(ctx)
 	m.runtimeMu.Lock()
+	m.runtimeCtx = runtimeCtx
 	m.runtimeCancel = runtimeCancel
 	m.runtimeMu.Unlock()
 	if err := m.store.RecoverPoolLeases(time.Now()); err != nil {
@@ -208,7 +210,14 @@ func (m *Multiplexer) Start(ctx context.Context) error {
 	// best-effort diagnostics and never prevent the authoritative state starting.
 	m.compactCanonicalDecisionLedgers()
 	for _, account := range m.store.Accounts() {
-		if _, err := m.startChild(ctx, account); err != nil {
+		// Disabled sources are deliberately detached from the Relay runtime.
+		// Starting their native child would still make Codex refresh models,
+		// plugins, and account metadata with a revoked token, producing repeated
+		// 401/reconnect noise even though the source is no longer routable.
+		if !account.Enabled {
+			continue
+		}
+		if _, err := m.startChild(runtimeCtx, account); err != nil {
 			fmt.Fprintf(os.Stderr, "codex-mux: start account %s: %v\n", account.ID, err)
 		}
 	}
@@ -266,6 +275,87 @@ func (m *Multiplexer) Close() {
 	}
 }
 
+// watchChild keeps a Router-owned app-server available after an unexpected
+// process exit. The native desktop app treats its app-server connection as a
+// long-lived transport; without this supervisor a transient child crash leaves
+// the public Relay stdin alive but every subsequent task request stuck in a
+// reconnect loop. Account mutations are serialized so an intentional
+// Primary-switch/restart cannot race this recovery path: if that operation has
+// already installed a replacement child, the watcher simply exits.
+func (m *Multiplexer) watchChild(account state.Account, child *backend.Child) {
+	m.runtimeMu.Lock()
+	runtimeCtx := m.runtimeCtx
+	m.runtimeMu.Unlock()
+	if runtimeCtx == nil {
+		return
+	}
+	go func() {
+		if err := child.Wait(runtimeCtx); err != nil {
+			return
+		}
+		select {
+		case <-runtimeCtx.Done():
+			return
+		default:
+		}
+
+		m.accountMutationMu.Lock()
+		defer m.accountMutationMu.Unlock()
+		current, exists := m.child(account.ID)
+		if !exists || current != child {
+			return
+		}
+		m.removeChild(account.ID, child)
+		latest, exists := m.store.Account(account.ID)
+		if !exists || !latest.Enabled {
+			return
+		}
+		m.publish(Event{
+			Type:      "router-child-restarting",
+			AccountID: account.ID,
+			Message:   "Relay Codex session exited unexpectedly; restarting the isolated session",
+		})
+
+		backoff := 250 * time.Millisecond
+		for attempt := 1; ; attempt++ {
+			select {
+			case <-runtimeCtx.Done():
+				return
+			default:
+			}
+			restarted, err := m.startChild(runtimeCtx, latest)
+			if err == nil {
+				m.publish(Event{
+					Type:      "router-child-restarted",
+					AccountID: account.ID,
+					Message:   "Relay Codex session is connected again",
+					Data:      map[string]any{"attempt": attempt},
+				})
+				_ = restarted
+				return
+			}
+			fmt.Fprintf(os.Stderr, "codex-mux: restart account %s after child exit: %v\n", account.ID, err)
+			timer := time.NewTimer(backoff)
+			select {
+			case <-runtimeCtx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			if backoff < 10*time.Second {
+				backoff *= 2
+				if backoff > 10*time.Second {
+					backoff = 10 * time.Second
+				}
+			}
+			latest, exists = m.store.Account(account.ID)
+			if !exists || !latest.Enabled {
+				return
+			}
+		}
+	}()
+}
+
 func (m *Multiplexer) runAsync(work func()) {
 	if work == nil {
 		return
@@ -315,6 +405,9 @@ func (m *Multiplexer) restartChildrenLocked(ctx context.Context) (int, error) {
 	startCtx, cancelStart := context.WithTimeout(ctx, 25*time.Second)
 	defer cancelStart()
 	for _, account := range accounts {
+		if !account.Enabled {
+			continue
+		}
 		if _, err := m.startChild(startCtx, account); err != nil {
 			restartErrors = append(restartErrors, fmt.Errorf("start %s: %w", account.ID, err))
 			continue
@@ -2521,6 +2614,7 @@ func (m *Multiplexer) startChild(ctx context.Context, account state.Account) (*b
 			_ = child.Send(protocol.Message{Method: "initialized"})
 		}
 	}
+	m.watchChild(account, child)
 	return child, nil
 }
 
@@ -2700,19 +2794,15 @@ func accountHasCapacity(snapshot AccountSnapshot) bool {
 	if snapshot.QuotaAllowed != nil && !*snapshot.QuotaAllowed {
 		return false
 	}
-	// Codex exposes a short and a longer quota window. A subscription is only
-	// routable when every reported window has remaining capacity; otherwise a
-	// short-window exhaustion would still receive one avoidable failing turn.
+	// The Relay Pool contract is governed by the short (5H) window. The weekly
+	// window is retained as upstream metadata/diagnostics and must not make an
+	// otherwise-available source unroutable.
 	if snapshot.RateLimits == nil {
 		return true
 	}
-	for _, window := range []*RateLimitWindow{
-		snapshot.RateLimits.Primary,
-		snapshot.RateLimits.Secondary,
-	} {
-		if window != nil && window.UsedPercent >= 100 {
-			return false
-		}
+	_, window := longestAndShortestWindow(snapshot.RateLimits)
+	if window != nil && window.UsedPercent >= 100 {
+		return false
 	}
 	return true
 }

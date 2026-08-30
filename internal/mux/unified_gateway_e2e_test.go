@@ -213,7 +213,7 @@ func TestUnifiedGatewayUsesOneTaskAuthorityAndFailsOverInsideRequest(t *testing.
 	localToken := "local-e2e-token"
 	poolGateway := httptest.NewServer(&gateway.Transport{
 		Store: store, UpstreamURL: upstream.URL, Client: upstream.Client(), LocalBearerToken: localToken,
-		BalancedPool: true,
+		BalancedPool: true, TransactionalResponses: true,
 		// The real app-server intentionally rejects these fixture tokens and may
 		// rewrite auth.json while warming plugins. Keep transport credentials in
 		// memory so the E2E exercises pool routing rather than filesystem races.

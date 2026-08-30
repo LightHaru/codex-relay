@@ -628,6 +628,7 @@ test("Manage pool sources uses a readable native-feeling modal with pool overvie
   assert.match(text, /Codex Relay Pool/);
   assert.match(text, /Manage pool sources/);
   assert.match(text, /Pool quota/);
+  assert.match(text, /Pool quota \(5H\)/);
   assert.match(text, /Available now/);
   assert.match(text, /Pool sources/);
   assert.match(text, /Agent Aira/);

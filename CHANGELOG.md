@@ -3,6 +3,36 @@
 All notable changes follow [Keep a Changelog](https://keepachangelog.com/) and
 this project uses [Semantic Versioning](https://semver.org/).
 
+## [0.5.9] - 2026-08-28
+
+### Changed
+
+- The unified production Gateway now publishes each model response as one
+  transaction. Assistant deltas and tool calls stay private until the upstream
+  sends `response.completed`; only SSE keepalive comments are visible while it
+  works.
+- A quota rejection, disconnect, truncated frame, or transient source failure
+  before that terminal boundary can rotate to another pool source without
+  leaking partial output or executing a buffered tool call twice.
+- Native remote compaction now passes through `/v1/responses/compact` without
+  parsing or rewriting its opaque payload. Compaction can fail over before
+  publication and keeps the same thread/task headers without creating restart
+  or recovery markers.
+- Native shell-call payloads, including the complete command string used by
+  Codex's running-command UI, are preserved exactly once through the
+  transactional response boundary.
+- Upgrading removes legacy `RECOVERY_REQUIRED` leases and task markers at
+  startup. Transactional production requests no longer create that state.
+
+### Validation
+
+- Added deterministic E2E coverage for a quota rejection after buffered text,
+  a disconnect after a buffered function call, native compaction passthrough
+  and failover, full command payload preservation, single-publication
+  semantics, and migration of legacy recovery markers.
+
+Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.9
+
 ## [0.5.8] - 2026-08-28
 
 ### Fixed
@@ -798,7 +828,8 @@ Release: https://github.com/LightHaru/codex-relay/releases/tag/v0.3.7
 - Loopback-only, token-authenticated diagnostic UI states.
 - Source-only CI, draft release automation, security documentation, and smoke tests.
 
-[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.5.8...HEAD
+[Unreleased]: https://github.com/LightHaru/codex-relay/compare/v0.5.9...HEAD
+[0.5.9]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.9
 [0.5.8]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.8
 [0.5.7]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.7
 [0.5.6]: https://github.com/LightHaru/codex-relay/releases/tag/v0.5.6

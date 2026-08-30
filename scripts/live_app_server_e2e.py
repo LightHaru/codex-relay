@@ -287,7 +287,7 @@ def main() -> int:
             "id": 1,
             "method": "initialize",
             "params": {
-                "clientInfo": {"name": "codex-relay-e2e", "title": "Codex Relay E2E", "version": "0.5.8"},
+                "clientInfo": {"name": "codex-relay-e2e", "title": "Codex Relay E2E", "version": "0.5.9"},
                 "capabilities": {"experimentalApi": True},
             },
         })

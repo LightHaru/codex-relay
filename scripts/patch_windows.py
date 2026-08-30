@@ -1441,6 +1441,20 @@ def patch_windows_feature_bundles(
         profile["reset_header_replacement"],
         "reset sheet header",
     )
+    # Newer app-server builds may expose the shell command under a nested
+    # action/shellCommand field while the upstream projection still expects
+    # commandExecution.command. Preserve the native projection and only add a
+    # compatibility fallback so the official renderer can show the real
+    # command instead of its "Ran command" placeholder.
+    command_anchor = "cmd:o.command}]"
+    command_replacement = (
+        "cmd:o.command??o.action?.command??o.action?.cmd??"
+        "o.shellCommand??o.commandLine??\"\"}]"
+    )
+    if initial.count(command_anchor) == 1:
+        initial = initial.replace(command_anchor, command_replacement, 1)
+    # Older reviewed Store bundles do not carry this projection spelling; the
+    # normal upstream parser remains unchanged for those profiles.
     initial_path.write_text(initial, encoding="utf-8")
 
     profile_path = asset_with_anchor(

@@ -263,10 +263,11 @@ func (m *Multiplexer) unifiedPoolStatus() PoolStatus {
 		if known {
 			result.KnownSubscriptions++
 			used := 0.0
-			if evidence.ShortUsed != nil && *evidence.ShortUsed > used {
+			if evidence.ShortUsed != nil {
 				used = *evidence.ShortUsed
-			}
-			if evidence.LongUsed != nil && *evidence.LongUsed > used {
+			} else if evidence.LongUsed != nil {
+				// Compatibility fallback for pre-5H snapshots. Fresh app-server
+				// evidence always supplies ShortUsed and therefore wins.
 				used = *evidence.LongUsed
 			}
 			if evidence.ExplicitlyDepleted() {

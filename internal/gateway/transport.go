@@ -25,10 +25,11 @@ import (
 
 const (
 	defaultUpstreamURL     = "https://chatgpt.com/backend-api/codex/responses"
+	defaultCompactURL      = "https://chatgpt.com/backend-api/codex/responses/compact"
 	defaultModelsURL       = "https://chatgpt.com/backend-api/codex/models"
 	maxRequestBytes        = 64 << 20
 	maxModelsResponseBytes = 8 << 20
-	maxBufferedSSEBytes    = 2 << 20
+	maxBufferedSSEBytes    = 32 << 20
 	maxSSESniffBytes       = 8 << 10
 	maxReplayBytes         = 32 << 20
 	requestReplayTTL       = 30 * time.Second
@@ -67,6 +68,12 @@ type Transport struct {
 	// scheduler. It is enabled by the production unified gateway; leaving it
 	// false preserves the sticky behavior expected by legacy embedders/tests.
 	BalancedPool bool
+	// TransactionalResponses keeps every upstream SSE frame private until a
+	// terminal response.completed event is available. A quota rejection,
+	// disconnect, or source failure can therefore rotate to another credential
+	// without leaking partial assistant output or duplicating a tool call.
+	// Production unified Relay always enables this mode.
+	TransactionalResponses bool
 	// LoadCredentials is an optional in-process credential loader used by
 	// deterministic integration tests and controlled embedders. Production
 	// Relay leaves it nil, so credentials continue to be read from the selected
@@ -113,12 +120,19 @@ type flightResponseWriter struct {
 
 func (writer *flightResponseWriter) WriteHeader(status int) {
 	writer.flight.mu.Lock()
-	if writer.flight.status == 0 {
+	firstHeader := writer.flight.status == 0
+	if firstHeader {
 		writer.flight.status = status
 		writer.flight.header = writer.Header().Clone()
 	}
 	writer.flight.mu.Unlock()
-	writer.ResponseWriter.WriteHeader(status)
+	// A native-safe Relay heartbeat may have already caused net/http to commit
+	// the implicit 200 response. Do not send a second WriteHeader when the
+	// transactional terminal boundary arrives; duplicate calls produce noisy
+	// superfluous-response warnings and are rejected by some ResponseWriters.
+	if firstHeader {
+		writer.ResponseWriter.WriteHeader(status)
+	}
 }
 
 func (writer *flightResponseWriter) Write(data []byte) (int, error) {
@@ -206,7 +220,15 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 		t.fail(writer, http.StatusServiceUnavailable, "pool_state_unavailable", "Relay Pool state is unavailable")
 		return
 	}
-	if request.URL.Path != "/v1/responses" && request.URL.Path != "/v1/models" {
+	knownResponsesRoute := request.URL.Path == "/v1/responses" || request.URL.Path == "/v1/responses/compact"
+	knownModelsRoute := request.URL.Path == "/v1/models"
+	// Keep the native provider surface extensible. Codex occasionally adds a
+	// Responses sub-route or a control-plane endpoint before Relay has a custom
+	// UI for it; any other loopback /v1/* route is forwarded upstream using the
+	// same pooled credential and opaque request bytes instead of being rejected
+	// as a local 404.
+	unknownUpstreamRoute := strings.HasPrefix(request.URL.Path, "/v1/") && !knownResponsesRoute && !knownModelsRoute
+	if !knownResponsesRoute && !knownModelsRoute && !unknownUpstreamRoute {
 		http.NotFound(writer, request)
 		return
 	}
@@ -214,7 +236,7 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 		t.fail(writer, http.StatusUnauthorized, "transport_authentication_failed", "Relay Pool transport authentication failed")
 		return
 	}
-	if request.URL.Path == "/v1/models" {
+	if knownModelsRoute {
 		if request.Method != http.MethodGet {
 			writer.Header().Set("Allow", http.MethodGet)
 			t.fail(writer, http.StatusMethodNotAllowed, "method_not_allowed", "Relay Pool models endpoint requires GET")
@@ -223,9 +245,14 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 		t.serveModels(writer, request)
 		return
 	}
-	if request.Method != http.MethodPost {
+	if knownResponsesRoute && request.Method != http.MethodPost {
 		writer.Header().Set("Allow", http.MethodPost)
 		t.fail(writer, http.StatusMethodNotAllowed, "method_not_allowed", "Relay Pool responses endpoint requires POST")
+		return
+	}
+	if unknownUpstreamRoute && (request.Method == http.MethodConnect || request.Method == http.MethodTrace || request.Method == http.MethodOptions) {
+		writer.Header().Set("Allow", "GET, POST, PATCH, PUT, DELETE")
+		t.fail(writer, http.StatusMethodNotAllowed, "method_not_allowed", "Relay Pool upstream endpoint does not support this method")
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(request.Body, maxRequestBytes+1))
@@ -392,6 +419,136 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 				return
 			}
 			continue
+		}
+		if request.URL.Path == "/v1/responses/compact" {
+			responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, maxRequestBytes+1))
+			response.Body.Close()
+			if readErr != nil {
+				if request.Context().Err() != nil {
+					_ = t.Store.AbortPoolLease(lease.LeaseID, "")
+					return
+				}
+				if !t.DisableFailover {
+					failedSource := lease.SourceID
+					fingerprint := classifyTransportError(readErr)
+					lease, err = t.Store.MarkPoolTransientFailure(lease.LeaseID, failedSource, fingerprint)
+					if err == nil {
+						continue
+					}
+				}
+				_ = t.Store.AbortPoolLease(lease.LeaseID, "compact-transport-error")
+				t.fail(writer, http.StatusBadGateway, "compact_upstream_transport_error", "Relay Pool could not complete native compaction")
+				return
+			}
+			if len(responseBody) > maxRequestBytes {
+				_ = t.Store.AbortPoolLease(lease.LeaseID, "compact-response-too-large")
+				t.fail(writer, http.StatusBadGateway, "compact_response_too_large", "Relay Pool native compaction response is too large")
+				return
+			}
+			if isQuotaResponse(response.StatusCode, responseBody) {
+				if t.DisableFailover {
+					_ = t.Store.AbortPoolLease(lease.LeaseID, "compatibility-profile-unknown")
+					t.fail(writer, http.StatusServiceUnavailable, "compatibility_profile_review", "Relay Pool compatibility profile requires review")
+					return
+				}
+				lease, err = t.Store.MarkPoolQuotaRejected(lease.LeaseID, lease.SourceID, "native compaction quota rejection", 0)
+				if err == nil {
+					continue
+				}
+				_ = t.Store.AbortPoolLease(lease.LeaseID, "pool-depleted")
+				t.fail(writer, http.StatusTooManyRequests, "pool_exhausted", "Relay Pool has exhausted every usable quota source")
+				return
+			}
+			copyResponseHeaders(writer.Header(), response.Header)
+			writer.WriteHeader(response.StatusCode)
+			if _, writeErr := writer.Write(responseBody); writeErr != nil {
+				_ = t.Store.AbortPoolLease(lease.LeaseID, "")
+				return
+			}
+			_ = t.Store.CompletePoolLease(lease.LeaseID)
+			t.clearGlobalOutageSamples()
+			return
+		}
+		if unknownUpstreamRoute && !isSSE(response.Header) {
+			prefixBuffer := make([]byte, maxSSESniffBytes)
+			prefixLength, _ := response.Body.Read(prefixBuffer)
+			prefix := prefixBuffer[:prefixLength]
+			response.Body = io.NopCloser(io.MultiReader(bytes.NewReader(prefix), response.Body))
+			if looksLikeSSE(prefix) {
+				response.Header.Set("Content-Type", "text/event-stream")
+			}
+		}
+		if unknownUpstreamRoute {
+			if isSSE(response.Header) {
+				// Future streaming routes use the same terminal-aware Responses
+				// framing as /v1/responses and therefore retain transactional
+				// buffering and keepalive behavior below.
+				lease, _ = t.Store.MarkPoolLeaseProgress(lease.LeaseID, state.PoolLeaseAccepted, false, false)
+				_, streamErr := t.forwardSSE(writer, response, lease)
+				if streamErr == nil {
+					_ = t.Store.CompletePoolLease(lease.LeaseID)
+					t.clearGlobalOutageSamples()
+					return
+				}
+				if errors.Is(streamErr, errClientStreamCanceled) || errors.Is(streamErr, errTerminalResponseFailure) {
+					_ = t.Store.AbortPoolLease(lease.LeaseID, "future-endpoint-stream-ended")
+					return
+				}
+				if !t.DisableFailover {
+					failedSource := lease.SourceID
+					lease, err = t.Store.MarkPoolTransientFailure(lease.LeaseID, failedSource, classifyTransportError(streamErr))
+					if err == nil {
+						if !waitRetryBackoff(request.Context(), lease.AttemptNumber, "") {
+							_ = t.Store.AbortPoolLease(lease.LeaseID, "")
+							return
+						}
+						continue
+					}
+				}
+				_ = t.Store.AbortPoolLease(lease.LeaseID, "future-endpoint-stream-error")
+				t.fail(writer, http.StatusBadGateway, "upstream_stream_error", "Relay Pool future upstream endpoint stream failed")
+				return
+			}
+			responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, maxRequestBytes+1))
+			response.Body.Close()
+			if readErr != nil {
+				if request.Context().Err() != nil {
+					_ = t.Store.AbortPoolLease(lease.LeaseID, "")
+					return
+				}
+				if !t.DisableFailover {
+					failedSource := lease.SourceID
+					lease, err = t.Store.MarkPoolTransientFailure(lease.LeaseID, failedSource, classifyTransportError(readErr))
+					if err == nil {
+						continue
+					}
+				}
+				_ = t.Store.AbortPoolLease(lease.LeaseID, "upstream-endpoint-read-error")
+				t.fail(writer, http.StatusBadGateway, "upstream_transport_error", "Relay Pool could not read the upstream endpoint response")
+				return
+			}
+			if len(responseBody) > maxRequestBytes {
+				_ = t.Store.AbortPoolLease(lease.LeaseID, "upstream-endpoint-response-too-large")
+				t.fail(writer, http.StatusBadGateway, "response_too_large", "Relay Pool upstream endpoint response is too large")
+				return
+			}
+			if isQuotaResponse(response.StatusCode, responseBody) && !t.DisableFailover {
+				lease, err = t.Store.MarkPoolQuotaRejected(lease.LeaseID, lease.SourceID, "upstream endpoint quota rejection", 0)
+				if err == nil {
+					continue
+				}
+			}
+			copyResponseHeaders(writer.Header(), response.Header)
+			writer.WriteHeader(response.StatusCode)
+			if _, writeErr := writer.Write(responseBody); writeErr != nil {
+				_ = t.Store.AbortPoolLease(lease.LeaseID, "")
+				return
+			}
+			_ = t.Store.CompletePoolLease(lease.LeaseID)
+			if response.StatusCode >= 200 && response.StatusCode < 300 {
+				t.clearGlobalOutageSamples()
+			}
+			return
 		}
 		// The current ChatGPT Responses endpoint may omit Content-Type on a
 		// chunked SSE response. Sniff a bounded prefix and put it back on the
@@ -924,23 +1081,80 @@ func (t *Transport) dispatch(ctx context.Context, original *http.Request, body [
 	if err != nil {
 		return nil, err
 	}
-	endpoint := strings.TrimSpace(t.UpstreamURL)
-	if endpoint == "" {
-		endpoint = defaultUpstreamURL
+	endpoint := t.upstreamEndpoint(original.URL.Path, original.URL.RawQuery)
+	method := original.Method
+	if method == "" {
+		method = http.MethodPost
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	copyRequestHeaders(request.Header, original.Header)
 	request.Header.Set("Authorization", "Bearer "+accessToken)
 	request.Header.Set("ChatGPT-Account-ID", accountID)
-	request.Header.Set("Accept", "text/event-stream")
+	if original.URL.Path == "/v1/responses/compact" {
+		request.Header.Set("Accept", "application/json")
+	} else if original.URL.Path == "/v1/responses" || strings.HasPrefix(original.URL.Path, "/v1/responses/") {
+		request.Header.Set("Accept", "text/event-stream")
+	} else if accept := strings.TrimSpace(original.Header.Get("Accept")); accept != "" {
+		request.Header.Set("Accept", accept)
+	} else {
+		request.Header.Set("Accept", "*/*")
+	}
 	client := t.Client
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Minute}
 	}
 	return client.Do(request)
+}
+
+// upstreamEndpoint maps the public provider namespace onto the native
+// ChatGPT Codex namespace. Explicit UpstreamURL values remain authoritative
+// for the two established Responses routes (this preserves test/portable
+// embedders); future /v1/* routes are resolved relative to that endpoint's
+// directory so they are forwarded without a new Relay release.
+func (t *Transport) upstreamEndpoint(publicPath, rawQuery string) string {
+	configured := strings.TrimSpace(t.UpstreamURL)
+	if publicPath == "/v1/responses/compact" && configured != "" {
+		return appendRawQuery(configured, rawQuery)
+	}
+	if publicPath == "/v1/responses" && configured != "" {
+		return appendRawQuery(configured, rawQuery)
+	}
+	base := configured
+	if base == "" {
+		base = defaultUpstreamURL
+	}
+	parsed, err := url.Parse(base)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return appendRawQuery(base, rawQuery)
+	}
+	if publicPath == "/v1/responses/compact" && configured == "" {
+		parsed.Path = "/backend-api/codex/responses/compact"
+	} else if publicPath == "/v1/responses" && configured == "" {
+		parsed.Path = "/backend-api/codex/responses"
+	} else {
+		prefix := strings.TrimSuffix(parsed.Path, "/responses")
+		if prefix == parsed.Path {
+			prefix = strings.TrimSuffix(parsed.Path, "/")
+		}
+		parsed.Path = strings.TrimSuffix(prefix, "/") + "/" + strings.TrimPrefix(publicPath, "/v1/")
+	}
+	parsed.RawQuery = rawQuery
+	return parsed.String()
+}
+
+func appendRawQuery(endpoint, rawQuery string) string {
+	if strings.TrimSpace(rawQuery) == "" {
+		return endpoint
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return endpoint
+	}
+	parsed.RawQuery = rawQuery
+	return parsed.String()
 }
 
 type sourceCredentialError struct{ cause error }
@@ -1014,6 +1228,106 @@ func (e *retryableStreamError) Unwrap() error {
 }
 
 func (t *Transport) forwardSSE(writer http.ResponseWriter, response *http.Response, lease state.PoolLease) (state.PoolLease, error) {
+	if t.TransactionalResponses {
+		return t.forwardTransactionalSSE(writer, response, lease)
+	}
+	return t.forwardStreamingSSE(writer, response, lease)
+}
+
+// forwardTransactionalSSE makes one upstream model response the atomic unit
+// exposed by Relay. Relay keepalive events may reach the native client while
+// the model works, but semantic upstream SSE events are published only after
+// the response has a terminal boundary. Since Codex cannot execute a buffered
+// function call, a failed attempt has no externally observable side effect and
+// is safe to retry against another pool source.
+func (t *Transport) forwardTransactionalSSE(writer http.ResponseWriter, response *http.Response, lease state.PoolLease) (state.PoolLease, error) {
+	defer response.Body.Close()
+	copyResponseHeaders(writer.Header(), response.Header)
+	writer.Header().Set("Content-Type", "text/event-stream")
+	writer.Header().Set("Cache-Control", "no-cache")
+
+	reader := bufio.NewReader(response.Body)
+	var buffered bytes.Buffer
+	var lastSequenceNumber int64
+	var haveSequenceNumber bool
+	responseID := ""
+	terminalCandidateObserved := false
+
+	for {
+		event, readErr := readSSEEventWithKeepalive(reader, writer, responseContext(response))
+		debugSSEFrame("transactional", event, readErr)
+		partial := len(event) > 0 && !completeSSEEvent(event)
+		if len(event) > 0 && !partial {
+			if buffered.Len()+len(event) > maxBufferedSSEBytes {
+				return lease, &retryableStreamError{class: "transaction_buffer_limit", cause: errors.New("upstream response exceeded Relay transaction buffer")}
+			}
+			buffered.Write(event)
+			if sequence, ok := sseSequenceNumber(event); ok {
+				lastSequenceNumber = sequence
+				haveSequenceNumber = true
+			}
+			if id, ok := sseResponseID(event); ok {
+				responseID = id
+			}
+			category, _, _ := classifySSEEvent(event)
+			if category == "quota" {
+				return lease, errEarlyQuotaRejection
+			}
+			terminalCandidateObserved = isSSETerminalCandidate(event) && classifySSETerminal(event) == ""
+			switch classifySSETerminal(event) {
+			case "completed":
+				writer.WriteHeader(response.StatusCode)
+				if _, err := writer.Write(buffered.Bytes()); err != nil {
+					return lease, errClientStreamCanceled
+				}
+				if flusher, ok := writer.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				return lease, nil
+			case "failed", "incomplete":
+				writer.WriteHeader(response.StatusCode)
+				if _, err := writer.Write(buffered.Bytes()); err != nil {
+					return lease, errClientStreamCanceled
+				}
+				if flusher, ok := writer.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				return lease, errTerminalResponseFailure
+			}
+		}
+
+		if readErr == nil {
+			continue
+		}
+		if responseRequestCanceled(response, readErr) {
+			return lease, errClientStreamCanceled
+		}
+		// A complete output-item boundary followed by a clean close is a
+		// compatible upstream shape. Finish it inside the still-private
+		// transaction and publish the complete response exactly once.
+		if terminalCandidateObserved && !partial {
+			completionSequence := nextSSESequence(lastSequenceNumber, haveSequenceNumber)
+			buffered.Write(sanitizedCompletedSSE(completionSequence, responseID))
+			writer.WriteHeader(response.StatusCode)
+			if _, err := writer.Write(buffered.Bytes()); err != nil {
+				return lease, errClientStreamCanceled
+			}
+			if flusher, ok := writer.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			return lease, nil
+		}
+		if errors.Is(readErr, io.EOF) {
+			if isQuotaResponse(response.StatusCode, buffered.Bytes()) {
+				return lease, errEarlyQuotaRejection
+			}
+			return lease, &retryableStreamError{class: "clean_eof_without_terminal", cause: io.ErrUnexpectedEOF}
+		}
+		return lease, &retryableStreamError{class: classifyTransportError(readErr), cause: readErr}
+	}
+}
+
+func (t *Transport) forwardStreamingSSE(writer http.ResponseWriter, response *http.Response, lease state.PoolLease) (state.PoolLease, error) {
 	defer response.Body.Close()
 	reader := bufio.NewReader(response.Body)
 	var buffered bytes.Buffer
@@ -1540,11 +1854,12 @@ type sseReadResult struct {
 
 var errSSEIdleRecoveryTimeout = errors.New("upstream SSE idle after visible output")
 
-// readSSEEventWithKeepalive prevents an upstream that has already emitted
-// visible output from being mistaken for a dead client while its final frame
-// is still in flight. SSE comments are ignored by Responses consumers and are
-// flushed only after the downstream response is committed; they never become
-// assistant output or a replayable side effect.
+// readSSEEventWithKeepalive prevents a quiet upstream from being mistaken for
+// a dead client while the model is still working. The heartbeat is a valid,
+// deliberately-unknown Responses SSE event rather than a comment: Codex native
+// resets its idle timer when eventsource_stream yields an event, then ignores
+// unknown event types. It therefore keeps the connection alive without adding
+// assistant output, tool calls, or replayable side effects.
 func readSSEEventWithKeepalive(reader *bufio.Reader, writer http.ResponseWriter, ctx context.Context) ([]byte, error) {
 	return readSSEEventWithKeepaliveTimeout(reader, writer, ctx, 0)
 }
@@ -1572,7 +1887,8 @@ func readSSEEventWithKeepaliveTimeout(reader *bufio.Reader, writer http.Response
 			if writer == nil {
 				continue
 			}
-			if _, err := writer.Write([]byte(": relay-pool-keepalive\n\n")); err != nil {
+			const heartbeat = "event: relay.keepalive\ndata: {\"type\":\"relay.keepalive\"}\n\n"
+			if _, err := writer.Write([]byte(heartbeat)); err != nil {
 				return nil, err
 			}
 			if flusher, ok := writer.(http.Flusher); ok {

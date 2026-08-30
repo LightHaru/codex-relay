@@ -122,7 +122,9 @@
 
   function poolPresentation(accounts, routing = null) {
     const connected = (Array.isArray(accounts) ? accounts : []).filter((account) => account?.enabled && account?.connected);
-    const knownUsage = connected.map(remainingUsage).filter((value) => value != null);
+    // Every Relay Pool surface uses the same canonical 5H capacity. Weekly
+    // quota remains account detail only and never drives the additive pool.
+    const knownUsage = connected.map(shortestRemainingUsage).filter((value) => value != null);
     const upstream = routing?.status?.pool || routing?.pool || null;
     return {
       connected: Number.isFinite(Number(upstream?.connectedSubscriptions)) ? Number(upstream.connectedSubscriptions) : connected.length,
@@ -636,6 +638,15 @@
       .filter(Boolean);
   }
 
+  function shortestUsageWindow(account) {
+    return usageWindows(account?.rateLimits)
+      .sort((left, right) => left.windowMinutes - right.windowMinutes)[0] || null;
+  }
+
+  function shortestRemainingUsage(account) {
+    return shortestUsageWindow(account)?.remainingPercent ?? null;
+  }
+
   function selectedResetUsageWindows() {
     const account = connectedAccounts(latestAccounts).find(
       (item) => item.id === getResetAccountId(),
@@ -660,11 +671,18 @@
     return windows.reduce((remaining, window) => Math.min(remaining, window.remainingPercent), 100);
   }
 
+  function accountAuthInvalidated(account) {
+    return String(account?.rateLimitError || "").toLowerCase().includes("authentication")
+      || String(account?.error || "").toLowerCase().includes("authentication");
+  }
+
   function usageLabel(account) {
     const remaining = remainingUsage(account);
     if (remaining != null) return `${Math.round(remaining)}% left`;
     if (account?.error) return "Account status unavailable";
-    if (account?.rateLimitError) return "Quota unavailable";
+    if (account?.rateLimitError) return accountAuthInvalidated(account)
+      ? "Sign in required"
+      : "Quota pending verification";
     return "Updating quota…";
   }
 
@@ -696,7 +714,9 @@
       .filter((window) => Number.isFinite(Number(window.resetsAt)) && Number(window.resetsAt) > 0)
       .sort((left, right) => Number(left.resetsAt) - Number(right.resetsAt));
     if (windows.length === 0) {
-      return account?.rateLimitError ? "Reset time unavailable" : "Reset time not reported";
+      return accountAuthInvalidated(account)
+        ? "Sign in again to refresh"
+        : account?.rateLimitError ? "Reset time unavailable" : "Reset time not reported";
     }
     return `Reset ${windows.map((window) => `${formatWindowDuration(window.windowMinutes)}: ${formatResetCountdown(window.resetsAt)}`).join(" · ")}`;
   }
@@ -717,7 +737,9 @@
     const quota = windows.length > 0
       ? `${Math.round(remainingUsage(account))}% quota left`
       : account?.error ? "Account status unavailable"
-        : account?.rateLimitError ? "Quota data unavailable" : "Quota data is updating";
+        : accountAuthInvalidated(account)
+          ? "Sign in required"
+          : account?.rateLimitError ? "Quota data unavailable" : "Quota data is updating";
     return `${quota} · ${quotaResetSummary(account)}`;
   }
 
@@ -1351,6 +1373,7 @@
     const counts = await Promise.all(accounts.map(async (account) => {
       try {
         const result = await rateLimitResets(account.id);
+        if (result?.error_code || result?.errorCode) return [account.id, null];
         return [account.id, Math.max(0, Number(
           result.available_count ?? result.availableCount ??
           result.applicable_available_count ?? result.applicableAvailableCount ?? 0,
@@ -1626,6 +1649,30 @@
     }
   }
 
+  async function removeRelayHostFromPool(state, account, button) {
+    if (button?.disabled || !account?.id || !isRelayHost(account)) return;
+    if (!accountRemovalConfirmed(account)) return;
+    if (button) button.disabled = true;
+    accountManagerStatus(state, `Removing ${accountName(account)} from the Relay Pool…`);
+    try {
+      // The native Relay host profile and its local chats stay intact. Only
+      // pool membership is disabled, which is the safe equivalent of removing
+      // an invalidated host credential without orphaning its files.
+      await request(`/accounts/${encodeURIComponent(account.id)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ enabled: false }),
+      });
+      showActionToast("Source removed from pool", `${accountName(account)} is no longer used by the Relay Pool. Its Relay host profile and local chats were kept.`);
+      state.accounts = await loadAccounts();
+      renderAccountManager(state);
+      if (state.menu) await refreshMenu(state.menu);
+    } catch (error) {
+      accountManagerStatus(state, `Could not remove source from pool: ${error.message}`);
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
   async function cancelManagedPending(state, account, button) {
     if (button?.disabled || !account?.id) return;
     if (button) button.disabled = true;
@@ -1712,6 +1759,20 @@
       section.append(make("div", "codex-mux-win-account-resets-summary", "Loading reset credits…"));
       return section;
     }
+    const errorCode = String(payload.error_code || payload.errorCode || "").trim().toLowerCase();
+    if (errorCode) {
+      const message = errorCode === "auth_invalidated"
+        ? "Authentication expired or was revoked. Sign in again to refresh reset credits."
+        : String(payload.message || "Reset credits are temporarily unavailable.");
+      section.append(make("div", "codex-mux-win-account-resets-summary", message));
+      if (errorCode === "auth_invalidated" && typeof options.onReauth === "function") {
+        const action = make("button", "codex-mux-win-account-action codex-mux-win-account-action-primary", "Sign in again");
+        action.type = "button";
+        action.addEventListener("click", () => { void options.onReauth(action); });
+        section.append(action);
+      }
+      return section;
+    }
     const available = Number(payload.available_count ?? payload.availableCount ?? 0);
     const applicable = Number(payload.applicable_available_count ?? payload.applicableAvailableCount ?? available);
     const credits = Array.isArray(payload.credits) ? payload.credits : [];
@@ -1765,10 +1826,30 @@
       if (!host.isConnected || state.resetRenderVersion !== renderVersion) return;
       host.replaceChildren(renderAccountResetSection(account, payload, "", {
         onUse: (credit, button) => redeemAccountReset(state, account, host, renderVersion, credit, button),
+        onReauth: (button) => reauthenticateAccount(state, account, host, renderVersion, button),
       }));
     } catch (error) {
       if (!host.isConnected || state.resetRenderVersion !== renderVersion) return;
       host.replaceChildren(renderAccountResetSection(account, null, error.message));
+    }
+  }
+
+  async function reauthenticateAccount(state, account, host, renderVersion, button) {
+    if (button?.disabled || !account?.id || !state?.menu) return;
+    if (button) button.disabled = true;
+    try {
+      const result = await request(`/accounts/${encodeURIComponent(account.id)}/login`, {
+        method: "POST",
+        body: JSON.stringify({ mode: "chatgpt" }),
+      });
+      await showBrowserLogin(state.menu, account, result.login || {}, state);
+      if (host?.isConnected && state.resetRenderVersion === renderVersion) {
+        await loadAccountResetSection(state, account, host, renderVersion);
+      }
+    } catch (error) {
+      showActionToast("Could not start sign-in", error.message, true);
+    } finally {
+      if (button) button.disabled = false;
     }
   }
 
@@ -2046,7 +2127,9 @@
   function managerStatus(account, quota) {
     if (!account?.connected) return hasPendingLogin(account) ? "Sign-in pending" : "Not connected";
     if (account.error && quota == null) return "Connection error";
-    if (account.rateLimitError && quota == null) return "Quota unavailable";
+    if (account.rateLimitError && quota == null) {
+      return accountAuthInvalidated(account) ? "Sign in required" : "Quota pending verification";
+    }
     if (quota == null) return "Quota updating";
     if (quota <= 0) return "Quota depleted";
     return "Connected";
@@ -2055,7 +2138,7 @@
   function managerStatusClass(status) {
     return status === "Connected" ? ""
       : status === "Quota depleted" ? " codex-mux-win-account-card-status-depleted"
-        : status === "Quota updating" ? " codex-mux-win-account-card-status-updating"
+        : status === "Quota updating" || status === "Quota pending verification" ? " codex-mux-win-account-card-status-updating"
           : " codex-mux-win-account-card-status-error";
   }
 
@@ -2070,16 +2153,24 @@
     const accounts = Array.isArray(state.accounts) ? state.accounts : [];
     const connected = connectedAccounts(accounts);
     const pool = poolPresentation(accounts, null);
-    const known = pool.connected > 0 && pool.known > 0;
+    // The short Codex window is the actionable capacity for a pool. The
+    // weekly window remains visible on each source, but must never be allowed
+    // to become the headline number users use to decide whether they can run a
+    // task now.
+    const shortWindows = connected.map(shortestUsageWindow).filter(Boolean);
+    const shortKnown = shortWindows.length;
+    const shortRemaining = shortWindows.reduce((sum, window) => sum + window.remainingPercent, 0);
+    const shortMaximum = connected.length * 100;
+    const known = shortKnown > 0;
     const available = connected.filter((account) => {
-      const quota = remainingUsage(account);
+      const quota = shortestRemainingUsage(account);
       return quota != null && quota > 0;
     }).length;
-    const poolValue = known ? `${Math.round(pool.remaining)}% / ${Math.round(pool.maximum)}%` : "Updating…";
-    const status = pool.unknown > 0 ? "Quota updating" : available > 0 ? "Ready" : "Needs attention";
+    const poolValue = known ? `${Math.round(shortRemaining)}% / ${Math.round(shortMaximum)}%` : "Updating…";
+    const status = shortKnown < connected.length ? "Quota updating" : available > 0 ? "Ready" : "Needs attention";
     const statusClass = status === "Ready" ? "" : status === "Quota updating" ? " codex-mux-win-manager-overview-dot-updating" : " codex-mux-win-manager-overview-dot-attention";
     state.overview.replaceChildren(
-      managerOverviewCard("Pool quota", poolValue, `${pool.known}/${pool.connected} sources verified`),
+      managerOverviewCard("Pool quota (5H)", poolValue, `${shortKnown}/${connected.length} sources verified · shortest window`),
       managerOverviewCard("Connected", String(pool.connected), "private sources"),
       managerOverviewCard("Available now", String(available), `${pool.connected} connected`),
       (() => {
@@ -2091,7 +2182,8 @@
   }
 
   function renderAccountManager(state) {
-    const accounts = Array.isArray(state.accounts) ? state.accounts : [];
+    const accounts = (Array.isArray(state.accounts) ? state.accounts : [])
+      .filter((account) => account?.enabled !== false);
     state.resetRenderVersion = (state.resetRenderVersion || 0) + 1;
     const renderVersion = state.resetRenderVersion;
     renderManagerOverview(state);
@@ -2104,7 +2196,11 @@
       return;
     }
     accounts.forEach((account) => {
-      const quota = remainingUsage(account);
+      // Manage pool sources is intentionally 5H-first. The scheduler still
+      // uses the conservative effective capacity internally, while this
+      // surface answers the user's immediate question: how much short-window
+      // quota is left right now?
+      const quota = shortestRemainingUsage(account);
       const statusLabel = managerStatus(account, quota);
       const card = make("article", `codex-mux-win-account-card${quota != null && quota <= 0 ? " codex-mux-win-account-card-depleted" : ""}`);
       card.setAttribute("data-account-id", account.id || "");
@@ -2154,17 +2250,38 @@
         host.title = "This private Relay home is kept as the app host and cannot be removed";
         footer.append(host);
       } else if (isRelayPrimary(account)) {
-        const authority = make("button", "codex-mux-win-account-action", "Relay authority");
-        authority.type = "button";
-        authority.disabled = true;
-        authority.title = "This subscription is the selected Relay task authority and cannot be removed while it owns the active logical worker";
-        footer.append(authority);
+        if (!account.connected && !hasPendingLogin(account)) {
+          const signin = make("button", "codex-mux-win-account-action codex-mux-win-account-action-primary", "Sign in");
+          signin.type = "button";
+          signin.title = "Re-authenticate the Relay authority in the official ChatGPT browser flow";
+          signin.addEventListener("click", () => { void startExistingSubscription(state.menu, account, signin, state); });
+          footer.append(signin);
+        } else {
+          const authority = make("button", "codex-mux-win-account-action", "Relay authority");
+          authority.type = "button";
+          authority.disabled = true;
+          authority.title = "This subscription is the selected Relay task authority and cannot be removed while it owns the active logical worker";
+          footer.append(authority);
+        }
       } else if (account.connected) {
-        const select = make("button", "codex-mux-win-account-action codex-mux-win-account-action-primary", "Use as authority");
-        select.type = "button";
-        select.title = "Make this connected subscription the Relay task authority; active turns must finish first";
-        select.addEventListener("click", () => { void setPrimaryAccount(state, account, select); });
-        footer.append(select);
+        if (isRelayHost(account) && accountAuthInvalidated(account)) {
+          const signin = make("button", "codex-mux-win-account-action codex-mux-win-account-action-primary", "Sign in again");
+          signin.type = "button";
+          signin.title = "Refresh the Relay host credentials in the official ChatGPT browser flow";
+          signin.addEventListener("click", () => { void startExistingSubscription(state.menu, account, signin, state); });
+          footer.append(signin);
+          const remove = make("button", "codex-mux-win-account-action codex-mux-win-account-action-danger", "Remove");
+          remove.type = "button";
+          remove.title = "Remove this invalidated credential from the Relay Pool while keeping the Relay host profile and chats";
+          remove.addEventListener("click", () => { void removeRelayHostFromPool(state, account, remove); });
+          footer.append(remove);
+        } else {
+          const select = make("button", "codex-mux-win-account-action codex-mux-win-account-action-primary", "Use as authority");
+          select.type = "button";
+          select.title = "Make this connected subscription the Relay task authority; active turns must finish first";
+          select.addEventListener("click", () => { void setPrimaryAccount(state, account, select); });
+          footer.append(select);
+        }
         if (isRelayHost(account)) {
           const host = make("button", "codex-mux-win-account-action", "Relay host");
           host.type = "button";
@@ -2231,7 +2348,7 @@
     add.addEventListener("click", async () => {
       if (add.disabled) return;
       try {
-        await startSubscription(menu, add, state.accounts);
+        await startSubscription(menu, add, state.accounts, state);
         state.accounts = await loadAccounts();
         renderAccountManager(state);
       } catch (error) {
@@ -2500,6 +2617,17 @@
     session.completed = true;
     closeLogin(session);
     showLoginSuccess(account);
+    // Refresh an open Manage pool sources dialog as soon as the browser
+    // callback confirms the account; users should not need to close/reopen it.
+    const managerState = session.managerState;
+    if (managerState?.list?.isConnected) {
+      void loadAccounts().then((accounts) => {
+        if (managerState.dialog?.isConnected && activeAccountManager === managerState) {
+          managerState.accounts = accounts;
+          renderAccountManager(managerState);
+        }
+      }).catch(() => {});
+    }
     schedule();
     return true;
   }
@@ -2596,7 +2724,7 @@
     }
   }
 
-  async function showBrowserLogin(menu, account, login) {
+  async function showBrowserLogin(menu, account, login, managerState = null) {
     closeLogin();
     const authorizationURL = trustedVerificationURL(readLoginValue(login, "authUrl", "auth_url"));
     const loginId = readLoginValue(login, "loginId", "login_id");
@@ -2616,6 +2744,7 @@
       completed: false,
       loginId,
       menu,
+      managerState,
       nativeLoginId: null,
       externalBrowser: false,
       opening: false,
@@ -2690,7 +2819,7 @@
     }
   }
 
-  async function startSubscription(menu, button, currentAccounts) {
+  async function startSubscription(menu, button, currentAccounts, managerState = null) {
     if (button.disabled) return;
     button.disabled = true;
     const caption = button.lastElementChild;
@@ -2716,7 +2845,7 @@
         throw error;
       }
       try {
-        await showBrowserLogin(menu, account, result.login || {});
+        await showBrowserLogin(menu, account, result.login || {}, managerState);
       } catch (error) {
         await cancelPendingAccount(account.id, readLoginValue(result.login, "loginId", "login_id")).catch(() => {});
         throw error;
@@ -2725,6 +2854,29 @@
     } finally {
       button.disabled = false;
       if (caption) caption.textContent = "Add another subscription";
+    }
+  }
+
+  async function startExistingSubscription(menu, account, button, state = null) {
+    if (button?.disabled || !account?.id) return;
+    if (button) button.disabled = true;
+    if (state) accountManagerStatus(state, `Opening official sign-in for ${accountName(account)}…`);
+    try {
+      const result = await request(`/accounts/${encodeURIComponent(account.id)}/login`, {
+        method: "POST",
+        body: JSON.stringify({ mode: "chatgpt" }),
+      });
+      await showBrowserLogin(menu, account, result.login || {}, state);
+      if (state) {
+        state.accounts = await loadAccounts();
+        renderAccountManager(state);
+      }
+      await refreshMenu(menu);
+    } catch (error) {
+      if (state) accountManagerStatus(state, `Could not start sign-in: ${error.message}`);
+      else setMenuStatus(menu, `Could not start sign-in: ${error.message}`);
+    } finally {
+      if (button) button.disabled = false;
     }
   }
 

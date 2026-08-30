@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -127,6 +128,80 @@ func TestProductionTransportWaitsBeyondLegacyThreeSecondCutoff(t *testing.T) {
 	}
 }
 
+func TestTransactionalTransportEmitsNativeIdleHeartbeatDuringQuietUpstream(t *testing.T) {
+	store, _ := gatewayTestStore(t, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(writer, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"quiet-response\"}}\n\n")
+		if flusher, ok := writer.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		// This exceeds one Relay heartbeat interval and models a real model turn
+		// that is still working without producing visible output.
+		time.Sleep(1500 * time.Millisecond)
+		_, _ = io.WriteString(writer, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"after-wait\"}\n\n")
+		_, _ = io.WriteString(writer, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"quiet-response\",\"status\":\"completed\"}}\n\n")
+	}))
+	defer upstream.Close()
+
+	gateway := httptest.NewServer(&Transport{
+		Store: store, UpstreamURL: upstream.URL, Client: upstream.Client(),
+		BalancedPool: true, TransactionalResponses: true,
+	})
+	defer gateway.Close()
+
+	status, body := sendGatewayRequest(t, gateway, "transactional-quiet-heartbeat")
+	if status != http.StatusOK || !strings.Contains(body, "event: relay.keepalive") || !strings.Contains(body, `"type":"relay.keepalive"`) {
+		t.Fatalf("quiet transactional stream did not emit native heartbeat: status=%d body=%q", status, body)
+	}
+	if !strings.Contains(body, "after-wait") || !strings.Contains(body, "response.completed") {
+		t.Fatalf("quiet transactional stream lost its terminal response: %q", body)
+	}
+}
+
+func TestFutureV1EndpointIsForwardedThroughTheSharedPool(t *testing.T) {
+	store, ids := gatewayTestStore(t, 2)
+	var gotMethod, gotPath, gotQuery, gotAccount, gotBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		gotMethod, gotPath, gotQuery = request.Method, request.URL.Path, request.URL.RawQuery
+		gotAccount, gotBody = request.Header.Get("ChatGPT-Account-ID"), string(body)
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"future":true,"opaque":"ok"}`)
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{
+		Store: store, UpstreamURL: upstream.URL + "/backend-api/codex/responses",
+		Client: upstream.Client(), LocalBearerToken: "future-token", BalancedPool: true,
+	})
+	defer gateway.Close()
+	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/future/endpoint?mode=native", strings.NewReader(`{"input":"opaque"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer future-token")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || string(body) != `{"future":true,"opaque":"ok"}` {
+		t.Fatalf("future endpoint response status=%d body=%q", response.StatusCode, body)
+	}
+	if gotMethod != http.MethodPost || gotPath != "/backend-api/codex/future/endpoint" || gotQuery != "mode=native" || gotAccount == "" || gotBody != `{"input":"opaque"}` {
+		t.Fatalf("future endpoint was not mapped opaquely: method=%q path=%q query=%q account=%q body=%q", gotMethod, gotPath, gotQuery, gotAccount, gotBody)
+	}
+	if len(store.PoolState().ActiveLeases) != 0 || store.PoolState().ActiveSourceID == "" || len(ids) != 2 {
+		t.Fatalf("future endpoint retained invalid pool state: %#v", store.PoolState())
+	}
+}
+
 func TestTransportCompletesCleanCloseAfterOutputItemBoundary(t *testing.T) {
 	store, _ := gatewayTestStore(t, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -153,6 +228,29 @@ func sendGatewayRequest(t *testing.T, server *httptest.Server, id string) (int, 
 func sendGatewayRequestBody(t *testing.T, server *httptest.Server, id, requestBody string) (int, string) {
 	t.Helper()
 	request, err := http.NewRequestWithContext(context.Background(), http.MethodPost, server.URL+"/v1/responses", bytes.NewBufferString(requestBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Client-Request-Id", id)
+	request.Header.Set("Session-Id", "session-one")
+	request.Header.Set("Thread-Id", "thread-one")
+	request.Header.Set("Authorization", "Bearer public-relay-token")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response.StatusCode, string(body)
+}
+
+func sendCompactRequest(t *testing.T, server *httptest.Server, id, requestBody string) (int, string) {
+	t.Helper()
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodPost, server.URL+"/v1/responses/compact?mode=native", bytes.NewBufferString(requestBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -529,6 +627,168 @@ func TestTransportRetriesEarlyStreamQuotaButNotLateQuota(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(body), "usage_limit") || !strings.Contains(body, "relay_pool_recovery_required") {
 		t.Fatalf("late quota leaked upstream account error instead of pool recovery event: %q", body)
+	}
+}
+
+func TestTransactionalTransportRetriesLateQuotaWithoutLeakingPartialOutput(t *testing.T) {
+	store, _ := gatewayTestStore(t, 2)
+	var used []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		account := request.Header.Get("ChatGPT-Account-ID")
+		used = append(used, account)
+		writer.Header().Set("Content-Type", "text/event-stream")
+		if account == "upstream-1" {
+			_, _ = io.WriteString(writer, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"discard-me\"}\n\n")
+			_, _ = io.WriteString(writer, "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"usage_limit\"}}}\n\n")
+			return
+		}
+		_, _ = io.WriteString(writer, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"winner\"}\n\n")
+		_, _ = io.WriteString(writer, successfulSSE())
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{
+		Store: store, UpstreamURL: upstream.URL, Client: upstream.Client(),
+		BalancedPool: true, TransactionalResponses: true,
+	})
+	defer gateway.Close()
+
+	status, body := sendGatewayRequest(t, gateway, "transactional-late-quota")
+	if status != http.StatusOK || fmt.Sprint(used) != "[upstream-1 upstream-2]" {
+		t.Fatalf("late quota did not fail over atomically: status=%d used=%v body=%q", status, used, body)
+	}
+	if strings.Contains(body, "discard-me") || strings.Contains(body, "recovery_required") || !strings.Contains(body, "winner") || !strings.Contains(body, "response.completed") {
+		t.Fatalf("transaction leaked failed attempt or omitted winner: %q", body)
+	}
+	if pool := store.PoolState(); len(pool.ActiveLeases) != 0 {
+		t.Fatalf("transactional completion retained a lease: %#v", pool.ActiveLeases)
+	}
+	if task := store.TaskRecords()["thread-one"]; task.RecoveryState != "" {
+		t.Fatalf("transactional failover created recovery state: %#v", task)
+	}
+}
+
+func TestTransactionalTransportRetriesBufferedToolCallExactlyOnce(t *testing.T) {
+	store, _ := gatewayTestStore(t, 2)
+	var used []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		account := request.Header.Get("ChatGPT-Account-ID")
+		used = append(used, account)
+		writer.Header().Set("Content-Type", "text/event-stream")
+		if account == "upstream-1" {
+			_, _ = io.WriteString(writer, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"name\":\"must_not_run\"}}\n\n")
+			_, _ = io.WriteString(writer, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial")
+			return
+		}
+		_, _ = io.WriteString(writer, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"name\":\"run_once\"}}\n\n")
+		_, _ = io.WriteString(writer, successfulSSE())
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{
+		Store: store, UpstreamURL: upstream.URL, Client: upstream.Client(),
+		BalancedPool: true, TransactionalResponses: true,
+	})
+	defer gateway.Close()
+
+	status, body := sendGatewayRequest(t, gateway, "transactional-tool-call")
+	if status != http.StatusOK || fmt.Sprint(used) != "[upstream-1 upstream-2]" {
+		t.Fatalf("tool transaction did not retry: status=%d used=%v body=%q", status, used, body)
+	}
+	if strings.Contains(body, "must_not_run") || strings.Count(body, "run_once") != 1 || strings.Contains(body, "recovery_required") {
+		t.Fatalf("tool transaction was not published exactly once: %q", body)
+	}
+}
+
+func TestTransactionalTransportPreservesNativeCommandPayload(t *testing.T) {
+	store, _ := gatewayTestStore(t, 1)
+	const command = `powershell.exe -NoProfile -Command "Get-ChildItem -LiteralPath C:\\work"`
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(writer, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"local_shell_call\",\"status\":\"completed\",\"action\":{\"type\":\"exec\",\"command\":"+strconv.Quote(command)+"}}}\n\n")
+		_, _ = io.WriteString(writer, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{
+		Store: store, UpstreamURL: upstream.URL, Client: upstream.Client(),
+		BalancedPool: true, TransactionalResponses: true,
+	})
+	defer gateway.Close()
+
+	status, body := sendGatewayRequest(t, gateway, "native-command-payload")
+	if status != http.StatusOK || strings.Count(body, strconv.Quote(command)) != 1 {
+		t.Fatalf("native command payload was changed or hidden: status=%d body=%q", status, body)
+	}
+	if strings.Contains(body, `"command":""`) {
+		t.Fatalf("native command payload was reduced to an empty command: %q", body)
+	}
+}
+
+func TestTransportForwardsNativeCompactionOpaque(t *testing.T) {
+	store, _ := gatewayTestStore(t, 1)
+	const requestBody = `{"input":[{"type":"response.compaction","encrypted_content":"opaque-request-do-not-parse"}]}`
+	const responseBody = "{\n  \"output\": [{\"type\":\"response.compaction\",\"encrypted_content\":\"opaque-response-byte-for-byte\"}]\n}\n"
+	var gotPath, gotBody, gotThread, gotAccept string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		gotPath = request.URL.Path
+		payload, _ := io.ReadAll(request.Body)
+		gotBody = string(payload)
+		gotThread = request.Header.Get("Thread-Id")
+		gotAccept = request.Header.Get("Accept")
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(writer, responseBody)
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{
+		Store: store, UpstreamURL: upstream.URL + "/backend-api/codex/responses/compact", Client: upstream.Client(),
+		BalancedPool: true, TransactionalResponses: true,
+	})
+	defer gateway.Close()
+
+	status, body := sendCompactRequest(t, gateway, "native-compact", requestBody)
+	if status != http.StatusOK || body != responseBody {
+		t.Fatalf("native compact response changed: status=%d body=%q", status, body)
+	}
+	if gotPath != "/backend-api/codex/responses/compact" || gotBody != requestBody || gotThread != "thread-one" || gotAccept != "application/json" {
+		t.Fatalf("native compact request changed: path=%q body=%q thread=%q accept=%q", gotPath, gotBody, gotThread, gotAccept)
+	}
+	if len(store.PoolState().ActiveLeases) != 0 {
+		t.Fatalf("native compact retained a pool lease: %#v", store.PoolState().ActiveLeases)
+	}
+}
+
+func TestTransportNativeCompactionFailsOverBeforePublication(t *testing.T) {
+	store, ids := gatewayTestStore(t, 2)
+	const requestBody = `{"input":[{"type":"response.compaction","encrypted_content":"opaque"}]}`
+	const winner = `{"output":[{"type":"response.compaction","encrypted_content":"winner"}]}`
+	var used []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		account := request.Header.Get("ChatGPT-Account-ID")
+		used = append(used, account)
+		writer.Header().Set("Content-Type", "application/json")
+		if account == "upstream-1" {
+			writer.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(writer, `{"error":{"code":"usage_limit","message":"quota exhausted"}}`)
+			return
+		}
+		_, _ = io.WriteString(writer, winner)
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{
+		Store: store, UpstreamURL: upstream.URL, Client: upstream.Client(),
+		BalancedPool: true, TransactionalResponses: true,
+	})
+	defer gateway.Close()
+
+	status, body := sendCompactRequest(t, gateway, "native-compact-failover", requestBody)
+	if status != http.StatusOK || body != winner || fmt.Sprint(used) != "[upstream-1 upstream-2]" {
+		t.Fatalf("native compact did not fail over atomically: status=%d used=%v body=%q", status, used, body)
+	}
+	pool := store.PoolState()
+	if pool.Sources[ids[0]].MembershipState != state.SourceDepleted || pool.Sources[ids[1]].MembershipState != state.SourceActive {
+		t.Fatalf("native compact did not update pool membership: %#v", pool.Sources)
+	}
+	if task := store.TaskRecords()["thread-one"]; task.RecoveryState != "" || task.ActiveLeaseID != "" {
+		t.Fatalf("native compact created a task restart/recovery marker: %#v", task)
 	}
 }
 
