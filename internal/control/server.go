@@ -27,6 +27,15 @@ func New(address, token string, multiplexer *mux.Multiplexer, uiTests bool) *Ser
 	server := &Server{token: token, mux: multiplexer, uiTests: uiTests}
 	router := http.NewServeMux()
 	router.HandleFunc("/v1/health", server.health)
+	// Cockpit-inspired lifecycle/control-plane endpoints. These are additive
+	// to the existing management routes and deliberately expose only
+	// pool-level, credential-free projections.
+	router.HandleFunc("/v1/control/healthz", server.controlLiveness)
+	router.HandleFunc("/v1/control/readyz", server.controlReadiness)
+	router.HandleFunc("/v1/control/snapshot", server.controlSnapshot)
+	router.HandleFunc("/v1/control/pool", server.controlPool)
+	router.HandleFunc("/v1/control/diagnostics", server.controlDiagnostics)
+	router.HandleFunc("/v1/control/events", server.controlEvents)
 	router.HandleFunc("/v1/accounts", server.accounts)
 	router.HandleFunc("/v1/accounts/", server.accountAction)
 	router.HandleFunc("/v1/thread-account", server.threadAccount)

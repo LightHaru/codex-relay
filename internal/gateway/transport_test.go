@@ -161,11 +161,18 @@ func TestTransactionalTransportEmitsNativeIdleHeartbeatDuringQuietUpstream(t *te
 
 func TestFutureV1EndpointIsForwardedThroughTheSharedPool(t *testing.T) {
 	store, ids := gatewayTestStore(t, 2)
-	var gotMethod, gotPath, gotQuery, gotAccount, gotBody string
+	var gotMethod, gotPath, gotQuery, gotAccount, gotBody, gotTrace string
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		body, _ := io.ReadAll(request.Body)
 		gotMethod, gotPath, gotQuery = request.Method, request.URL.Path, request.URL.RawQuery
 		gotAccount, gotBody = request.Header.Get("ChatGPT-Account-ID"), string(body)
+		gotTrace = request.Header.Get("X-Relay-Test")
+		if request.Header.Get("Cookie") != "" || request.Header.Get("X-Api-Key") != "" {
+			t.Errorf("credential-bearing request headers leaked to opaque endpoint")
+		}
+		if request.Header.Get("Authorization") == "Bearer future-token" {
+			t.Errorf("local Relay bearer token leaked to upstream")
+		}
 		writer.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(writer, `{"future":true,"opaque":"ok"}`)
 	}))
@@ -180,6 +187,10 @@ func TestFutureV1EndpointIsForwardedThroughTheSharedPool(t *testing.T) {
 		t.Fatal(err)
 	}
 	request.Header.Set("Authorization", "Bearer future-token")
+	request.Header.Set("ChatGPT-Account-ID", "attacker-account")
+	request.Header.Set("Cookie", "session=secret")
+	request.Header.Set("X-Api-Key", "do-not-forward")
+	request.Header.Set("X-Relay-Test", "preserve-me")
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
 	response, err := http.DefaultClient.Do(request)
@@ -194,11 +205,76 @@ func TestFutureV1EndpointIsForwardedThroughTheSharedPool(t *testing.T) {
 	if response.StatusCode != http.StatusOK || string(body) != `{"future":true,"opaque":"ok"}` {
 		t.Fatalf("future endpoint response status=%d body=%q", response.StatusCode, body)
 	}
-	if gotMethod != http.MethodPost || gotPath != "/backend-api/codex/future/endpoint" || gotQuery != "mode=native" || gotAccount == "" || gotBody != `{"input":"opaque"}` {
-		t.Fatalf("future endpoint was not mapped opaquely: method=%q path=%q query=%q account=%q body=%q", gotMethod, gotPath, gotQuery, gotAccount, gotBody)
+	if gotMethod != http.MethodPost || gotPath != "/backend-api/codex/future/endpoint" || gotQuery != "mode=native" || gotAccount == "" || gotBody != `{"input":"opaque"}` || gotTrace != "preserve-me" {
+		t.Fatalf("future endpoint was not mapped opaquely: method=%q path=%q query=%q account=%q body=%q trace=%q", gotMethod, gotPath, gotQuery, gotAccount, gotBody, gotTrace)
 	}
 	if len(store.PoolState().ActiveLeases) != 0 || store.PoolState().ActiveSourceID == "" || len(ids) != 2 {
 		t.Fatalf("future endpoint retained invalid pool state: %#v", store.PoolState())
+	}
+}
+
+func TestFutureV1SSEEndpointIsForwardedWithoutReplay(t *testing.T) {
+	store, _ := gatewayTestStore(t, 2)
+	var calls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		calls++
+		if request.URL.Path != "/backend-api/codex/future/stream" || request.URL.RawQuery != "cursor=7" {
+			t.Fatalf("future SSE route mapping path=%q query=%q", request.URL.Path, request.URL.RawQuery)
+		}
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(writer, successfulSSE())
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{Store: store, UpstreamURL: upstream.URL + "/backend-api/codex/responses", Client: upstream.Client(), BalancedPool: true})
+	defer gateway.Close()
+	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/future/stream?cursor=7", strings.NewReader(`{"opaque":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer relay-local")
+	request.Header.Set("Accept", "text/event-stream")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), "response.completed") {
+		t.Fatalf("future SSE response status=%d body=%q", response.StatusCode, body)
+	}
+	if calls != 1 {
+		t.Fatalf("opaque SSE endpoint was replayed %d times", calls)
+	}
+}
+
+func TestOpaqueEndpointFailsClosedOnTransientUpstreamFailure(t *testing.T) {
+	store, _ := gatewayTestStore(t, 2)
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		calls++
+		http.Error(writer, `{"error":"temporary"}`, http.StatusBadGateway)
+	}))
+	defer upstream.Close()
+	gateway := httptest.NewServer(&Transport{Store: store, UpstreamURL: upstream.URL + "/backend-api/codex/responses", Client: upstream.Client(), BalancedPool: true})
+	defer gateway.Close()
+	request, err := http.NewRequest(http.MethodPost, gateway.URL+"/v1/future/mutating", strings.NewReader(`{"side_effect":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer relay-local")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("opaque transient failure status=%d, want 502", response.StatusCode)
+	}
+	if calls != 1 {
+		t.Fatalf("opaque endpoint was retried %d times; unknown routes must fail closed", calls)
 	}
 }
 

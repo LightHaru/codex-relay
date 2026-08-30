@@ -57,10 +57,14 @@ const (
 )
 
 type Transport struct {
-	Store            *state.Store
-	Client           *http.Client
-	UpstreamURL      string
-	ModelsURL        string
+	Store       *state.Store
+	Client      *http.Client
+	UpstreamURL string
+	ModelsURL   string
+	// EndpointRegistry makes the reviewed upstream surface explicit. Unknown
+	// /v1/* routes remain opaque and fail closed (no replay/failover) unless an
+	// embedder registers a reviewed capability.
+	EndpointRegistry EndpointRegistry
 	LeaseTTL         time.Duration
 	LocalBearerToken string
 	// BalancedPool keeps the public Relay API/task authority singular while
@@ -228,6 +232,8 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 	// same pooled credential and opaque request bytes instead of being rejected
 	// as a local 404.
 	unknownUpstreamRoute := strings.HasPrefix(request.URL.Path, "/v1/") && !knownResponsesRoute && !knownModelsRoute
+	capability := t.EndpointRegistry.Lookup(request.Method, request.URL.Path)
+	allowEndpointRetry := !t.DisableFailover && capability.RetryPolicy == RetryBeforeCommit
 	if !knownResponsesRoute && !knownModelsRoute && !unknownUpstreamRoute {
 		http.NotFound(writer, request)
 		return
@@ -331,7 +337,7 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 			}
 			var credentialErr *sourceCredentialError
 			if errors.As(dispatchErr, &credentialErr) {
-				if t.DisableFailover {
+				if !allowEndpointRetry {
 					_ = t.Store.AbortPoolLease(lease.LeaseID, "compatibility-profile-unknown")
 					t.fail(writer, http.StatusServiceUnavailable, "compatibility_profile_review", "Relay Pool compatibility profile requires review")
 					return
@@ -344,7 +350,7 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 				t.fail(writer, http.StatusTooManyRequests, "pool_exhausted", "Relay Pool has exhausted every usable quota source")
 				return
 			}
-			if !t.DisableFailover && retryableTransportError(dispatchErr) {
+			if allowEndpointRetry && retryableTransportError(dispatchErr) {
 				failedSource := lease.SourceID
 				fingerprint := classifyTransportError(dispatchErr)
 				lease, err = t.Store.MarkPoolTransientFailure(lease.LeaseID, failedSource, fingerprint)
@@ -372,7 +378,7 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 			response.Body.Close()
 			if !isQuotaResponse(response.StatusCode, responseBody) {
 				if isCredentialResponse(response.StatusCode, responseBody) {
-					if t.DisableFailover {
+					if !allowEndpointRetry {
 						_ = t.Store.AbortPoolLease(lease.LeaseID, "compatibility-profile-unknown")
 						t.fail(writer, http.StatusServiceUnavailable, "compatibility_profile_review", "Relay Pool compatibility profile requires review")
 						return
@@ -385,7 +391,7 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 					t.fail(writer, http.StatusTooManyRequests, "pool_exhausted", "Relay Pool has exhausted every usable quota source")
 					return
 				}
-				if !t.DisableFailover && retryableUpstreamStatus(response.StatusCode) {
+				if allowEndpointRetry && retryableUpstreamStatus(response.StatusCode) {
 					failedSource := lease.SourceID
 					fingerprint := fmt.Sprintf("upstream_http_%d", response.StatusCode)
 					lease, err = t.Store.MarkPoolTransientFailure(lease.LeaseID, failedSource, fmt.Sprintf("upstream HTTP %d before response commit", response.StatusCode))
@@ -407,7 +413,7 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 				t.fail(writer, http.StatusBadGateway, "upstream_http_error", safeUpstreamHTTPError(response.StatusCode, responseBody))
 				return
 			}
-			if t.DisableFailover {
+			if !allowEndpointRetry {
 				_ = t.Store.AbortPoolLease(lease.LeaseID, "compatibility-profile-unknown")
 				t.fail(writer, http.StatusServiceUnavailable, "compatibility_profile_review", "Relay Pool compatibility profile requires review")
 				return
@@ -428,7 +434,7 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 					_ = t.Store.AbortPoolLease(lease.LeaseID, "")
 					return
 				}
-				if !t.DisableFailover {
+				if allowEndpointRetry {
 					failedSource := lease.SourceID
 					fingerprint := classifyTransportError(readErr)
 					lease, err = t.Store.MarkPoolTransientFailure(lease.LeaseID, failedSource, fingerprint)
@@ -446,7 +452,7 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 				return
 			}
 			if isQuotaResponse(response.StatusCode, responseBody) {
-				if t.DisableFailover {
+				if !allowEndpointRetry {
 					_ = t.Store.AbortPoolLease(lease.LeaseID, "compatibility-profile-unknown")
 					t.fail(writer, http.StatusServiceUnavailable, "compatibility_profile_review", "Relay Pool compatibility profile requires review")
 					return
@@ -494,7 +500,7 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 					_ = t.Store.AbortPoolLease(lease.LeaseID, "future-endpoint-stream-ended")
 					return
 				}
-				if !t.DisableFailover {
+				if allowEndpointRetry {
 					failedSource := lease.SourceID
 					lease, err = t.Store.MarkPoolTransientFailure(lease.LeaseID, failedSource, classifyTransportError(streamErr))
 					if err == nil {
@@ -516,7 +522,7 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 					_ = t.Store.AbortPoolLease(lease.LeaseID, "")
 					return
 				}
-				if !t.DisableFailover {
+				if allowEndpointRetry {
 					failedSource := lease.SourceID
 					lease, err = t.Store.MarkPoolTransientFailure(lease.LeaseID, failedSource, classifyTransportError(readErr))
 					if err == nil {
@@ -532,7 +538,7 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 				t.fail(writer, http.StatusBadGateway, "response_too_large", "Relay Pool upstream endpoint response is too large")
 				return
 			}
-			if isQuotaResponse(response.StatusCode, responseBody) && !t.DisableFailover {
+			if isQuotaResponse(response.StatusCode, responseBody) && allowEndpointRetry {
 				lease, err = t.Store.MarkPoolQuotaRejected(lease.LeaseID, lease.SourceID, "upstream endpoint quota rejection", 0)
 				if err == nil {
 					continue
@@ -571,7 +577,7 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 			responseBody, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 			response.Body.Close()
 			if isQuotaResponse(response.StatusCode, responseBody) {
-				if t.DisableFailover {
+				if !allowEndpointRetry {
 					_ = t.Store.AbortPoolLease(lease.LeaseID, "compatibility-profile-unknown")
 					t.fail(writer, http.StatusServiceUnavailable, "compatibility_profile_review", "Relay Pool compatibility profile requires review")
 					return
@@ -618,7 +624,7 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 			return
 		}
 		var retryableStream *retryableStreamError
-		if errors.As(streamErr, &retryableStream) && !t.DisableFailover {
+		if errors.As(streamErr, &retryableStream) && allowEndpointRetry {
 			failedSource := lease.SourceID
 			lease, err = t.Store.MarkPoolTransientFailure(lease.LeaseID, failedSource, retryableStream.class)
 			if err == nil {
@@ -636,7 +642,7 @@ func (t *Transport) ServeHTTP(writer http.ResponseWriter, request *http.Request)
 			t.fail(writer, http.StatusBadGateway, "upstream_stream_error", "Relay Pool stream ended before completion (upstream stream error)")
 			return
 		}
-		if t.DisableFailover {
+		if !allowEndpointRetry {
 			_ = t.Store.AbortPoolLease(lease.LeaseID, "compatibility-profile-unknown")
 			t.fail(writer, http.StatusServiceUnavailable, "compatibility_profile_review", "Relay Pool compatibility profile requires review")
 			return
@@ -1181,7 +1187,7 @@ func readAuthFile(path string) (authFile, error) {
 func copyRequestHeaders(target, source http.Header) {
 	for key, values := range source {
 		switch strings.ToLower(key) {
-		case "authorization", "chatgpt-account-id", "host", "content-length", "connection", "proxy-connection", "cookie":
+		case "authorization", "proxy-authorization", "chatgpt-account-id", "host", "content-length", "connection", "proxy-connection", "cookie", "x-api-key", "x-auth-token", "x-access-token", "x-refresh-token", "x-session-token", "x-codex-account-id", "x-codex-auth-token", "x-relay-control-token", "x-forwarded-authorization", "x-forwarded-cookie":
 			continue
 		}
 		for _, value := range values {
