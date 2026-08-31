@@ -49,6 +49,8 @@ history contents or full account identity.
 | New and existing thread use the same authority | mux routing and resume tests | PASS |
 | Restart/crash keeps TaskRecord and canonical generation | state migration/recovery tests | PASS |
 | Post-output idle recovery with the installed real app-server | `TestUnifiedGatewayPostCommitIdleEmitsRecoverableTerminal` (real `codex.real.exe`) | PASS |
+| Native compact keeps the same live task and continuation checkpoint | `scripts/live_compact_continuity_e2e.py` with installed Relay wrapper | PASS |
+| Native command activity retains the actual command text | `scripts/live_command_visibility_e2e.py` with installed Relay wrapper | PASS |
 | Windows path, locked rollout, hash/size and symlink safety | canonical history tests | PASS |
 | Native Usage & billing stays in content column | `ui/test-windows-router-menu.cjs`; renderer fixtures | PASS |
 | Other Settings pages/sidebar remain reachable | UI bridge/fixture tests | PASS |
@@ -67,16 +69,17 @@ it is not a real-quota test.
 
 | Scenario | Required evidence | Status |
 | --- | --- | --- |
-| One short new chat with live source | sanitized request/lease/pool record and final exit code | LIVE PENDING |
+| One short new chat with live source | `live_app_server_e2e.py`; sanitized terminal and final exit code | PASS |
 | A genuinely rejected for quota, then B continues same turn | structured rejection, transition revision, same thread/session/body, no public switch | LIVE PENDING |
 | B→C and C→D, if each is genuinely rejected | each rejection and next source observed independently | LIVE PENDING |
 | Long chat across quota boundary | one task, no duplicate/lost output, canonical hash/size, no new Goal | LIVE PENDING |
 | Existing chat with canonical checkpoint | resume succeeds without external-source path error | LIVE PENDING |
 | Archived chat | one logical task, no history copy outside managed roots | LIVE PENDING |
-| Goal continuation | same Goal ID/objective/budget/status and no restart | LIVE PENDING |
+| Goal continuation | live wrapper Goal set/get with matching objective and completed turn | PASS |
 | Tool/approval boundary | no replay after side effect; recovery marker if partial | LIVE PENDING |
 | All sources depleted | one pool-level error and no leaked identity | LIVE PENDING |
-| Official Codex preservation | official process remains open; native home hash unchanged | LIVE PENDING |
+| Live quota visibility for every enabled authenticated source | `probe_live_rate_limits.py`; 7/7 structured responses | PASS |
+| Official Codex preservation | official process remains open; installer scope is limited to Relay copy | PASS |
 
 Live tests require explicit authorization, minimal prompts, no reset-credit
 consumption and no destructive actions. Store only sanitized prefixes, counts,
