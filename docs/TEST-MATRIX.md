@@ -51,6 +51,7 @@ history contents or full account identity.
 | Post-output idle recovery with the installed real app-server | `TestUnifiedGatewayPostCommitIdleEmitsRecoverableTerminal` (real `codex.real.exe`) | PASS |
 | Native compact keeps the same live task and continuation checkpoint | `scripts/live_compact_continuity_e2e.py` with installed Relay wrapper | PASS |
 | Native command activity retains the actual command text | `scripts/live_command_visibility_e2e.py` with installed Relay wrapper | PASS |
+| Production Gateway completes one authorized real-account turn and releases its lease | `TestLiveAccountPoolSmoke` (opt-in) | PASS |
 | Windows path, locked rollout, hash/size and symlink safety | canonical history tests | PASS |
 | Native Usage & billing stays in content column | `ui/test-windows-router-menu.cjs`; renderer fixtures | PASS |
 | Other Settings pages/sidebar remain reachable | UI bridge/fixture tests | PASS |
@@ -79,6 +80,7 @@ it is not a real-quota test.
 | Tool/approval boundary | no replay after side effect; recovery marker if partial | LIVE PENDING |
 | All sources depleted | one pool-level error and no leaked identity | LIVE PENDING |
 | Live quota visibility for every enabled authenticated source | `probe_live_rate_limits.py`; 7/7 structured responses | PASS |
+| Control readiness, aggregate snapshot, auth boundary, and SSE reconnect | live loopback control probe; two connect/close/reconnect cycles | PASS |
 | Official Codex preservation | official process remains open; installer scope is limited to Relay copy | PASS |
 
 Live tests require explicit authorization, minimal prompts, no reset-credit
