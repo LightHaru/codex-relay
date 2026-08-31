@@ -48,7 +48,12 @@ func syncIsolatedConfig(primaryCodexHome, isolatedCodexHome string) error {
 	}
 
 	managed := filterConfig(primaryConfig, func(section string) bool {
-		return !isProjectSection(section)
+		// Relay provider configuration is authority-local.  In particular, the
+		// isolated primary can be both the source and target during startup;
+		// copying this table as managed content and then appending the preserved
+		// target table would emit duplicate [model_providers.relay_pool]
+		// headers.  Keep it exclusively in relayProvider below.
+		return !isProjectSection(section) && !isRelayPoolProviderSection(section)
 	})
 	managed = removeTopLevelCredentialSettings(managed)
 	// MCP servers are launched by the Codex child and inherit the values from
@@ -74,18 +79,25 @@ func syncIsolatedConfig(primaryCodexHome, isolatedCodexHome string) error {
 	relayProvider := filterConfig(isolatedConfig, isRelayPoolProviderSection)
 
 	parts := []string{isolatedCredentialConfig}
-	if managed = strings.TrimSpace(managed); managed != "" {
-		if strings.TrimSpace(relayProvider) != "" {
-			// A Relay authority must never regain the native top-level
-			// model_provider assignment from the primary while its local
-			// provider block is being preserved. Keep the canonical default
-			// immediately before the shared managed settings instead.
-			managed = removeTopLevelSetting(managed, "model_provider")
-		}
-		parts = append(parts, managed)
-	}
 	if strings.TrimSpace(relayProvider) != "" {
+		// model_provider is a root-level setting.  Place the Relay default
+		// before all managed sections (forceWindowsSandboxUnelevated may append
+		// a [windows] table), so it cannot accidentally become a table field on
+		// the next sync.
+		managed = removeTopLevelSetting(managed, "model_provider")
+		// Older syncs could have emitted the assignment after an appended table
+		// header.  Remove such malformed leftovers as well before writing the
+		// canonical root assignment below.
+		managed = removeSettingAssignments(managed, "model_provider")
 		parts = append(parts, `model_provider = "relay_pool"`)
+	} else {
+		// Secondary/management homes do not own the Relay provider table. Never
+		// copy a primary Relay default into one of these homes, where it would
+		// leave model_provider = "relay_pool" without a matching definition.
+		managed = removeSettingAssignments(managed, "model_provider")
+	}
+	if managed = strings.TrimSpace(managed); managed != "" {
+		parts = append(parts, managed)
 	}
 	if relayProvider = strings.TrimSpace(relayProvider); relayProvider != "" {
 		parts = append(parts, relayProvider)
@@ -350,6 +362,30 @@ func removeTopLevelSetting(contents string, keys ...string) string {
 				if _, remove := keySet[key]; remove {
 					continue
 				}
+			}
+		}
+		builder.WriteString(line)
+		builder.WriteByte('\n')
+	}
+	return builder.String()
+}
+
+// removeSettingAssignments drops assignments regardless of their current
+// section.  It is used to clean up model_provider lines emitted by older sync
+// versions after a managed table header (where they were no longer top-level).
+func removeSettingAssignments(contents string, keys ...string) string {
+	keySet := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		keySet[key] = struct{}{}
+	}
+	var builder strings.Builder
+	for _, line := range strings.Split(contents, "\n") {
+		trimmed := strings.TrimSpace(line)
+		equal := strings.IndexByte(trimmed, '=')
+		if equal >= 0 {
+			key := strings.TrimSpace(trimmed[:equal])
+			if _, remove := keySet[key]; remove {
+				continue
 			}
 		}
 		builder.WriteString(line)

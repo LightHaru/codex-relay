@@ -1,0 +1,20 @@
+{
+  "profile_query_anchor": "async function Ibc(){let e=await Yx.safeGet(`/wham/profiles/me`);",
+  "usage_status_anchor": "let e=await Yx.safeGet(`/wham/usage`,{additionalHeaders:{\"OAI-App-Brand\":Kx.toLowerCase()}})",
+  "plugin_request_anchor": "async sendRequest(e,t,n){if(this.dispatchMessage==null)throw Error(`AppServerRequestClient is missing a message dispatcher`);return e===`config/read`?this.sendConfigReadRequest(t,n):this.enqueueRequest(e,t,e===`plugin/list`&&n?.timeoutMs==null?{...n,timeoutMs:eIi}:n)}",
+  "reset_query_anchor": "function Edi(){let e=(0,GL.c)(1),t;return e[0]===Symbol.for(`react.memo_cache_sentinel`)?(t={queryKey:[`rate-limit-reset-credits`],queryFn:Ddi,refetchInterval:sx.ONE_MINUTE,staleTime:sx.FIVE_SECONDS},e[0]=t):t=e[0],fx(t)}",
+  "reset_mutation_anchor": "function Odi(){let e=(0,GL.c)(3),t=lx(),n=HE(),r;return e[0]!==n||e[1]!==t?(r={mutationFn:kdi,onSuccess:(e,r)=>{let{creditId:i}=r,a=e.code;if(a===`reset`||a===`already_redeemed`){let n=e.code===`reset`?e.credit?.id??i:i;t.setQueryData([`rate-limit-reset-credits`],e=>Qui(e,a,n))}Promise.all([n([`rate-limit-status`]),n([`rate-limit-reset-credits`])])}},e[0]=n,e[1]=t,e[2]=r):r=e[2],mx(r)}",
+  "reset_header_anchor": "let ve;t[46]===ge?ve=t[47]:(ve=(0,gZ.jsxs)(iR,{children:[ge,_e]}),t[46]=ge,t[47]=ve);",
+  "selected_usage_anchor": "let y=v;if(g!=null){",
+  "profile_query_replacement": "async function Ibc(){let e=await(globalThis.CodexMuxWindows?.profileData?.()??Yx.safeGet(`/wham/profiles/me`));",
+  "usage_status_replacement": "let e=typeof globalThis.CodexMuxWindows?.usageStatus===`function`?await globalThis.CodexMuxWindows.usageStatus():{}",
+  "plugin_request_replacement": "async sendRequest(e,t,n){t=globalThis.CodexMuxWindows?.scopePluginRequest?.(e,t)??t;if(this.dispatchMessage==null)throw Error(`AppServerRequestClient is missing a message dispatcher`);return e===`config/read`?this.sendConfigReadRequest(t,n):this.enqueueRequest(e,t,e===`plugin/list`&&n?.timeoutMs==null?{...n,timeoutMs:eIi}:n)}",
+  "reset_query_replacement": "function Edi(){let n=(0,gZ.useSyncExternalStore)(e=>globalThis.CodexMuxWindows?.subscribeReset?.(e)??(()=>{}),()=>globalThis.CodexMuxWindows?.getResetAccountId?.()??null,()=>null);return fx({queryKey:[`rate-limit-reset-credits`,n??`primary`],queryFn:()=>globalThis.CodexMuxWindows?.rateLimitResets?.(n??`primary`)??Ddi(),refetchInterval:sx.ONE_MINUTE,staleTime:sx.FIVE_SECONDS})}",
+  "reset_mutation_replacement": "function Odi(){let e=lx(),t=HE(),n=globalThis.CodexMuxWindows?.getResetAccountId?.()??null,r=[`rate-limit-reset-credits`,n??`primary`];return mx({mutationFn:n?i=>globalThis.CodexMuxWindows.consumeRateLimitReset(n,i):kdi,onSuccess:(n,i)=>{let{creditId:a}=i,o=n.code;if(o===`reset`||o===`already_redeemed`){let s=o===`reset`?n.credit?.id??a:a;e.setQueryData(r,e=>Qui(e,o,s))}Promise.all([t([`rate-limit-status`]),t(r)])}})}",
+  "selected_usage_replacement": "let y=globalThis.CodexMuxWindows?.selectedResetUsageWindows?.()??v;if(g!=null){",
+  "reset_header_replacement": "let ve=(0,gZ.jsxs)(iR,{children:[ge,_e,(0,gZ.jsx)(`codex-mux-reset-picker`,{})]});",
+  "profile_picker_anchor": "Qt=(0,$.jsxs)(ra,{ref:ge,header:ht,children:[Yt,Xt,Zt]})",
+  "profile_picker_replacement": "Qt=(0,$.jsxs)(ra,{ref:ge,header:ht,children:[(0,$.jsx)(`codex-mux-profile-picker`,{}),Yt,Xt,Zt]})",
+  "plugin_picker_anchor": "I=(0,D.jsx)(n,{title:O,subtitle:k,action:F,children:w})",
+  "plugin_picker_replacement": "I=(0,D.jsx)(n,{title:O,subtitle:k,action:F,children:(0,D.jsxs)(`div`,{className:`contents`,children:[(0,D.jsx)(`codex-mux-plugin-picker`,{}),w]})})"
+}

@@ -599,6 +599,15 @@ STORE_26_825_3734_RENDERER_PROFILE = json.loads(
     (ROOT / "scripts" / "windows_profiles" / "store-26.825.3734.json").read_text(encoding="utf-8")
 )
 
+# Reviewed against Microsoft Store 26.825.6671.0 on 2026-08-31.  This build
+# rolled the renderer aliases again and ships Codex CLI 0.151.0-alpha.7.2.
+# Structural discovery, the native provider probe, compact continuity, and
+# command-item visibility all passed before this exact hash was admitted to
+# the failover-capable profile list.
+STORE_26_825_6671_RENDERER_PROFILE = json.loads(
+    (ROOT / "scripts" / "windows_profiles" / "store-26.825.6671.json").read_text(encoding="utf-8")
+)
+
 LEGACY_RENDERER_PROFILE = {
     "profile_query_anchor": PROFILE_QUERY_ANCHOR,
     "profile_query_replacement": PROFILE_QUERY_REPLACEMENT,
@@ -631,6 +640,7 @@ WINDOWS_RENDERER_PROFILES = {
     "5df8bf5a9d30742919390ab11fa419e83aab0891152569a42c6ea4abf15386c2": STORE_26_820_7780_RENDERER_PROFILE,
     "e353c580ef4939d36f4ae32a35c896d089205c1d06b9f711cf78ffa4a3578a8a": STORE_26_820_9563_RENDERER_PROFILE,
     "c32dcc8424e50be2b5a22c80c196db5c8c71562fc13dc7b7e3b749ebb4806284": STORE_26_825_3734_RENDERER_PROFILE,
+    "86e791e0eb330a1507057d30e450878f7c958e56e04e718f101ba80549e9baf2": STORE_26_825_6671_RENDERER_PROFILE,
 }
 TESTED_ASAR_HASHES = set(WINDOWS_RENDERER_PROFILES)
 

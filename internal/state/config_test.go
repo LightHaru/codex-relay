@@ -139,6 +139,91 @@ func TestSyncConfigPreservesRelayProviderTableWhileCopyingManagedSettings(t *tes
 	}
 }
 
+func TestSyncIsolatedConfigDoesNotDuplicateRelayProviderWhenSourceIsTarget(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.toml")
+	input := strings.Join([]string{
+		"model = \"relay\"",
+		"model_provider = \"relay_pool\"",
+		"",
+		"[plugins.browser]",
+		"enabled = true",
+		"",
+		"[model_providers.relay_pool]",
+		"name = \"Codex Relay Pool\"",
+		"base_url = \"http://127.0.0.1:48123/v1\"",
+	}, "\n") + "\n"
+	if err := os.WriteFile(configPath, []byte(input), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for run := 0; run < 2; run++ {
+		if err := syncIsolatedConfig(root, root); err != nil {
+			t.Fatalf("sync run %d: %v", run+1, err)
+		}
+		contents, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(contents)
+		if got := strings.Count(text, "[model_providers.relay_pool]"); got != 1 {
+			t.Fatalf("sync run %d emitted %d Relay provider tables, want one:\n%s", run+1, got, text)
+		}
+		if got := strings.Count(text, `model_provider = "relay_pool"`); got != 1 {
+			t.Fatalf("sync run %d emitted %d Relay provider defaults, want one:\n%s", run+1, got, text)
+		}
+		if !strings.Contains(text, "[plugins.browser]") {
+			t.Fatalf("sync run %d dropped managed plugin settings:\n%s", run+1, text)
+		}
+	}
+}
+
+func TestSyncIsolatedConfigOmitsRelayDefaultForSecondaryWithoutProvider(t *testing.T) {
+	root := t.TempDir()
+	primaryHome := filepath.Join(root, "primary")
+	secondaryHome := filepath.Join(root, "secondary")
+	if err := os.MkdirAll(primaryHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(secondaryHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	primary := strings.Join([]string{
+		"model = \"relay\"",
+		"model_provider = \"relay_pool\"",
+		"",
+		"[plugins.browser]",
+		"enabled = true",
+		"",
+		"[model_providers.relay_pool]",
+		"name = \"Codex Relay Pool\"",
+		"base_url = \"http://127.0.0.1:48123/v1\"",
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(primaryHome, "config.toml"), []byte(primary), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(secondaryHome, "config.toml"), []byte("model = \"secondary\"\n[projects.\"C:\\\\work\"]\ntrust_level = \"trusted\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for run := 0; run < 2; run++ {
+		if err := syncIsolatedConfig(primaryHome, secondaryHome); err != nil {
+			t.Fatalf("sync run %d: %v", run+1, err)
+		}
+		contents, err := os.ReadFile(filepath.Join(secondaryHome, "config.toml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(contents)
+		if strings.Contains(text, `model_provider = "relay_pool"`) || strings.Contains(text, "[model_providers.relay_pool]") {
+			t.Fatalf("sync run %d leaked Relay provider into secondary config:\n%s", run+1, text)
+		}
+		if !strings.Contains(text, "[plugins.browser]") || !strings.Contains(text, "[projects.\"C:\\\\work\"]") {
+			t.Fatalf("sync run %d dropped managed or target settings:\n%s", run+1, text)
+		}
+	}
+}
+
 func TestEnsureRelayPoolProviderWritesAuthorityConfig(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "config.toml")

@@ -36,6 +36,7 @@ REQUIRED_FILES = (
     "scripts/bootstrap_windows.ps1",
     "scripts/windows_profiles/store-26.820.9563.json",
     "scripts/windows_profiles/store-26.825.3734.json",
+    "scripts/windows_profiles/store-26.825.6671.json",
     "ui/windows-router-update-main.js",
     "ui/windows-router-update-preload.js",
     "ui/test-windows-router-update-main.cjs",

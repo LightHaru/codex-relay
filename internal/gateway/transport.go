@@ -1474,33 +1474,13 @@ func (t *Transport) forwardStreamingSSE(writer http.ResponseWriter, response *ht
 							}
 						}
 						pendingTerminalEvents = nil
-						// response.output_item.done is a complete model output boundary.
-						// Some compatible upstream paths close immediately afterwards and
-						// omit only response.completed. Completing that already-delivered
-						// boundary does not replay the request or any tool side effect; it
-						// lets the native app-server continue its normal tool loop. Never do
-						// this when another unterminated frame had begun.
-						if hadTerminalCandidate && !remainingWasPartial {
-							debugStreamDecision("complete_after_output_item_boundary", remainingErr)
-							completionSequence := nextSSESequence(lastSequenceNumber, haveSequenceNumber)
-							_, _ = writer.Write(sanitizedCompletedSSE(completionSequence, responseID))
-							if flusher, ok := writer.(http.Flusher); ok {
-								flusher.Flush()
-							}
-							return lease, nil
-						}
-						// Closing/restarting the Relay renderer cancels the local
-						// app-server request and therefore the upstream HTTP context.
-						// That is an expected client lifecycle event, not an upstream
-						// stream failure. Persisting RECOVERY_REQUIRED here leaves a
-						// stale lease that the restarted app retries forever.
+						// Cancellation, an idle-recovery timeout, and transport resets
+						// are not clean completion signals. Check them before the EOF
+						// compatibility path below; otherwise a native cancellation
+						// arriving after response.output_item.done can be mistaken for
+						// an omitted response.completed event.
 						if responseRequestCanceled(response, remainingErr) {
-							// The native app-server can cancel its HTTP request when it
-							// sees the final output-item boundary but the provider has
-							// not sent response.completed yet. If that boundary is held
-							// here, finish the logical turn with Relay's terminal event
-							// before treating the cancellation as an ordinary user stop.
-							if len(pendingTerminalEvents) == 0 {
+							if !hadTerminalCandidate {
 								debugStreamDecision("client_canceled_after_output", remainingErr)
 								return lease, errClientStreamCanceled
 							}
@@ -1513,6 +1493,21 @@ func (t *Transport) forwardStreamingSSE(writer http.ResponseWriter, response *ht
 								flusher.Flush()
 							}
 							return lease, errCommittedStreamFailure
+						}
+						// response.output_item.done is a complete model output boundary.
+						// Some compatible upstream paths close immediately afterwards and
+						// omit only response.completed. Completing that already-delivered
+						// boundary does not replay the request or any tool side effect; it
+						// lets the native app-server continue its normal tool loop. Never do
+						// this when another unterminated frame had begun.
+						if errors.Is(remainingErr, io.EOF) && hadTerminalCandidate && !remainingWasPartial {
+							debugStreamDecision("complete_after_output_item_boundary", remainingErr)
+							completionSequence := nextSSESequence(lastSequenceNumber, haveSequenceNumber)
+							_, _ = writer.Write(sanitizedCompletedSSE(completionSequence, responseID))
+							if flusher, ok := writer.(http.Flusher); ok {
+								flusher.Flush()
+							}
+							return lease, nil
 						}
 						debugStreamDecision("recovery_terminal_after_output", remainingErr)
 						// Any EOF/reset after the commit boundary but before an

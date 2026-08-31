@@ -1238,6 +1238,46 @@ func TestForwardSSECanceledClientDoesNotMarkRecovery(t *testing.T) {
 	}
 }
 
+func TestForwardSSECanceledClientAfterOutputItemEmitsRecovery(t *testing.T) {
+	store, _ := gatewayTestStore(t, 1)
+	lease, err := store.AcquirePoolLease(state.PoolLease{
+		LeaseID: "output-item-cancel", LogicalTurnID: "output-item-cancel-turn", ThreadID: "output-item-cancel-thread",
+	}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://relay.invalid/v1/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := []byte("event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"sequence_number\":1,\"item\":{\"type\":\"function_call\",\"status\":\"completed\"}}\n\n")
+	response := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       &cancelAfterEventBody{reader: bytes.NewReader(event), cancel: cancel},
+		Request:    request,
+	}
+	recorder := httptest.NewRecorder()
+	transport := &Transport{Store: store}
+	_, streamErr := transport.forwardSSE(recorder, response, lease)
+	if !errors.Is(streamErr, errCommittedStreamFailure) {
+		t.Fatalf("stream error=%v, want committed stream failure", streamErr)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "response.failed") || !strings.Contains(body, "relay_pool_recovery_required") {
+		t.Fatalf("cancellation after output item did not emit sanitized recovery: %q", body)
+	}
+	if strings.Contains(body, "response.completed") {
+		t.Fatalf("cancellation after output item was synthesized as completed: %q", body)
+	}
+	current := store.PoolState().ActiveLeases[lease.LeaseID]
+	if current.State != state.PoolLeaseRecoveryRequired {
+		t.Fatalf("cancellation after output item did not mark recovery: %#v", current)
+	}
+}
+
 func TestTransportRetriesMessageOnlyStreamingUsageLimit(t *testing.T) {
 	store, ids := gatewayTestStore(t, 2)
 	var used []string

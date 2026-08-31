@@ -44,6 +44,7 @@ from patch_windows import (
     STORE_26_818_8289_RENDERER_PROFILE,
     STORE_26_820_7780_RENDERER_PROFILE,
     STORE_26_820_9563_RENDERER_PROFILE,
+    STORE_26_825_6671_RENDERER_PROFILE,
     STOP_ROUTER_PROCESSES_SCRIPT,
     USAGE_STATUS_ANCHOR,
     USAGE_STATUS_REPLACEMENT,
@@ -211,7 +212,7 @@ class WindowsRendererPatchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             assets = self.make_renderer(root, CURRENT_RENDERER_PROFILE)
-            self.assertEqual(len(WINDOWS_RENDERER_PROFILES), 10)
+            self.assertEqual(len(WINDOWS_RENDERER_PROFILES), 11)
             patch_windows_feature_bundles(root, CURRENT_RENDERER_PROFILE)
             self.assert_replacements(assets, CURRENT_RENDERER_PROFILE)
 
@@ -305,6 +306,21 @@ class WindowsRendererPatchTests(unittest.TestCase):
             current_hash = "e353c580ef4939d36f4ae32a35c896d089205c1d06b9f711cf78ffa4a3578a8a"
             self.assertEqual(
                 app_server_compatibility_profile(current_hash, STORE_26_820_9563_RENDERER_PROFILE),
+                f"windows-reviewed-{current_hash}",
+            )
+
+    def test_patches_the_store_26_825_6671_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            assets = self.make_renderer(root, STORE_26_825_6671_RENDERER_PROFILE)
+            patch_windows_feature_bundles(root, STORE_26_825_6671_RENDERER_PROFILE)
+            self.assert_replacements(assets, STORE_26_825_6671_RENDERER_PROFILE)
+            initial = next(assets.glob("app-initial-*.js")).read_text(encoding="utf-8")
+            self.assertIn("gZ.useSyncExternalStore", initial)
+            self.assertIn("CodexMuxWindows.consumeRateLimitReset", initial)
+            current_hash = "86e791e0eb330a1507057d30e450878f7c958e56e04e718f101ba80549e9baf2"
+            self.assertEqual(
+                app_server_compatibility_profile(current_hash, STORE_26_825_6671_RENDERER_PROFILE),
                 f"windows-reviewed-{current_hash}",
             )
 

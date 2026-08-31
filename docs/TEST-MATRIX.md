@@ -28,12 +28,15 @@ history contents or full account identity.
 | Nested output-item completion is not a Responses terminal | `TestUnifiedGatewayPostCommitIdleEmitsRecoverableTerminal`; terminal classifier regression | PASS |
 | Post-output truncated SSE never replays | `TestTransportDoesNotReplayTruncatedStreamAfterVisibleOutput` | PASS |
 | Post-output idle/canceled stream emits a recovery terminal and clean mux message | `TestTransportConvertsIdlePostCommitStreamToRecoveryTerminal`, `TestSanitizeRelayRecoveryNotificationRemovesNativeStreamPrefix` | PASS |
+| Post-output client cancellation never fabricates `response.completed` | `TestForwardSSECanceledClientAfterOutputItemEmitsRecovery` | PASS |
 | Temporary upstream 502 rotates without quota depletion | `TestTransportRetriesTemporaryHTTPBadGatewayAcrossSources` | PASS |
 | Transport cooldown remains separate from quota/auth | `TestRepeatedTransientFailuresOpenCooldownWithoutChangingQuota` | PASS |
 | All-source transient exhaustion clears lease and reports reference | `TestAllSourcesTransientFailureReturnsOneDiagnosticAndClearsLease` | PASS |
 | Tokens and arbitrary upstream errors are absent from responses | gateway and explainability sanitization tests | PASS |
 | Local bearer is required | `TestTransportRequiresItsLocalBearerToken` | PASS |
 | Unknown quota enters probation, not confirmed capacity | `TestPrimeCredentialSourcesUsesProbationWithoutGuessingQuota` | PASS |
+| Isolated config sync is idempotent and keeps one Relay provider table | `TestSyncIsolatedConfigDoesNotDuplicateRelayProviderWhenSourceIsTarget` | PASS |
+| Secondary management config does not inherit an undefined Relay provider | `TestSyncIsolatedConfigOmitsRelayDefaultForSecondaryWithoutProvider` | PASS |
 
 ## Local app-server E2E
 

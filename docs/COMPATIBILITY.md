@@ -140,10 +140,16 @@ hash must stop before a partial patch. Structural discovery may be used only in
 the explicitly documented test mode and still requires every semantic anchor
 exactly once.
 
-The current reviewed Windows source is Microsoft Store `26.825.3734.0`, with
-`app.asar` SHA-256 `c32dcc8424e50be2b5a22c80c196db5c8c71562fc13dc7b7e3b749ebb4806284`.
-Its exact renderer profile is pinned under `scripts/windows_profiles/`; the
-installer does not need the untested-source override for this build.
+The current reviewed Windows sources are Microsoft Store `26.825.3734.0`, with
+`app.asar` SHA-256 `c32dcc8424e50be2b5a22c80c196db5c8c71562fc13dc7b7e3b749ebb4806284`,
+and `26.825.6671.0`, with `app.asar` SHA-256
+`86e791e0eb330a1507057d30e450878f7c958e56e04e718f101ba80549e9baf2`.
+The latter ships Codex CLI `0.151.0-alpha.7.2`. Both exact renderer profiles
+are pinned under `scripts/windows_profiles/`; the installer does not need the
+untested-source override for either build. The 26.825.6671 profile was
+admitted only after exact-once structural discovery, the native provider
+probe, installed real-binary failover tests, and authorized live compact and
+command-visibility probes passed.
 
 The Unified Pool change is inserted through version-neutral Relay bridges, but
 the native Settings shell is still a compatibility surface. Every profile must
