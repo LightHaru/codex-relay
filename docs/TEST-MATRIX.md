@@ -79,7 +79,7 @@ it is not a real-quota test.
 | Goal continuation | live wrapper Goal set/get with matching objective and completed turn | PASS |
 | Tool/approval boundary | no replay after side effect; recovery marker if partial | LIVE PENDING |
 | All sources depleted | one pool-level error and no leaked identity | LIVE PENDING |
-| Live quota visibility for every enabled authenticated source | `probe_live_rate_limits.py`; 7/7 structured responses | PASS |
+| Live quota visibility for every enabled source home with credentials | `probe_live_rate_limits.py`; 7/7 structured responses | PASS |
 | Control readiness, aggregate snapshot, auth boundary, and SSE reconnect | live loopback control probe; two connect/close/reconnect cycles | PASS |
 | Official Codex preservation | official process remains open; installer scope is limited to Relay copy | PASS |
 
